@@ -193,86 +193,106 @@ func _build_relief(seed_val: int) -> void:
 			lv = 0
 		level[i] = lv
 
-	# обычные руды — пятнами по шуму (у каждой свой шум, побеждает самый сильный)
-	var common := [D.I_COAL_ORE, D.I_COPPER_ORE, D.I_IRON_ORE, D.I_QUARTZ]
-	var noises: Array = []
-	for k in common.size():
-		var nz := FastNoiseLite.new()
-		nz.seed = seed_val + 101 + k * 17
-		nz.frequency = 0.13
-		nz.fractal_type = FastNoiseLite.FRACTAL_NONE
-		noises.append(nz)
-	var ice_n := FastNoiseLite.new()
-	ice_n.seed = seed_val + 555
-	ice_n.frequency = 0.08
-	for i in cnt:
-		if level[i] >= D.MAX_LEVEL:
-			continue
-		var p := dirs[i] * D.PLANET_R
-		# лёд: полярные шапки и редкие озёра в низинах
-		var icy := ice_n.get_noise_3dv(p)
-		if (absf(dirs[i].y) > 0.88 and icy > 0.15) or (level[i] == 0 and icy > 0.6):
-			ore[i] = D.I_ICE
-			continue
-		var best := -1
-		var bv := 0.72   # высокий порог — пятна мелкие и редкие
-		for k in common.size():
-			var v: float = noises[k].get_noise_3dv(p)
-			if v > bv:
-				bv = v
-				best = k
-		if best >= 0:
-			ore[i] = common[best]
-
-	# редкие руды — немного маленьких кластеров вдали от баз
-	var rng := RandomNumberGenerator.new()
-	rng.seed = seed_val + 999
-	var rare := [[D.I_LEAD_ORE, 8], [D.I_URANIUM_ORE, 5], [D.I_HELIUM_ORE, 5]]
-	for pair in rare:
-		var placed := 0
-		var tries := 0
-		while placed < int(pair[1]) and tries < 500:
-			tries += 1
-			var c := rng.randi_range(0, cnt - 1)
-			if level[c] >= D.MAX_LEVEL:
-				continue
-			var far := true
-			for d in D.CORE_DIRS:
-				if dirs[c].angle_to(d) * D.PLANET_R < 60.0:
-					far = false
-			if not far:
-				continue
-			var r := rings(c, 1)
-			for x in r:
-				if level[x] < D.MAX_LEVEL and (x == c or rng.randf() < 0.6):
-					ore[x] = pair[0]
-			placed += 1
-
-	# площадки под ядра: ровно, на 3-м кольце гарантированно медь/железо/уголь/кварц,
-	# на 4-м — немного льда
-	var starter := [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ]
+	# площадки под ядра: ровные, без руды
 	for team in 2:
 		var cc := nearest_cell(D.CORE_DIRS[team])
 		core_center[team] = cc
 		var r := rings(cc, 4)
 		var spawn_set := false
-		var k := 0
 		for c in r:
 			var dist: int = r[c]
 			if dist <= 2:
 				level[c] = 1
-				ore[c] = D.I_NONE
 				if dist == 2 and not spawn_set:
 					spawn_cell[team] = c
 					spawn_set = true
-			elif dist == 3:
-				level[c] = mini(level[c], 2)
-				ore[c] = starter[(k / 3) % starter.size()] if k % 3 == 0 else D.I_NONE
-				k += 1
 			else:
 				level[c] = mini(level[c], 2)
-				if c % 12 == 0:
-					ore[c] = D.I_ICE
+
+	# руды — жилами: каждая жила одного типа, извилистая полоса 1–2 клетки шириной
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val + 999
+
+	# стартовые жилы у каждой базы: медь, железо, уголь, кварц уходят от ядра наружу
+	var starter := [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ]
+	for team in 2:
+		var cc: int = core_center[team]
+		var nb: PackedInt32Array = nbrs[cc]
+		for i in starter.size():
+			# старт на 3-м кольце, по разные стороны от ядра
+			var c := cc
+			var heading := dirs[nb[int(round(i * nb.size() / 4.0)) % nb.size()]] - dirs[cc]
+			for _s in 3:
+				c = _step(c, heading)
+			_vein(c, heading, starter[i], 6, 0.3, rng)
+
+	# жилы по всей планете: [тип, сколько жил, длина от, длина до, толщина, далеко от баз?]
+	var plan := [
+		[D.I_COPPER_ORE, 26, 8, 18, 0.35, false],
+		[D.I_IRON_ORE, 26, 8, 18, 0.35, false],
+		[D.I_COAL_ORE, 22, 8, 16, 0.35, false],
+		[D.I_QUARTZ, 18, 6, 14, 0.3, false],
+		[D.I_ICE, 14, 6, 14, 0.4, false],
+		[D.I_LEAD_ORE, 9, 4, 8, 0.15, true],      # редкие — короткие и тонкие
+		[D.I_URANIUM_ORE, 6, 3, 6, 0.1, true],
+		[D.I_HELIUM_ORE, 6, 3, 6, 0.1, true],
+	]
+	for row in plan:
+		var placed := 0
+		var tries := 0
+		while placed < int(row[1]) and tries < 400:
+			tries += 1
+			var c := rng.randi_range(0, cnt - 1)
+			if ore[c] != D.I_NONE or level[c] >= D.MAX_LEVEL:
+				continue
+			# у баз чисто; редкие — ещё дальше
+			var min_d := 70.0 if row[5] else 22.0
+			var ok := true
+			for d in D.CORE_DIRS:
+				if dirs[c].angle_to(d) * D.PLANET_R < min_d:
+					ok = false
+			# лёд чаще ближе к полюсам
+			if row[0] == D.I_ICE and absf(dirs[c].y) < 0.5 and rng.randf() < 0.7:
+				ok = false
+			if not ok:
+				continue
+			var nb: PackedInt32Array = nbrs[c]
+			var heading := dirs[nb[rng.randi_range(0, nb.size() - 1)]] - dirs[c]
+			_vein(c, heading, row[0], rng.randi_range(row[2], row[3]), row[4], rng)
+			placed += 1
+
+
+## Шаг на соседнюю клетку, которая ближе всего к направлению heading.
+func _step(c: int, heading: Vector3) -> int:
+	var nb: PackedInt32Array = nbrs[c]
+	var best := nb[0]
+	var bd := -INF
+	for x in nb:
+		var v := (dirs[x] - dirs[c]).normalized()
+		var d := v.dot(heading.normalized())
+		if d > bd:
+			bd = d
+			best = x
+	return best
+
+
+## Прокладывает жилу: идём от клетки c, слегка виляя, и помечаем руду.
+## thick — шанс прихватить соседнюю клетку (толщина жилы).
+func _vein(c: int, heading: Vector3, type: int, length: int, thick: float, rng: RandomNumberGenerator) -> void:
+	for i in length:
+		if level[c] < D.MAX_LEVEL and ore[c] == D.I_NONE:
+			ore[c] = type
+		if rng.randf() < thick:
+			var nb: PackedInt32Array = nbrs[c]
+			var side := nb[rng.randi_range(0, nb.size() - 1)]
+			if level[side] < D.MAX_LEVEL and ore[side] == D.I_NONE:
+				ore[side] = type
+		# поворачиваем направление чуть-чуть и переносим его в касательную плоскость
+		var up := dirs[c]
+		var wiggle := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1))
+		heading = heading.normalized() + (wiggle - up * wiggle.dot(up)) * 0.45
+		c = _step(c, heading)
+		heading = heading - dirs[c] * heading.dot(dirs[c])
 
 
 # ---------------------------------------------------------------------
