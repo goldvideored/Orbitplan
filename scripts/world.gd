@@ -6,7 +6,7 @@ extends Node3D
 const D = preload("res://scripts/defs.gd")
 const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
-const Sky = preload("res://scripts/sky.gd")
+const SkyCalc = preload("res://scripts/sky.gd")
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const NO_CELL := -1
@@ -435,7 +435,7 @@ func _process(delta: float) -> void:
 
 
 func _sim_tick() -> void:
-	var sky := Sky.state(world_time)
+	var sky := SkyCalc.state(world_time)
 	var prod := [0.0, 0.0]
 	var demand := [0.0, 0.0]
 	var list: Array = buildings.values()
@@ -445,7 +445,7 @@ func _sim_tick() -> void:
 		var t: int = b.type
 		var team: int = b.team
 		if t == D.SOLAR:
-			var lvl := Sky.level_at(planet.dirs[b.cell], sky)
+			var lvl := SkyCalc.level_at(planet.dirs[b.cell], sky)
 			prod[team] += D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
 		elif t == D.COAL_PLANT:
 			if b.burn <= 0 and _buf_take(b, D.I_COAL, 1):
@@ -1301,7 +1301,7 @@ func _update_client(delta: float) -> void:
 ## планета вращается вокруг наклонённой оси и летит по орбите вокруг гиганта,
 ## поэтому для нас движутся солнце, гигант и звёзды.
 func _update_sky() -> void:
-	var st := Sky.state(world_time)
+	var st := SkyCalc.state(world_time)
 	sky_state = st
 	var sun: Vector3 = st.sun
 	var gdir: Vector3 = st.gdir
@@ -1329,7 +1329,7 @@ func _update_flashlight() -> void:
 func light_level_at(pos: Vector3) -> int:
 	if sky_state.is_empty():
 		return 0
-	return Sky.level_at(pos.normalized(), sky_state)
+	return SkyCalc.level_at(pos.normalized(), sky_state)
 
 
 func _update_units() -> void:
