@@ -81,6 +81,8 @@ const FUEL_SYNTH := 15
 const LOADER := 16        # точка погрузки: принимает с конвейеров, тут живёт ровер
 const UNLOADER := 17      # точка выгрузки: ровер привозит выбранный груз
 const CHIP_FACTORY := 18  # завод микросхем
+const TURRET2 := 19       # пулемётная турель (свинец)
+const TURRET3 := 20       # артиллерия (свинец или уран, взрыв)
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -89,7 +91,8 @@ const NAMES := {
 	SOLAR: "Солнечная панель", COAL_PLANT: "Угольная ТЭС", NUCLEAR: "АЭС",
 	SMELTER: "Плавильня", CRUSHER: "Дробилка", MELTER: "Растопитель",
 	CENTRIFUGE: "Центрифуга", FUEL_SYNTH: "Синтезатор топлива",
-	TURRET: "Турель", ASSEMBLER: "Сборщик юнитов",
+	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
+	ASSEMBLER: "Сборщик юнитов",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
@@ -106,7 +109,9 @@ const DESC := {
 	MELTER: "лёд -> вода (выход в трубы). 30 энергии",
 	CENTRIFUGE: "4 урановой руды -> уран. 200 энергии",
 	FUEL_SYNTH: "2 гелиевого реголита + 2 воды -> топливо. 150 энергии",
-	TURRET: "стреляет по вражеским юнитам",
+	TURRET: "лазер на 6 клеток, без энергии и боеприпасов",
+	TURRET2: "пули на 10 клеток, свинец с конвейера (1 свинец = 4 пули)",
+	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "железо -> боевой юнит",
 	LOADER: "принимает грузы с конвейеров, ровер развозит их по точкам выгрузки",
 	UNLOADER: "ровер привозит сюда выбранный груз (E — выбрать), выдаёт на конвейеры",
@@ -128,6 +133,8 @@ const COST := {
 	CENTRIFUGE: {I_IRON: 60, I_SILICON: 30, I_LEAD: 20},
 	FUEL_SYNTH: {I_IRON: 50, I_SILICON: 40, I_LEAD: 20},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
+	TURRET2: {I_IRON: 40, I_LEAD: 15, I_CHIP: 5},
+	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
@@ -137,12 +144,12 @@ const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300,
+	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
-	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3,
+	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9,
 }
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
 const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
@@ -154,7 +161,7 @@ const CATEGORIES := [
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER]],
-	["Оборона", [TURRET, ASSEMBLER]],
+	["Оборона", [TURRET, TURRET2, TURRET3, ASSEMBLER]],
 ]
 
 # ---------------------------------------------------------------------
@@ -229,9 +236,33 @@ const UNIT_AGGRO := 7.0
 const UNIT_DMG := 6
 const UNIT_CD := 6
 
-const TURRET_RANGE := 9.0
-const TURRET_DMG := 8
-const TURRET_CD := 4
+const CELL_M := 1.9            # примерная ширина клетки, м (для дальностей «в клетках»)
+
+# I — лазер: мгновенный луч
+const TURRET_RANGE := 6 * CELL_M
+const TURRET_DMG := 7
+const TURRET_CD := 5           # тиков между выстрелами
+
+# II — пулемёт: пули с баллистикой
+const T2_RANGE := 10 * CELL_M
+const T2_DMG := 9
+const T2_CD := 2
+const T2_SPEED := 45.0         # м/с
+const T2_SHOTS_PER_LEAD := 4
+const T2_AMMO_CAP := 20
+
+# III — артиллерия: навесной снаряд со взрывом
+const T3_RANGE := 50 * CELL_M
+const T3_SPLASH := 10 * CELL_M
+const T3_DMG := 60             # в центре взрыва, к краю — 20%
+const T3_CD := 40
+const T3_SPEED := 33.5         # м/с: на этой планете даёт ~104 м — с запасом на 50 клеток
+const T3_AMMO_CAP := 10
+
+const POISON_TICKS := 20       # облучение ураном: 2 с
+const POISON_DMG := 1          # урона за тик
+const PROJ_G := 15.0           # гравитация для снарядов, м/с² (с 6 м/с² снаряд ушёл бы на орбиту)
+const PROJ_DT := 0.025         # шаг физики снаряда, с
 
 # ---------------------------------------------------------------------
 # Персонаж

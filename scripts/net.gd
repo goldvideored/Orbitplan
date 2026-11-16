@@ -15,6 +15,7 @@ var ready_peers: Array = []  # удалённые пиры, у которых Wo
 var world: Node = null
 var seed_val := 0
 var dedicated := false
+var creative := false        # креатив: бесконечные ресурсы
 
 
 func _ready() -> void:
@@ -32,10 +33,12 @@ func _ready() -> void:
 		for a in args:
 			if a.begins_with("--port="):
 				port = int(a.substr(7))
+		creative = "--creative" in args
 		start_dedicated.call_deferred(port)
 
 
-func host(port: int) -> void:
+func host(port: int, creative_on := false) -> void:
+	creative = creative_on
 	var p := ENetMultiplayerPeer.new()
 	if p.create_server(port, MAX_CLIENTS) != OK:
 		status.emit("Не удалось открыть порт %d" % port)
@@ -55,7 +58,7 @@ func start_dedicated(port: int) -> void:
 	multiplayer.multiplayer_peer = p
 	seed_val = randi()
 	_create_world(seed_val, -1)
-	print("[server] Выделенный сервер запущен на порту %d" % port)
+	print("[server] Выделенный сервер запущен на порту %d%s" % [port, " (КРЕАТИВ)" if creative else ""])
 
 
 func join(ip: String, port: int) -> void:
@@ -93,7 +96,7 @@ func _create_world(s: int, team: int) -> void:
 	var w := World.new()
 	w.name = "World"
 	get_tree().root.add_child(w)
-	w.setup(s, team, multiplayer.is_server(), dedicated)
+	w.setup(s, team, multiplayer.is_server(), dedicated, creative)
 	world = w
 	game_started.emit()
 
@@ -107,7 +110,7 @@ func _on_peer_connected(id: int) -> void:
 	peer_team[id] = team
 	if dedicated:
 		print("[server] Игрок %d подключился, команда %d" % [id, team])
-	start_game.rpc_id(id, seed_val, team)
+	start_game.rpc_id(id, seed_val, team, creative)
 
 
 func _on_peer_disconnected(id: int) -> void:
@@ -141,8 +144,9 @@ func _on_server_gone() -> void:
 # ---------- RPC ----------
 
 @rpc("authority", "call_remote", "reliable")
-func start_game(s: int, team: int) -> void:
+func start_game(s: int, team: int, creative_on: bool) -> void:
 	seed_val = s
+	creative = creative_on
 	_create_world(s, team)
 	client_ready.rpc_id(1)
 

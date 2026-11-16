@@ -30,7 +30,7 @@ const IND_H := {
 	D.CORE: 2.4, D.DRILL: 1.75, D.DRILL2: 2.3, D.DRILL3: 2.6, D.SOLAR: 0.95,
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
-	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45,
+	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
 }
 
 var my_team := 0
@@ -54,6 +54,8 @@ var tick_acc := 0.0
 var players := {}       # peer_id -> {team, pos, fwd, hp, dead_t, last_shot}
 var power_dirty := true # пересобрать энергосети (после стройки/сноса)
 var rovers: Array = []  # {id, team, home, dir, cell, fwd, state, cargo_item, cargo_n, target}
+var projectiles: Array = []   # {pos, vel, team, kind (0 пуля, 1 снаряд-свинец, 2 снаряд-уран), dmg, ttl, cell}
+var creative := false         # бесконечные ресурсы и боеприпасы
 var next_rover_id := 1
 var power_root := {}    # id постройки -> id корня её энергосети
 var power_has_gen := {} # корень -> есть ли в сети генератор
@@ -89,6 +91,11 @@ var item_radial: RadialMenu    # меню выбора груза для точ�
 var filter_cell := NO_CELL
 var cur_rovers: Array = []
 var rover_nodes := {}          # id ровера -> Node3D
+var mm_proj: MultiMesh
+var proj_pos := PackedVector3Array()
+var proj_vel := PackedVector3Array()
+var proj_kind := PackedByteArray()
+var proj_time := 0.0
 var mm_units: MultiMesh
 var hud: Label
 var big_msg: Label
@@ -122,7 +129,8 @@ var flash_on := false
 var sky_state := {}
 
 
-func setup(seed_val: int, team: int, server: bool, dedicated: bool) -> void:
+func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on := false) -> void:
+	creative = creative_on
 	my_team = team
 	is_server = server
 	headless = dedicated
@@ -231,6 +239,8 @@ func _is_drill(t: int) -> bool:
 
 
 func _can_afford(team: int, type: int) -> bool:
+	if creative:
+		return true
 	var st: Dictionary = storage[team]
 	var cost: Dictionary = D.COST[type]
 	for it in cost:
@@ -338,10 +348,11 @@ func server_place(team: int, type: int, cell: int, dir: int) -> void:
 	dir = posmod(dir, nb0.size())
 	if not _can_place(team, type, cell, dir):
 		return
-	var st: Dictionary = storage[team]
-	var cost: Dictionary = D.COST[type]
-	for it in cost:
-		st[it] = int(st.get(it, 0)) - int(cost[it])
+	if not creative:
+		var st: Dictionary = storage[team]
+		var cost: Dictionary = D.COST[type]
+		for it in cost:
+			st[it] = int(st.get(it, 0)) - int(cost[it])
 	var nb: PackedInt32Array = planet.nbrs[cell]
 	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size())}
 	_add_building(d)
@@ -610,7 +621,18 @@ func _status(b: Dictionary) -> Array:
 			return [ST_OK, "склад принимает всё переработанное"]
 		return [ST_SLOW, "склад полон: " + ", ".join(full)]
 	if t == D.TURRET:
-		return [ST_OK, "в строю"]
+		return [ST_OK, "в строю, лазер %d клеток" % int(round(D.TURRET_RANGE / D.CELL_M))]
+	if t == D.TURRET2:
+		var lead := int(b.buf.get(D.I_LEAD, 0))
+		if not creative and lead <= 0 and int(b.get("ammo", 0)) <= 0:
+			return [ST_STOP, "нет свинца"]
+		return [ST_OK, "свинец %d" % lead if not creative else "боеприпасы бесконечны"]
+	if t == D.TURRET3:
+		var lead := int(b.buf.get(D.I_LEAD, 0))
+		var ur := int(b.buf.get(D.I_URANIUM, 0))
+		if not creative and lead + ur <= 0:
+			return [ST_STOP, "нет снарядов (свинец или уран)"]
+		return [ST_OK, "снаряды: свинец %d, уран %d" % [lead, ur] if not creative else "боеприпасы бесконечны"]
 	if t == D.CONVEYOR or t == D.PIPE:
 		return [ST_OK, "везёт: " + D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"]
 	if _is_drill(t):
@@ -714,6 +736,28 @@ func _buf_text(buf: Dictionary) -> String:
 @rpc("authority", "call_remote", "unreliable")
 func fx_shot(from: Vector3, to: Vector3) -> void:
 	_tracer(from, to)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func proj_snap(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteArray) -> void:
+	_apply_proj(pp, pv, pk)
+
+
+func _apply_proj(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteArray) -> void:
+	proj_pos = pp
+	proj_vel = pv
+	proj_kind = pk
+	proj_time = 0.0
+
+
+@rpc("authority", "call_remote", "unreliable")
+func fx_beam(from: Vector3, to: Vector3, kind: int) -> void:
+	_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
+
+
+@rpc("authority", "call_remote", "unreliable")
+func fx_boom(at: Vector3, r: float, uranium: bool) -> void:
+	_boom(at, r, uranium)
 
 
 # =====================================================================
@@ -854,11 +898,16 @@ func _sim_tick() -> void:
 				b.timer = D.UNIT_BUILD_TICKS
 		elif t == D.TURRET:
 			_turret_tick(b)
+		elif t == D.TURRET2:
+			_turret2_tick(b)
+		elif t == D.TURRET3:
+			_turret3_tick(b)
 		elif t == D.UNLOADER:
 			_unloader_tick(b)
 	_players_tick()
 	_units_tick()
 	_rovers_tick()
+	_proj_tick()
 	state_acc += 1
 	if state_acc >= 5:
 		state_acc = 0
@@ -1100,6 +1149,12 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return item == D.I_WATER and o.water < D.BUFFER_CAP
 	if t == D.ASSEMBLER:
 		return item == D.I_IRON and o.store < D.UNIT_COST * 3
+	if t == D.TURRET2:
+		return item == D.I_LEAD and int(buf.get(item, 0)) < D.T2_AMMO_CAP
+	if t == D.TURRET3:
+		if item != D.I_LEAD and item != D.I_URANIUM:
+			return false
+		return int(buf.get(D.I_LEAD, 0)) + int(buf.get(D.I_URANIUM, 0)) < D.T3_AMMO_CAP
 	if t == D.LOADER:
 		if item == D.I_WATER:
 			return false
@@ -1149,31 +1204,311 @@ func _push(cell: int, src_id: int, team: int, item: int) -> bool:
 	return true
 
 
+## Ближайшая вражеская цель в радиусе: юнит, игрок или (для артиллерии) постройка.
+## Возвращает {pos, unit, pid, bld} или пустой словарь.
+func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool) -> Dictionary:
+	var best := {}
+	var bd := rng
+	for u in units:
+		if u.team == team or u.hp <= 0:
+			continue
+		var p := _upos(u)
+		var d := from.distance_to(p)
+		if d < bd:
+			bd = d
+			best = {"pos": p, "unit": u, "pid": -1, "bld": null}
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == team or o.hp <= 0:
+			continue
+		var pp: Vector3 = o.pos
+		var p := pp + pp.normalized() * 0.9
+		var d := from.distance_to(p)
+		if d < bd:
+			bd = d
+			best = {"pos": p, "unit": null, "pid": pid, "bld": null}
+	if with_buildings:
+		for b in buildings.values():
+			if b.team == team:
+				continue
+			var p := _bpos(b)
+			var d := from.distance_to(p)
+			if d < bd:
+				bd = d
+				best = {"pos": p, "unit": null, "pid": -1, "bld": b}
+	return best
+
+
+func _hit_target(tgt: Dictionary, dmg: int) -> void:
+	if tgt.unit != null:
+		tgt.unit.hp -= dmg
+	elif tgt.pid != -1:
+		_damage_player(tgt.pid, dmg)
+	elif tgt.bld != null and buildings.has(tgt.bld.id):
+		_damage_building(tgt.bld, dmg)
+
+
+## Откуда стреляет турель (над центром её контура).
+func _muzzle(b: Dictionary, h: float) -> Vector3:
+	var c := _foot_center(b.cells)
+	return c + c.normalized() * h
+
+
+## I — лазер: мгновенное попадание, без энергии и боеприпасов.
 func _turret_tick(b: Dictionary) -> void:
 	if b.timer > 0:
 		b.timer -= 1
 		return
-	var c := _bpos(b) + planet.dirs[b.cell] * 0.5
-	var best = null
-	var bd: float = D.TURRET_RANGE
+	var from := _muzzle(b, 0.8)
+	var tgt := _find_target(b.team, from, D.TURRET_RANGE, false)
+	if tgt.is_empty():
+		return
+	_hit_target(tgt, D.TURRET_DMG)
+	b.timer = D.TURRET_CD
+	_fx_beam(from, tgt.pos, 1)
+
+
+## II — пулемёт: пули с баллистикой, 1 свинец = несколько пуль.
+func _turret2_tick(b: Dictionary) -> void:
+	if b.timer > 0:
+		b.timer -= 1
+		return
+	if not creative and int(b.get("ammo", 0)) <= 0:
+		if not _buf_take(b, D.I_LEAD, 1):
+			return
+		b["ammo"] = D.T2_SHOTS_PER_LEAD
+	var from := _muzzle(b, 1.3)
+	var tgt := _find_target(b.team, from, D.T2_RANGE, false)
+	if tgt.is_empty():
+		return
+	var vel := _aim(from, tgt.pos, D.T2_SPEED, 1.0)
+	if vel == Vector3.ZERO:
+		return
+	_spawn_proj(from, vel, b.team, 0, D.T2_DMG, 1.2, b.cell)
+	if not creative:
+		b["ammo"] = int(b.ammo) - 1
+	b.timer = D.T2_CD
+
+
+## III — артиллерия: навесной снаряд со взрывом. Уран — с облучением.
+func _turret3_tick(b: Dictionary) -> void:
+	if b.timer > 0:
+		b.timer -= 1
+		return
+	var has_u := int(b.buf.get(D.I_URANIUM, 0)) > 0
+	var has_pb := int(b.buf.get(D.I_LEAD, 0)) > 0
+	if not creative and not has_u and not has_pb:
+		return
+	var from := _muzzle(b, 2.5)
+	var tgt := _find_target(b.team, from, D.T3_RANGE, true)
+	if tgt.is_empty():
+		return
+	var vel := _aim(from, tgt.pos, D.T3_SPEED, 6.0, true)
+	if vel == Vector3.ZERO:
+		return
+	var kind := 2 if has_u else 1
+	if not creative:
+		_buf_take(b, D.I_URANIUM if has_u else D.I_LEAD, 1)
+	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell)
+	b.timer = D.T3_CD
+
+
+## Подбор угла возвышения: снаряд летит с гравитацией к центру планеты, планета круглая,
+## поэтому прогоняем траекторию численно и ищем угол с наименьшим промахом.
+## Возвращает вектор начальной скорости или Vector3.ZERO, если не достать.
+func _aim(from: Vector3, target: Vector3, speed: float, tmax: float, high := false) -> Vector3:
+	var up := from.normalized()
+	var h := target - from
+	h = h - up * h.dot(up)
+	if h.length() < 0.001:
+		return Vector3.ZERO
+	h = h.normalized()
+	if high:
+		return _aim_high(from, h, up, target, speed, tmax)
+	var direct := (target - from).normalized()
+	var th0 := asin(clampf(direct.dot(up), -1.0, 1.0))
+	var lo := th0 - 0.3
+	var hi := minf(th0 + 1.2, 1.5)
+	var best_th := th0
+	var best_d := INF
+	for i in 25:
+		var th := lerpf(lo, hi, float(i) / 24.0)
+		var d := _miss(from, h, up, th, speed, target, tmax)
+		if d < best_d:
+			best_d = d
+			best_th = th
+	var step := (hi - lo) / 24.0
+	for k in 6:
+		step *= 0.5
+		for th in [best_th - step, best_th + step]:
+			var d := _miss(from, h, up, th, speed, target, tmax)
+			if d < best_d:
+				best_d = d
+				best_th = th
+	if best_d > 2.0:
+		return Vector3.ZERO
+	return (h * cos(best_th) + up * sin(best_th)) * speed
+
+
+## Навесная стрельба: перебираем углы сверху вниз, первый подходящий — самая высокая дуга.
+func _aim_high(from: Vector3, h: Vector3, up: Vector3, target: Vector3, speed: float, tmax: float) -> Vector3:
+	var lo := -0.3
+	var hi := 1.45
+	var n := 36
+	var best_th := 0.0
+	var best_d := INF
+	for i in range(n, -1, -1):
+		var th := lerpf(lo, hi, float(i) / n)
+		var d := _miss(from, h, up, th, speed, target, tmax, false)
+		if d < 3.0:
+			best_th = th
+			best_d = d
+			break
+	if best_d == INF:
+		return Vector3.ZERO
+	var step := (hi - lo) / n
+	for k in 6:
+		step *= 0.5
+		for th in [best_th - step, best_th + step]:
+			var d := _miss(from, h, up, th, speed, target, tmax, false)
+			if d < best_d:
+				best_d = d
+				best_th = th
+	if best_d > 2.0:
+		return Vector3.ZERO
+	return (h * cos(best_th) + up * sin(best_th)) * speed
+
+
+## Насколько близко пройдёт снаряд от цели при угле th.
+## early — прекращать, когда снаряд начал удаляться (для прямой наводки; навесом он сначала уходит вверх).
+func _miss(from: Vector3, h: Vector3, up: Vector3, th: float, speed: float, target: Vector3, tmax: float,
+		early := true) -> float:
+	var p := from
+	var v := (h * cos(th) + up * sin(th)) * speed
+	var t := 0.0
+	var best := INF
+	while t < tmax:
+		v -= p.normalized() * D.PROJ_G * D.PROJ_DT
+		p += v * D.PROJ_DT
+		t += D.PROJ_DT
+		var d := p.distance_to(target)
+		if d < best:
+			best = d
+		elif early and d > best + 5.0:
+			break   # уже удаляемся
+		if p.length() < D.PLANET_R - 1.0:
+			break   # ушёл под землю
+	return best
+
+
+func _spawn_proj(from: Vector3, vel: Vector3, team: int, kind: int, dmg: int, ttl: float, cell: int) -> void:
+	projectiles.append({"pos": from, "vel": vel, "team": team, "kind": kind, "dmg": dmg,
+		"ttl": ttl, "cell": planet.walk(cell, from.normalized())})
+
+
+## Полёт снарядов: несколько шагов физики за тик, пули бьют при касании, снаряды взрываются о землю.
+func _proj_tick() -> void:
+	var steps := int(round(D.TICK / D.PROJ_DT))
+	for pr in projectiles:
+		var alive := true
+		for s_i in steps:
+			var a: Vector3 = pr.pos
+			var v: Vector3 = pr.vel
+			v -= a.normalized() * D.PROJ_G * D.PROJ_DT
+			var b := a + v * D.PROJ_DT
+			pr.vel = v
+			pr.pos = b
+			pr.ttl -= D.PROJ_DT
+			if pr.kind == 0 and _bullet_hit(pr, a, b):
+				alive = false
+				break
+			pr.cell = planet.walk(pr.cell, b.normalized())
+			if b.length() < planet.top_r(pr.cell):
+				if pr.kind != 0:
+					_explode(b, pr.team, pr.kind == 2)
+				alive = false
+				break
+		if alive and pr.ttl <= 0.0:
+			if pr.kind != 0:
+				_explode(pr.pos, pr.team, pr.kind == 2)
+			alive = false
+		pr["dead"] = not alive
+	projectiles = projectiles.filter(func(x): return not x.dead)
+
+
+## Пуля задела врага на отрезке a→b?
+func _bullet_hit(pr: Dictionary, a: Vector3, b: Vector3) -> bool:
 	for u in units:
-		if u.team != b.team and u.hp > 0:
-			var d: float = c.distance_to(_upos(u))
-			if d < bd:
-				bd = d
-				best = u
-	if best != null:
-		best.hp -= D.TURRET_DMG
-		b.timer = D.TURRET_CD
-		if not headless:
-			_tracer(c, _upos(best))
+		if u.team == pr.team or u.hp <= 0:
+			continue
+		if _seg_dist(a, b, _upos(u)) < 0.5:
+			u.hp -= pr.dmg
+			return true
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == pr.team or o.hp <= 0:
+			continue
+		var pp: Vector3 = o.pos
+		var c := pp + pp.normalized() * 0.9
+		if _seg_dist(a, b, c) < 0.6:
+			_damage_player(pid, pr.dmg)
+			return true
+	return false
+
+
+func _seg_dist(a: Vector3, b: Vector3, c: Vector3) -> float:
+	var ab := b - a
+	var t := clampf((c - a).dot(ab) / maxf(ab.length_squared(), 0.000001), 0.0, 1.0)
+	return (a + ab * t).distance_to(c)
+
+
+## Взрыв: урон врагам в радиусе (в центре 100%, к краю 20%). Уран — облучение на 2 с.
+func _explode(at: Vector3, team: int, uranium: bool) -> void:
+	var r: float = D.T3_SPLASH
+	for u in units:
+		if u.team == team or u.hp <= 0:
+			continue
+		var d := at.distance_to(_upos(u))
+		if d < r:
+			u.hp -= int(D.T3_DMG * lerpf(1.0, 0.2, d / r))
+			if uranium:
+				u.poison = D.POISON_TICKS
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == team or o.hp <= 0:
+			continue
+		var d := at.distance_to(o.pos)
+		if d < r:
+			_damage_player(pid, int(D.T3_DMG * lerpf(1.0, 0.2, d / r)))
+			if uranium:
+				o["poison"] = D.POISON_TICKS
+	for b in buildings.values():
+		if b.team == team or not buildings.has(b.id):
+			continue
+		var d := at.distance_to(_bpos(b))
+		if d < r:
+			_damage_building(b, int(D.T3_DMG * lerpf(1.0, 0.2, d / r)))
+			if finished:
+				break
+	for p in Net.ready_peers:
+		fx_boom.rpc_id(p, at, r, uranium)
+	if not headless:
+		_boom(at, r, uranium)
+
+
+func _fx_beam(from: Vector3, to: Vector3, kind: int) -> void:
+	for p in Net.ready_peers:
+		fx_beam.rpc_id(p, from, to, kind)
+	if not headless:
+		_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
 
 
 func _spawn_unit(team: int, cell: int) -> void:
 	var d: Vector3 = planet.dirs[cell]
 	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.01
 	d = (d + jitter).normalized()
-	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": D.UNIT_HP, "cd": 0})
+	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": D.UNIT_HP, "cd": 0,
+		"poison": 0})
 	next_unit_id += 1
 
 
@@ -1184,6 +1519,9 @@ func _players_tick() -> void:
 			continue
 		var o: Dictionary = players[pid]
 		if o.hp > 0:
+			if int(o.get("poison", 0)) > 0:
+				o.poison -= 1
+				_damage_player(pid, D.POISON_DMG)
 			continue
 		o.dead_t -= 1
 		if o.dead_t <= 0:
@@ -1198,6 +1536,9 @@ func _players_tick() -> void:
 
 func _units_tick() -> void:
 	for u in units:
+		if int(u.get("poison", 0)) > 0:
+			u.poison -= 1
+			u.hp -= D.POISON_DMG   # облучение ураном
 		if u.hp <= 0:
 			continue
 		if u.cd > 0:
@@ -1319,13 +1660,22 @@ func _send_snapshot() -> void:
 	for pid in players:
 		var o: Dictionary = players[pid]
 		pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
+	var pp := PackedVector3Array()
+	var pv := PackedVector3Array()
+	var pk := PackedByteArray()
+	for pr in projectiles:
+		pp.append(pr.pos)
+		pv.append(pr.vel)
+		pk.append(pr.kind)
 	var rv: Array = []
 	for r in rovers:
 		rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
 	for p in Net.ready_peers:
 		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, rv, world_time)
+		proj_snap.rpc_id(p, pp, pv, pk)
 	if not headless:
 		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats, rv)
+		_apply_proj(pp, pv, pk)
 
 
 # =====================================================================
@@ -1434,6 +1784,26 @@ func _build_scene() -> void:
 	add_child(items_mmi)
 
 	# юниты
+	# снаряды: светящиеся шарики, между снапшотами летят сами по баллистике
+	mm_proj = MultiMesh.new()
+	mm_proj.transform_format = MultiMesh.TRANSFORM_3D
+	mm_proj.use_colors = true
+	mm_proj.instance_count = 2048
+	mm_proj.visible_instance_count = 0
+	var psph := SphereMesh.new()
+	psph.radius = 0.14
+	psph.height = 0.28
+	psph.radial_segments = 6
+	psph.rings = 3
+	var pmat := StandardMaterial3D.new()
+	pmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	pmat.vertex_color_use_as_albedo = true
+	psph.material = pmat
+	mm_proj.mesh = psph
+	var proj_mmi := MultiMeshInstance3D.new()
+	proj_mmi.multimesh = mm_proj
+	add_child(proj_mmi)
+
 	mm_units = MultiMesh.new()
 	mm_units.transform_format = MultiMesh.TRANSFORM_3D
 	mm_units.use_colors = true
@@ -1782,6 +2152,19 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	elif t == D.TURRET:
 		_cyl(n, 0.55, 0.6, Vector3(0, 0.3, 0), col.darkened(0.35))
 		_box(n, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0.75, 0), Color(0.75, 0.75, 0.8))
+		_box(n, Vector3(0.08, 0.12, 0.12), Vector3(0.92, 0.75, 0), Color(1.0, 0.25, 0.2), true)   # линза лазера
+	elif t == D.TURRET2:
+		_box(n, Vector3(1.0, 0.5, 1.0), Vector3(0, 0.25, 0), col.darkened(0.35))
+		_box(n, Vector3(0.6, 0.35, 0.6), Vector3(0, 0.68, 0), Color(0.5, 0.52, 0.56))
+		for sz in [-0.12, 0.12]:
+			_box(n, Vector3(0.75, 0.08, 0.08), Vector3(0.6, 0.72, sz), Color(0.25, 0.25, 0.28))
+		_box(n, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, 0.6, 0), Color(0.55, 0.55, 0.75))   # короб со свинцом
+	elif t == D.TURRET3:
+		_cyl(n, 0.65, 0.5, Vector3(0, 0.25, 0), col.darkened(0.35))
+		_box(n, Vector3(0.8, 0.55, 0.7), Vector3(0, 0.75, 0), Color(0.45, 0.47, 0.42))
+		var barrel := _box(n, Vector3(1.5, 0.16, 0.16), Vector3(0.6, 1.15, 0), Color(0.3, 0.31, 0.3))
+		barrel.rotation_degrees = Vector3(0, 0, 25)
+		_box(n, Vector3(0.08, 0.18, 0.18), Vector3(1.3, 1.48, 0), Color(1.0, 0.55, 0.2), true)
 	# метка команды — маленький огонёк, чтобы своё было видно ночью
 	if t != D.CONVEYOR and t != D.PIPE:
 		_box(n, Vector3(0.15, 0.15, 0.15), Vector3(-0.5, 0.15, -0.5), col, true)
@@ -1877,6 +2260,7 @@ func _update_client(delta: float) -> void:
 	_update_items()
 	_update_players(delta)
 	_update_rovers(delta)
+	_update_proj(delta)
 
 	# стрельба
 	fire_cd -= delta
@@ -2088,6 +2472,26 @@ func _update_players(delta: float) -> void:
 			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
 
 
+func _update_proj(delta: float) -> void:
+	proj_time += delta
+	var t := proj_time
+	var n := mini(proj_pos.size(), mm_proj.instance_count)
+	for i in n:
+		var p0 := proj_pos[i]
+		var v0 := proj_vel[i] if i < proj_vel.size() else Vector3.ZERO
+		var p := p0 + v0 * t - p0.normalized() * (0.5 * D.PROJ_G * t * t)
+		var k := int(proj_kind[i]) if i < proj_kind.size() else 0
+		var sc := 1.0 if k == 0 else 2.0
+		mm_proj.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * sc), p))
+		var col := Color(1.0, 0.9, 0.4)
+		if k == 1:
+			col = Color(1.0, 0.55, 0.2)
+		elif k == 2:
+			col = Color(0.45, 1.0, 0.3)
+		mm_proj.set_instance_color(i, col)
+	mm_proj.visible_instance_count = n
+
+
 func _update_rovers(delta: float) -> void:
 	var seen := {}
 	var k := minf(1.0, delta * 12.0)
@@ -2272,11 +2676,41 @@ func _fire() -> void:
 		req_shoot.rpc_id(1, from, dir)
 
 
-func _tracer(a: Vector3, b: Vector3) -> void:
+## Вспышка взрыва: светящийся шар быстро раздувается и гаснет.
+func _boom(at: Vector3, r: float, uranium: bool) -> void:
+	if headless:
+		return
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 1.0
+	sm.height = 2.0
+	sm.radial_segments = 16
+	sm.rings = 8
+	mi.mesh = sm
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var c := Color(0.5, 1.0, 0.3) if uranium else Color(1.0, 0.6, 0.2)
+	m.albedo_color = Color(c.r, c.g, c.b, 0.8)
+	m.emission_enabled = true
+	m.emission = c
+	m.emission_energy_multiplier = 3.0
+	mi.material_override = m
+	mi.position = at
+	mi.scale = Vector3.ONE * 0.5
+	add_child(mi)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(mi, "scale", Vector3.ONE * r * 0.6, 0.35)
+	tw.tween_property(m, "albedo_color:a", 0.0, 0.5)
+	tw.chain().tween_callback(mi.queue_free)
+
+
+func _tracer(a: Vector3, b: Vector3, col := Color(1.0, 0.85, 0.3)) -> void:
 	if headless:
 		return
 	var im := ImmediateMesh.new()
-	im.surface_begin(Mesh.PRIMITIVE_LINES, _mat(Color(1.0, 0.85, 0.3), true))
+	im.surface_begin(Mesh.PRIMITIVE_LINES, _mat(col, true))
 	im.surface_add_vertex(a)
 	im.surface_add_vertex(b)
 	im.surface_end()
@@ -2307,7 +2741,10 @@ func _update_hud() -> void:
 		var n := int(st.get(it, 0))
 		if n > 0:
 			parts.append("%s %d/%d" % [D.ITEM_NAMES[it], n, D.CORE_CAP])
-	lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
+	if creative:
+		lines.append("КРЕАТИВ — ресурсы и боеприпасы бесконечны")
+	else:
+		lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
 
 	lines.append("В руках: " + ("Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])))
 

@@ -5,6 +5,7 @@ var menu: CanvasLayer
 var ip_edit: LineEdit
 var port_edit: LineEdit
 var status_lbl: Label
+var creative_box: CheckBox
 
 
 func _ready() -> void:
@@ -55,9 +56,13 @@ func _build_menu() -> void:
 	port_edit.text = str(Net.DEFAULT_PORT)
 	box.add_child(port_edit)
 
+	creative_box = CheckBox.new()
+	creative_box.text = "Креатив (бесконечные ресурсы)"
+	box.add_child(creative_box)
+
 	var host_btn := Button.new()
 	host_btn.text = "Создать игру (хост)"
-	host_btn.pressed.connect(func(): Net.host(_port()))
+	host_btn.pressed.connect(func(): Net.host(_port(), creative_box.button_pressed))
 	box.add_child(host_btn)
 
 	var join_btn := Button.new()
