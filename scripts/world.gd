@@ -6,6 +6,8 @@ extends Node3D
 const D = preload("res://scripts/defs.gd")
 const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
+const LIT_SHADER = preload("res://shaders/lit16.gdshader")
+const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const NO_CELL := -1
 const SLOTS := [D.CONVEYOR, D.DRILL, D.ASSEMBLER, D.TURRET, D.WEAPON]
 const CORE_H := 1.1   # высота основания ядра
@@ -64,6 +66,17 @@ var hover_cell := NO_CELL
 var hover_dir := 0
 var hover_seed := NO_CELL
 var terrain_body: StaticBody3D
+
+# --- небо и свет ---
+var world_time: float = D.DAY_LENGTH * 0.25   # старт: у обоих ядер рассвет/закат
+var giant_node: MeshInstance3D
+var sun_node: MeshInstance3D
+var stars_node: MultiMeshInstance3D
+var flash_on := false
+var sky_sun_dir := Vector3.FORWARD
+var sky_sun_level := 1.0
+var sky_giant_dir := Vector3.RIGHT
+var sky_giant_level := 0.0
 
 
 func setup(seed_val: int, team: int, server: bool, dedicated: bool) -> void:
@@ -356,8 +369,13 @@ func full_sync(list: Array) -> void:
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func snapshot(u: PackedFloat32Array, it: PackedVector3Array, pl: Array, st: Array, hp: Array) -> void:
+func snapshot(u: PackedFloat32Array, it: PackedVector3Array, pl: Array, st: Array, hp: Array, t: float) -> void:
 	_apply_snapshot(u, it, pl, st, hp)
+	# часы клиента подтягиваем к серверным
+	if absf(world_time - t) > 1.0:
+		world_time = t
+	else:
+		world_time = lerpf(world_time, t, 0.1)
 
 
 @rpc("authority", "call_remote", "unreliable")
@@ -370,6 +388,7 @@ func fx_shot(from: Vector3, to: Vector3) -> void:
 # =====================================================================
 
 func _process(delta: float) -> void:
+	world_time += delta
 	if is_server and not finished:
 		tick_acc += delta
 		var steps := 0
@@ -632,7 +651,7 @@ func _send_snapshot() -> void:
 		var o: Dictionary = players[pid]
 		pl.append([pid, o.pos, o.fwd, o.team, o.hp])
 	for p in Net.ready_peers:
-		snapshot.rpc_id(p, u, it, pl, storage, core_hp)
+		snapshot.rpc_id(p, u, it, pl, storage, core_hp, world_time)
 	if not headless:
 		_apply_snapshot(u, it, pl, storage, core_hp)
 
@@ -644,20 +663,13 @@ func _send_snapshot() -> void:
 func _build_scene() -> void:
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.01, 0.01, 0.03)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.45, 0.45, 0.6)
-	env.ambient_light_energy = 0.7
+	env.background_color = Color(0, 0, 0)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_DISABLED
 	env.glow_enabled = true
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
-
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-35, -40, 0)
-	sun.light_color = Color(1.0, 0.92, 0.85)
-	sun.shadow_enabled = true
-	add_child(sun)
+	# ламп нет: весь свет считает шейдер lit16 по положению солнца и гиганта
 
 	# поверхность планеты: меш + коллизия
 	var built: Array = planet.build_mesh()
@@ -675,20 +687,32 @@ func _build_scene() -> void:
 	add_child(terrain_body)
 
 	# газовый гигант, вокруг которого мы крутимся, и звёзды
-	var giant := MeshInstance3D.new()
+	giant_node = MeshInstance3D.new()
 	var sm := SphereMesh.new()
-	sm.radius = 1800
-	sm.height = 3600
+	sm.radius = D.GIANT_R
+	sm.height = D.GIANT_R * 2.0
 	sm.radial_segments = 96
 	sm.rings = 48
-	giant.mesh = sm
-	giant.position = Vector3(-1500, 1200, -6000)
-	var gmat := StandardMaterial3D.new()
-	gmat.albedo_color = Color(0.85, 0.55, 0.3)
-	gmat.emission_enabled = true
-	gmat.emission = Color(0.45, 0.22, 0.08)
-	giant.material_override = gmat
-	add_child(giant)
+	giant_node.mesh = sm
+	var gmat := ShaderMaterial.new()
+	gmat.shader = GIANT_SHADER
+	giant_node.material_override = gmat
+	add_child(giant_node)
+
+	# солнце — маленькая очень яркая точка
+	sun_node = MeshInstance3D.new()
+	var sun_mesh := SphereMesh.new()
+	sun_mesh.radius = D.SUN_VIS_R
+	sun_mesh.height = D.SUN_VIS_R * 2.0
+	sun_node.mesh = sun_mesh
+	var sun_mat := StandardMaterial3D.new()
+	sun_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sun_mat.albedo_color = Color(1.0, 0.97, 0.88)
+	sun_mat.emission_enabled = true
+	sun_mat.emission = Color(1.0, 0.95, 0.8)
+	sun_mat.emission_energy_multiplier = 8.0
+	sun_node.material_override = sun_mat
+	add_child(sun_node)
 
 	var stars := MultiMesh.new()
 	stars.transform_format = MultiMesh.TRANSFORM_3D
@@ -708,9 +732,9 @@ func _build_scene() -> void:
 	for i in stars.instance_count:
 		var v := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)).normalized()
 		stars.set_instance_transform(i, Transform3D(Basis(), v * 9000.0))
-	var stars_mmi := MultiMeshInstance3D.new()
-	stars_mmi.multimesh = stars
-	add_child(stars_mmi)
+	stars_node = MultiMeshInstance3D.new()
+	stars_node.multimesh = stars
+	add_child(stars_node)
 
 	# руда на лентах
 	mm_items = MultiMesh.new()
@@ -734,9 +758,7 @@ func _build_scene() -> void:
 	mm_units.visible_instance_count = 0
 	var ubox := BoxMesh.new()
 	ubox.size = Vector3(0.6, 0.45, 0.6)
-	var umat := StandardMaterial3D.new()
-	umat.vertex_color_use_as_albedo = true
-	ubox.material = umat
+	ubox.material = _vc_mat()
 	mm_units.mesh = ubox
 	var units_mmi := MultiMeshInstance3D.new()
 	units_mmi.multimesh = mm_units
@@ -815,16 +837,25 @@ func _build_scene() -> void:
 		_set_fps(false)
 
 
-func _mat(color: Color, glow := false) -> StandardMaterial3D:
+## Обычные поверхности — шейдер с 16 уровнями света. Светящиеся (glow) — сами светятся в темноте.
+func _mat(color: Color, glow := false) -> Material:
 	var key := "%s|%s" % [color, glow]
 	if mats.has(key):
 		return mats[key]
-	var m := StandardMaterial3D.new()
-	m.albedo_color = color
+	var m: Material
 	if glow:
-		m.emission_enabled = true
-		m.emission = color
-		m.emission_energy_multiplier = 1.5
+		var sm := StandardMaterial3D.new()
+		sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		sm.albedo_color = color
+		sm.emission_enabled = true
+		sm.emission = color
+		sm.emission_energy_multiplier = 1.5
+		m = sm
+	else:
+		var sh := ShaderMaterial.new()
+		sh.shader = LIT_SHADER
+		sh.set_shader_parameter("albedo", color)
+		m = sh
 	mats[key] = m
 	return m
 
@@ -914,12 +945,12 @@ func _vis_add(b: Dictionary) -> void:
 	bnodes[b.id] = root
 
 
-func _vc_mat() -> StandardMaterial3D:
+func _vc_mat() -> Material:
 	if mats.has("vc"):
 		return mats["vc"]
-	var m := StandardMaterial3D.new()
-	m.vertex_color_use_as_albedo = true
-	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var m := ShaderMaterial.new()
+	m.shader = LIT_SHADER
+	m.set_shader_parameter("use_vertex_color", true)
 	mats["vc"] = m
 	return m
 
@@ -993,6 +1024,8 @@ func _update_client(delta: float) -> void:
 			else:
 				req_player_state.rpc_id(1, player.global_position, fwd)
 
+	_update_sky()
+	_update_flashlight()
 	_update_units()
 	_update_items()
 	_update_players(delta)
@@ -1023,6 +1056,58 @@ func _update_client(delta: float) -> void:
 			_request_remove(hover_cell)
 
 	_update_hud()
+
+
+## Небесная механика. Система отсчёта привязана к планете (как в KSP):
+## планета вращается вокруг наклонённой оси и летит по орбите вокруг гиганта,
+## поэтому для нас движутся солнце, гигант и звёзды.
+func _update_sky() -> void:
+	var theta := TAU * world_time / D.DAY_LENGTH
+	var phi := TAU * world_time / D.ORBIT_PERIOD
+	var frame := Basis(Vector3.UP, -theta) * Basis(Vector3.RIGHT, deg_to_rad(D.AXIS_TILT))
+	var sun: Vector3 = (frame * D.SUN_DIR).normalized()
+	# положение планеты на орбите в неподвижной системе -> где гигант относительно нас
+	var orbit_pos := Vector3(cos(phi), 0.0, sin(phi)) * D.GIANT_DIST
+	var giant_rel := frame * (-orbit_pos)
+	var gdir := giant_rel.normalized()
+	# затмение: диск гиганта закрывает солнце
+	var ang_r := asin(D.GIANT_R / D.GIANT_DIST)
+	var sep := sun.angle_to(gdir)
+	var sun_level := smoothstep(ang_r * 0.92, ang_r * 1.08, sep)
+	# фаза гиганта: какая доля видимого диска освещена солнцем
+	var phase := (1.0 - sun.dot(gdir)) * 0.5
+
+	sky_sun_dir = sun
+	sky_sun_level = sun_level
+	sky_giant_dir = gdir
+	sky_giant_level = phase
+	RenderingServer.global_shader_parameter_set("sun_dir", sun)
+	RenderingServer.global_shader_parameter_set("sun_level", sun_level)
+	RenderingServer.global_shader_parameter_set("giant_dir", gdir)
+	RenderingServer.global_shader_parameter_set("giant_level", phase)
+
+	giant_node.position = giant_rel
+	sun_node.position = sun * D.SUN_VIS_DIST
+	sun_node.visible = sun_level > 0.02
+	stars_node.transform = Transform3D(frame, Vector3.ZERO)
+
+
+func _update_flashlight() -> void:
+	var on := flash_on and player != null and not player.dead
+	RenderingServer.global_shader_parameter_set("flash_on", 1.0 if on else 0.0)
+	if player:
+		RenderingServer.global_shader_parameter_set("flash_pos", player.cam.global_position)
+		RenderingServer.global_shader_parameter_set("flash_dir", player.look_dir())
+
+
+## Уровень света 0..16 в точке поверхности (то же, что считает шейдер, без фонарика).
+func light_level_at(pos: Vector3) -> int:
+	var up := pos.normalized()
+	var sd := up.dot(sky_sun_dir)
+	var gd := up.dot(sky_giant_dir)
+	var s := maxf(sd, 0.0) * smoothstep(-0.03, 0.03, sd) * sky_sun_level
+	var g := maxf(gd, 0.0) * smoothstep(-0.03, 0.03, gd) * sky_giant_level * D.GIANT_MAX_LEVEL / D.LIGHT_LEVELS
+	return clampi(floori((s + g) * D.LIGHT_LEVELS + 0.5), 0, D.LIGHT_LEVELS)
 
 
 func _update_units() -> void:
@@ -1181,7 +1266,11 @@ func _update_hud() -> void:
 		return
 	var enemy := 1 - my_team
 	var lines := PackedStringArray()
-	lines.append("Команда: %s     Здоровье: %d" % [D.TEAM_NAMES[my_team], my_hp])
+	var lvl := light_level_at(player.global_position) if player else 0
+	var hours := fmod(world_time / D.DAY_LENGTH, 1.0)
+	lines.append("Команда: %s     Здоровье: %d     Свет: %d/16     Фонарик: %s" % [
+		D.TEAM_NAMES[my_team], my_hp, lvl, "вкл" if flash_on else "выкл"])
+	lines.append("Сутки: %d%%   Затмение: %s" % [int(hours * 100.0), "ДА" if sky_sun_level < 0.5 else "нет"])
 	lines.append("Руда в ядре: %d" % storage[my_team])
 	lines.append("Ядро: %d   |   Ядро врага: %d (на другой стороне планеты)" % [core_hp[my_team], core_hp[enemy]])
 	lines.append("")
@@ -1197,7 +1286,7 @@ func _update_hud() -> void:
 				", скалы — нельзя" if lv >= D.MAX_LEVEL else ""]
 		lines.append("В руках: %s   (направление — куда смотришь, R — повернуть)%s" % [D.NAMES[sel_type], info])
 	if fps_mode:
-		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести")
+		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести   F — фонарик")
 		lines.append("Tab — орбитальная камера   Esc — отпустить курсор")
 	else:
 		lines.append("ЛКМ — строить (можно тянуть)   ПКМ — снести   WASD — крутить планету   колесо — зум")
@@ -1246,6 +1335,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				sel_type = D.WEAPON
 			KEY_R:
 				sel_rot += 1
+			KEY_F:
+				flash_on = not flash_on
 			KEY_TAB:
 				_set_fps(not fps_mode)
 			KEY_ESCAPE:

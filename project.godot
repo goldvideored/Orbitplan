@@ -21,3 +21,34 @@ window/size/viewport_height=900
 [rendering]
 
 renderer/rendering_method="forward_plus"
+
+[shader_globals]
+
+sun_dir={
+"type": "vec3",
+"value": Vector3(0, 0, 1)
+}
+sun_level={
+"type": "float",
+"value": 1.0
+}
+giant_dir={
+"type": "vec3",
+"value": Vector3(1, 0, 0)
+}
+giant_level={
+"type": "float",
+"value": 0.0
+}
+flash_pos={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}
+flash_dir={
+"type": "vec3",
+"value": Vector3(0, 0, -1)
+}
+flash_on={
+"type": "float",
+"value": 0.0
+}

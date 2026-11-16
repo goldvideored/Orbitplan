@@ -53,3 +53,15 @@ const GUN_DMG := 15
 const GUN_RANGE := 40.0
 const GUN_CD_MS := 200
 const BUILD_REACH := 12.0      # дальность стройки от первого лица
+
+# Небесная механика и свет
+const DAY_LENGTH := 240.0      # сутки (оборот вокруг оси), с
+const ORBIT_PERIOD := 960.0    # оборот вокруг газового гиганта, с
+const AXIS_TILT := 15.0        # наклон оси, градусы
+const GIANT_DIST := 6000.0     # расстояние до гиганта, м (масштаб условный)
+const GIANT_R := 1800.0
+const SUN_DIR := Vector3(1, 0, 0)   # направление на солнце в «неподвижной» системе
+const SUN_VIS_DIST := 12000.0  # где рисовать солнце
+const SUN_VIS_R := 70.0        # маленькая яркая точка
+const LIGHT_LEVELS := 16
+const GIANT_MAX_LEVEL := 4     # гигант даёт максимум 4 уровня из 16
