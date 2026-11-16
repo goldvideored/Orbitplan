@@ -240,7 +240,7 @@ func _can_place(team: int, type: int, cell: int, dir: int) -> bool:
 	for c in foot:
 		if grid.has(c) or planet.level[c] >= D.MAX_LEVEL:
 			return false
-		if _arc(c, planet.core_center[team]) > D.BUILD_ARC:
+		if _arc(c, planet.core_center[1 - team]) < D.ENEMY_ZONE:
 			return false
 	if _is_drill(type):
 		var dep: int = _drill_ore(foot)[0]
@@ -336,7 +336,7 @@ func server_remove(team: int, cell: int) -> void:
 	var st: Dictionary = storage[team]
 	var cost: Dictionary = D.COST[b.type]
 	for it in cost:
-		st[it] = int(st.get(it, 0)) + int(cost[it]) / 2   # возврат половины
+		st[it] = mini(int(st.get(it, 0)) + int(cost[it]) / 2, D.CORE_CAP)   # возврат половины, не выше лимита
 	_destroy(b.id)
 
 
@@ -537,7 +537,16 @@ func _status(b: Dictionary) -> Array:
 	var t: int = b.type
 	if D.POWER_USE.has(t) and not power_has_gen.has(power_root.get(b.id, b.id)):
 		return [ST_STOP, "нет энергии: рядом нет генератора"]
-	if t == D.CORE or t == D.TURRET:
+	if t == D.CORE:
+		var full := PackedStringArray()
+		var st: Dictionary = storage[b.team]
+		for it in D.CORE_ACCEPT:
+			if int(st.get(it, 0)) >= D.CORE_CAP:
+				full.append(D.ITEM_NAMES[it])
+		if full.is_empty():
+			return [ST_OK, "склад принимает всё переработанное"]
+		return [ST_SLOW, "склад полон: " + ", ".join(full)]
+	if t == D.TURRET:
 		return [ST_OK, "в строю"]
 	if t == D.CONVEYOR or t == D.PIPE:
 		return [ST_OK, "везёт: " + D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"]
@@ -923,6 +932,8 @@ func _push(cell: int, src_id: int, team: int, item: int) -> bool:
 		if not D.CORE_ACCEPT.has(item):
 			return false
 		var st: Dictionary = storage[team]
+		if int(st.get(item, 0)) >= D.CORE_CAP:
+			return false   # склад полон — лента встаёт
 		st[item] = int(st.get(item, 0)) + 1
 		return true
 	if not _accepts(o, item):
@@ -1870,7 +1881,7 @@ func _update_hud() -> void:
 	for it in D.CORE_ACCEPT:
 		var n := int(st.get(it, 0))
 		if n > 0:
-			parts.append("%s %d" % [D.ITEM_NAMES[it], n])
+			parts.append("%s %d/%d" % [D.ITEM_NAMES[it], n, D.CORE_CAP])
 	lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
 
 	lines.append("В руках: " + ("Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])))
@@ -1884,6 +1895,8 @@ func _update_hud() -> void:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
 				lines.append("Скалы — строить нельзя")
+			elif _arc(hover_cell, planet.core_center[1 - my_team]) < D.ENEMY_ZONE:
+				lines.append("Зона вражеского ядра — строить нельзя")
 			elif dep != D.I_NONE:
 				lines.append("Залежь: " + D.ITEM_NAMES[dep] + ("  (нужен Бур II+)" if D.RARE_ORES.has(dep) else ""))
 	hud.text = "\n".join(lines)

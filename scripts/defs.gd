@@ -54,7 +54,8 @@ const ITEM_COLORS := {
 }
 const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL]
 const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE]   # базовый бур не берёт
-const START_STORAGE := {I_COPPER: 150, I_IRON: 80, I_SILICON: 30}
+const CORE_CAP := 100          # ядро (база) хранит не больше 100 каждого ресурса
+const START_STORAGE := {I_COPPER: 100, I_IRON: 80, I_SILICON: 30}
 
 # ---------------------------------------------------------------------
 # Постройки
@@ -178,7 +179,7 @@ const RECIPES := {
 
 const TEAM_NAMES := ["Синие", "Красные"]
 const TEAM_COLORS := [Color(0.25, 0.6, 1.0), Color(1.0, 0.35, 0.25)]
-const BUILD_ARC := 40.0        # строить можно в этом радиусе (по поверхности, м) от своего ядра
+const ENEMY_ZONE := 40.0       # нельзя строить ближе этого (по поверхности, м) к вражескому ядру
 
 # ---------------------------------------------------------------------
 # Юниты и оборона (вражеские волны пока выключены)
