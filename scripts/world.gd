@@ -8,6 +8,9 @@ const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
 const SkyCalc = preload("res://scripts/sky.gd")
 const RadialMenu = preload("res://scripts/radial_menu.gd")
+const Icons = preload("res://scripts/icons.gd")
+const ICON_SHADER = preload("res://shaders/icon.gdshader")
+const SUIT_COLOR := Color(0.88, 0.88, 0.9)
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
@@ -74,6 +77,10 @@ var state_acc := 0
 var sel_type := D.CONVEYOR
 var sel_rot := 0
 var mm_items: MultiMesh
+var viewmodel: Node3D       # рука с предметом от первого лица
+var vm_hand: Node3D         # сюда кладётся предмет
+var held_type := -999       # какой предмет сейчас в руке у вида от первого лица
+var vm_time := 0.0
 var mm_units: MultiMesh
 var hud: Label
 var big_msg: Label
@@ -358,13 +365,15 @@ func send_full_sync(peer: int) -> void:
 		ev_over.rpc_id(peer, 0 if core_hp[0] > 0 else 1)
 
 
-func server_player_state(peer: int, pos: Vector3, fwd: Vector3) -> void:
+func server_player_state(peer: int, pos: Vector3, fwd: Vector3, held: int) -> void:
 	var team: int = Net.team_of(peer)
 	if team < 0:
 		return
 	if not players.has(peer):
-		players[peer] = {"team": team, "pos": pos, "fwd": fwd, "hp": D.PLAYER_HP, "dead_t": 0, "last_shot": 0}
+		players[peer] = {"team": team, "pos": pos, "fwd": fwd, "hp": D.PLAYER_HP, "dead_t": 0,
+			"last_shot": 0, "held": held}
 	var pl: Dictionary = players[peer]
+	pl.held = held
 	if pl.hp <= 0:
 		return
 	pl.pos = pos
@@ -461,9 +470,9 @@ func req_remove(cell: int) -> void:
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func req_player_state(pos: Vector3, fwd: Vector3) -> void:
+func req_player_state(pos: Vector3, fwd: Vector3, held: int) -> void:
 	if multiplayer.is_server():
-		server_player_state(multiplayer.get_remote_sender_id(), pos, fwd)
+		server_player_state(multiplayer.get_remote_sender_id(), pos, fwd, held)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -1120,7 +1129,7 @@ func _send_snapshot() -> void:
 	var pl: Array = []
 	for pid in players:
 		var o: Dictionary = players[pid]
-		pl.append([pid, o.pos, o.fwd, o.team, o.hp])
+		pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
 	for p in Net.ready_peers:
 		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, world_time)
 	if not headless:
@@ -1213,21 +1222,20 @@ func _build_scene() -> void:
 	add_child(sky_mi)
 
 	# руда на лентах
+	# предметы на лентах — пиксельные значки, всегда лицом к камере
 	mm_items = MultiMesh.new()
 	mm_items.transform_format = MultiMesh.TRANSFORM_3D
-	mm_items.use_colors = true
+	mm_items.use_custom_data = true
 	mm_items.instance_count = 8192
 	mm_items.visible_instance_count = 0
-	var isph := SphereMesh.new()
-	isph.radius = 0.18
-	isph.height = 0.36
-	isph.radial_segments = 8
-	isph.rings = 4
-	var imat := StandardMaterial3D.new()
-	imat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	imat.vertex_color_use_as_albedo = true
-	isph.material = imat
-	mm_items.mesh = isph
+	var iq := QuadMesh.new()
+	iq.size = Vector2(0.5, 0.5)
+	var imat := ShaderMaterial.new()
+	imat.shader = ICON_SHADER
+	imat.set_shader_parameter("atlas", Icons.build_atlas())
+	imat.set_shader_parameter("grid", Vector2(Icons.COLS, Icons.ROWS))
+	iq.material = imat
+	mm_items.mesh = iq
 	var items_mmi := MultiMeshInstance3D.new()
 	items_mmi.multimesh = mm_items
 	add_child(items_mmi)
@@ -1344,6 +1352,7 @@ func _build_scene() -> void:
 		player = Player.new()
 		add_child(player)
 		player.teleport(_spawn_pos(my_team))
+		_build_viewmodel()
 		_set_fps(true)
 	else:
 		_set_fps(false)
@@ -1629,12 +1638,13 @@ func _update_client(delta: float) -> void:
 			send_acc = 0.0
 			var fwd := -player.global_transform.basis.z
 			if is_server:
-				server_player_state(1, player.global_position, fwd)
+				server_player_state(1, player.global_position, fwd, sel_type)
 			else:
-				req_player_state.rpc_id(1, player.global_position, fwd)
+				req_player_state.rpc_id(1, player.global_position, fwd, sel_type)
 
 	_update_sky()
 	_update_flashlight()
+	_update_viewmodel(delta)
 	_update_units()
 	_update_items()
 	_update_players(delta)
@@ -1754,9 +1764,10 @@ func _update_units() -> void:
 func _update_items() -> void:
 	var m := mini(cur_items.size(), mm_items.instance_count)
 	for i in m:
-		mm_items.set_instance_transform(i, Transform3D(Basis(), cur_items[i]))
+		mm_items.set_instance_transform(i, Transform3D(Basis(), cur_items[i] + cur_items[i].normalized() * 0.1))
 		var ty := int(cur_item_types[i]) if i < cur_item_types.size() else D.I_COPPER
-		mm_items.set_instance_color(i, D.ITEM_COLORS.get(ty, Color.WHITE))
+		var cell := Icons.cell_of(ty)
+		mm_items.set_instance_custom_data(i, Color(cell.x, cell.y, 0, 0))
 	mm_items.visible_instance_count = m
 
 
@@ -1825,6 +1836,10 @@ func _update_players(delta: float) -> void:
 			others[pid] = av
 		var node: Node3D = others[pid]
 		node.visible = hp > 0
+		var held: int = e[5] if e.size() > 5 else D.WEAPON
+		if int(node.get_meta("held")) != held:
+			node.set_meta("held", held)
+			_set_held(node.get_meta("hand"), held, int(node.get_meta("team")))
 		var p := node.position.lerp(pos, k)
 		var up := p.normalized()
 		var f := (fwd - up * fwd.dot(up))
@@ -1844,20 +1859,124 @@ func _update_players(delta: float) -> void:
 			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
 
 
+## Космонавт: скафандр, шлем с визором, ранец с антенной цвета команды.
+## Правая рука вытянута вперёд, в ней — предмет (метка "hand").
 func _make_avatar(team: int) -> Node3D:
 	var n := Node3D.new()
 	var col: Color = D.TEAM_COLORS[team]
-	var body := MeshInstance3D.new()
-	var cm := CapsuleMesh.new()
-	cm.radius = 0.35
-	cm.height = 1.8
-	body.mesh = cm
-	body.position.y = 0.9
-	body.material_override = _mat(col.darkened(0.2))
-	n.add_child(body)
-	_box(n, Vector3(0.5, 0.2, 0.2), Vector3(0, 1.55, -0.28), Color(0.4, 0.9, 1.0), true)  # визор
+	var suit := _pmat(SUIT_COLOR, 1)
+	var dark := _pmat(Color(0.35, 0.36, 0.4), 1)
+	# ноги и ботинки
+	for sx in [-0.12, 0.12]:
+		_part(n, "box", Vector3(0.18, 0.75, 0.2), Vector3(sx, 0.45, 0), suit)
+		_part(n, "box", Vector3(0.2, 0.12, 0.28), Vector3(sx, 0.06, -0.03), dark)
+	# корпус + полоса цвета команды
+	_part(n, "box", Vector3(0.5, 0.62, 0.3), Vector3(0, 1.12, 0), suit)
+	_part(n, "box", Vector3(0.52, 0.08, 0.32), Vector3(0, 1.02, 0), _pmat(col, 0))
+	# ранец и антенна
+	_part(n, "box", Vector3(0.42, 0.5, 0.18), Vector3(0, 1.15, 0.24), dark)
+	_part(n, "cyl", Vector3(0.015, 0.35, 0.015), Vector3(0.14, 1.55, 0.26), dark)
+	_box(n, Vector3(0.06, 0.06, 0.06), Vector3(0.14, 1.74, 0.26), col, true)
+	# шлем и визор
+	_part(n, "sphere", Vector3(0.24, 0.48, 0), Vector3(0, 1.62, 0), suit)
+	_box(n, Vector3(0.32, 0.17, 0.08), Vector3(0, 1.64, -0.2), Color(1.0, 0.75, 0.3), true)
+	# левая рука опущена
+	_part(n, "box", Vector3(0.13, 0.55, 0.14), Vector3(-0.33, 1.1, 0), suit)
+	# правая рука вытянута вперёд, в кисти — предмет
+	var shoulder := Node3D.new()
+	shoulder.position = Vector3(0.33, 1.35, 0)
+	shoulder.rotation_degrees = Vector3(70, 0, 0)
+	n.add_child(shoulder)
+	_part(shoulder, "box", Vector3(0.13, 0.55, 0.14), Vector3(0, -0.27, 0), suit)
+	var hand := Node3D.new()
+	hand.position = Vector3(0, -0.58, 0)
+	hand.rotation_degrees = Vector3(-70, 0, 0)
+	shoulder.add_child(hand)
+	n.set_meta("hand", hand)
+	n.set_meta("held", -999)
+	n.set_meta("team", team)
 	add_child(n)
 	return n
+
+
+## Деталь из примитива: "box" — size; "cyl" и "sphere" — (радиус, высота, -).
+func _part(parent: Node3D, kind: String, size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
+	var m := MeshInstance3D.new()
+	var mesh: PrimitiveMesh
+	if kind == "box":
+		var bm := BoxMesh.new()
+		bm.size = size
+		mesh = bm
+	elif kind == "cyl":
+		var cm := CylinderMesh.new()
+		cm.top_radius = size.x
+		cm.bottom_radius = size.x
+		cm.height = size.y
+		cm.radial_segments = 6
+		mesh = cm
+	else:
+		var sm := SphereMesh.new()
+		sm.radius = size.x
+		sm.height = size.y
+		sm.radial_segments = 12
+		sm.rings = 6
+		mesh = sm
+	m.mesh = mesh
+	m.position = pos
+	m.material_override = mat
+	parent.add_child(m)
+	return m
+
+
+## Уменьшенная модель того, что держишь: постройка или бластер.
+func _make_held(type: int, team: int) -> Node3D:
+	var n := Node3D.new()
+	if type == D.WEAPON:
+		_part(n, "box", Vector3(0.1, 0.12, 0.42), Vector3(0, 0, -0.1), _pmat(Color(0.45, 0.46, 0.5), 1))
+		_part(n, "box", Vector3(0.08, 0.16, 0.08), Vector3(0, -0.1, 0.03), _pmat(Color(0.3, 0.3, 0.33), 1))
+		_box(n, Vector3(0.06, 0.06, 0.06), Vector3(0, 0, -0.33), Color(1.0, 0.85, 0.3), true)
+	else:
+		var model := Node3D.new()
+		_vis_shape(model, type, D.TEAM_COLORS[maxi(team, 0)])
+		model.scale = Vector3.ONE * 0.18
+		model.position = Vector3(0, -0.05, -0.05)
+		n.add_child(model)
+	return n
+
+
+func _set_held(holder: Node3D, type: int, team: int) -> void:
+	for c in holder.get_children():
+		c.queue_free()
+	holder.add_child(_make_held(type, team))
+
+
+## Рука в перчатке внизу справа, прикреплена к камере.
+func _build_viewmodel() -> void:
+	viewmodel = Node3D.new()
+	player.cam.add_child(viewmodel)
+	var arm := Node3D.new()
+	arm.position = Vector3(0.32, -0.3, -0.45)
+	arm.rotation_degrees = Vector3(-15, 10, 0)
+	viewmodel.add_child(arm)
+	_part(arm, "box", Vector3(0.11, 0.11, 0.42), Vector3(0, -0.02, 0.12), _pmat(SUIT_COLOR, 1))
+	_part(arm, "box", Vector3(0.12, 0.1, 0.12), Vector3(0, -0.02, -0.12), _pmat(Color(0.35, 0.36, 0.4), 1))
+	vm_hand = Node3D.new()
+	vm_hand.position = Vector3(0, 0.06, -0.2)
+	arm.add_child(vm_hand)
+
+
+func _update_viewmodel(delta: float) -> void:
+	if viewmodel == null:
+		return
+	viewmodel.visible = fps_mode and not player.dead and not radial.is_open
+	if sel_type != held_type:
+		held_type = sel_type
+		_set_held(vm_hand, sel_type, my_team)
+	# покачивание при ходьбе
+	var moving := player.velocity.length() > 0.5 and player.is_on_floor()
+	vm_time += delta * (9.0 if moving else 2.0)
+	var amp := 0.012 if moving else 0.004
+	viewmodel.position = Vector3(cos(vm_time * 0.5) * amp, sin(vm_time) * amp, 0)
 
 
 func _fire() -> void:
