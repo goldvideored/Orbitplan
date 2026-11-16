@@ -15,17 +15,27 @@ var sub: Array = []         # выбранный подтип в каждом с
 var hovered := -1
 var sel_vec := Vector2.ZERO
 var info_func: Callable     # тип -> Array строк (описание, цена, энергия...)
+var name_func: Callable     # тип -> подпись в секторе (если не задано — название постройки)
+var center_hint := "колесо — подтип"
 
 
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	for cat in D.CATEGORIES:
-		sectors.append(cat)
-	sectors.append(["Бластер", [D.WEAPON]])
+	# по умолчанию — меню построек; другое меню задаётся через configure() до добавления в сцену
+	if sectors.is_empty():
+		for cat in D.CATEGORIES:
+			sectors.append(cat)
+		sectors.append(["Бластер", [D.WEAPON]])
 	for i in sectors.size():
 		sub.append(0)
 	visible = false
+
+
+func configure(secs: Array, names: Callable, hint: String) -> void:
+	sectors = secs.duplicate()
+	name_func = names
+	center_hint = hint
 
 
 func open(current_type: int) -> void:
@@ -104,7 +114,11 @@ func _draw() -> void:
 		var lp := c + Vector2(cos(mid), sin(mid)) * (R_IN + R_OUT) / 2.0
 		var types: Array = sectors[i][1]
 		var t := current_type_of(i)
-		var label_txt := "Бластер" if t == D.WEAPON else String(D.NAMES[t])
+		var label_txt := ""
+		if name_func.is_valid():
+			label_txt = String(name_func.call(t))
+		else:
+			label_txt = "Бластер" if t == D.WEAPON else String(D.NAMES[t])
 		draw_string(font, lp + Vector2(-80, -8), String(sectors[i][0]), HORIZONTAL_ALIGNMENT_CENTER, 160, 15,
 				Color(1, 1, 1, 0.7))
 		draw_string(font, lp + Vector2(-80, 12), label_txt, HORIZONTAL_ALIGNMENT_CENTER, 160, 17, Color.WHITE)
@@ -114,7 +128,7 @@ func _draw() -> void:
 
 	# центр: подсказка
 	draw_circle(c, R_IN - 6, Color(0, 0, 0, 0.6))
-	var hint := "двигай мышь" if hovered < 0 else "колесо — подтип"
+	var hint := "двигай мышь" if hovered < 0 else center_hint
 	draw_string(font, c + Vector2(-80, 6), hint, HORIZONTAL_ALIGNMENT_CENTER, 160, 14, Color(1, 1, 1, 0.8))
 
 	# подробности выбранного под колесом

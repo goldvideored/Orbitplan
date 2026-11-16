@@ -30,6 +30,7 @@ const IND_H := {
 	D.CORE: 2.4, D.DRILL: 1.75, D.DRILL2: 2.3, D.DRILL3: 2.6, D.SOLAR: 0.95,
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
+	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45,
 }
 
 var my_team := 0
@@ -52,6 +53,8 @@ var next_unit_id := 1
 var tick_acc := 0.0
 var players := {}       # peer_id -> {team, pos, fwd, hp, dead_t, last_shot}
 var power_dirty := true # пересобрать энергосети (после стройки/сноса)
+var rovers: Array = []  # {id, team, home, dir, cell, fwd, state, cargo_item, cargo_n, target}
+var next_rover_id := 1
 var power_root := {}    # id постройки -> id корня её энергосети
 var power_has_gen := {} # корень -> есть ли в сети генератор
 
@@ -81,6 +84,11 @@ var viewmodel: Node3D       # рука с предметом от первого
 var vm_hand: Node3D         # сюда кладётся предмет
 var held_type := -999       # какой предмет сейчас в руке у вида от первого лица
 var vm_time := 0.0
+var icon_atlas: ImageTexture
+var item_radial: RadialMenu    # меню выбора груза для точки выгрузки (держать E)
+var filter_cell := NO_CELL
+var cur_rovers: Array = []
+var rover_nodes := {}          # id ровера -> Node3D
 var mm_units: MultiMesh
 var hud: Label
 var big_msg: Label
@@ -273,7 +281,7 @@ func _add_building(d: Dictionary) -> void:
 		"store": 0, "timer": 0, "rr": 0,
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
-		"pr": 0.0, "pout": 0.0, "out_blocked": false,
+		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
 	}
 	var cells := _footprint(b.type, b.cell, b.dir)
 	b["cells"] = cells
@@ -293,6 +301,8 @@ func _add_building(d: Dictionary) -> void:
 	for c in cells:
 		grid[c] = b.id
 	power_dirty = true
+	if is_server and b.type == D.LOADER:
+		_spawn_rover(b)
 	next_id = maxi(next_id, b.id + 1)
 	if not headless:
 		_vis_add(b)
@@ -306,13 +316,15 @@ func _remove_building(id: int) -> void:
 		grid.erase(c)
 	buildings.erase(id)
 	power_dirty = true
+	if is_server:
+		rovers = rovers.filter(func(r): return r.home != id)   # ровер без дома исчезает
 	if bnodes.has(id):
 		bnodes[id].queue_free()
 		bnodes.erase(id)
 
 
 func _bdata(b: Dictionary) -> Dictionary:
-	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir}
+	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter}
 
 
 # =====================================================================
@@ -511,13 +523,52 @@ func full_sync(list: Array) -> void:
 
 @rpc("authority", "call_remote", "unreliable_ordered")
 func snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArray, pl: Array,
-		st: Array, hp: Array, pw: Array, t: float) -> void:
-	_apply_snapshot(u, it, itt, pl, st, hp, pw)
+		st: Array, hp: Array, pw: Array, rv: Array, t: float) -> void:
+	_apply_snapshot(u, it, itt, pl, st, hp, pw, rv)
 	# часы клиента подтягиваем к серверным
 	if absf(world_time - t) > 1.0:
 		world_time = t
 	else:
 		world_time = lerpf(world_time, t, 0.1)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_set_filter(cell: int, item: int) -> void:
+	if multiplayer.is_server():
+		server_set_filter(Net.team_of(multiplayer.get_remote_sender_id()), cell, item)
+
+
+func server_set_filter(team: int, cell: int, item: int) -> void:
+	if not grid.has(cell) or not D.ITEM_NAMES.has(item):
+		return
+	var b: Dictionary = buildings[grid[cell]]
+	if b.type != D.UNLOADER or b.team != team:
+		return
+	b.filter = item
+	b.buf = {}   # старый груз выбрасываем
+	for p in Net.ready_peers:
+		ev_filter.rpc_id(p, b.id, item)
+	if not headless:
+		_apply_filter(b.id, item)
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_filter(id: int, item: int) -> void:
+	_apply_filter(id, item)
+
+
+func _apply_filter(id: int, item: int) -> void:
+	if not buildings.has(id):
+		return
+	buildings[id].filter = item
+	var root = bnodes.get(id)
+	if root == null or not root.has_meta("filter_sprite"):
+		return
+	var sp: Sprite3D = root.get_meta("filter_sprite")
+	sp.visible = item != D.I_NONE
+	if sp.visible:
+		var c := Icons.cell_of(item)
+		sp.region_rect = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -593,6 +644,25 @@ func _status(b: Dictionary) -> Array:
 		return [ST_IDLE, "нет урана"]
 	if t == D.ASSEMBLER:
 		return [ST_OK, "собирает юнита"] if b.timer > 0 else [ST_IDLE, "ждёт железо"]
+	if t == D.LOADER:
+		var total := 0
+		for it in b.buf:
+			total += int(b.buf[it])
+		var rv := ""
+		for r in rovers:
+			if r.home == b.id:
+				rv = ["ровер дома", "ровер везёт %d × %s" % [r.cargo_n, D.ITEM_NAMES.get(r.cargo_item, "?")],
+					"ровер едет назад"][int(r.state)]
+		if total == 0:
+			return [ST_IDLE, "ждёт груз с конвейеров, " + rv]
+		return [ST_OK, "на складе %d/%d, %s" % [total, D.LOADER_CAP, rv]]
+	if t == D.UNLOADER:
+		if b.filter == D.I_NONE:
+			return [ST_IDLE, "груз не выбран — держи E"]
+		var have := int(b.buf.get(b.filter, 0))
+		if b.out_blocked:
+			return [ST_STOP, "некуда отдавать %s (%d)" % [D.ITEM_NAMES[b.filter], have]]
+		return [ST_OK, "принимает: %s, внутри %d/%d" % [D.ITEM_NAMES[b.filter], have, D.UNLOADER_CAP]]
 	return [ST_OK, ""]
 
 
@@ -784,12 +854,124 @@ func _sim_tick() -> void:
 				b.timer = D.UNIT_BUILD_TICKS
 		elif t == D.TURRET:
 			_turret_tick(b)
+		elif t == D.UNLOADER:
+			_unloader_tick(b)
 	_players_tick()
 	_units_tick()
+	_rovers_tick()
 	state_acc += 1
 	if state_acc >= 5:
 		state_acc = 0
 		_send_states()
+
+
+# ---------------------------------------------------------------------
+# Логистика: точка выгрузки и роверы
+# ---------------------------------------------------------------------
+
+func _unloader_tick(b: Dictionary) -> void:
+	b.out_blocked = false
+	var it: int = b.filter
+	if it == D.I_NONE or int(b.buf.get(it, 0)) <= 0:
+		return
+	if _output(b, it):
+		b.buf[it] = int(b.buf[it]) - 1
+	else:
+		b.out_blocked = true
+
+
+func _spawn_rover(home: Dictionary) -> void:
+	var d: Vector3 = planet.dirs[home.cell]
+	rovers.append({"id": next_rover_id, "team": home.team, "home": home.id, "dir": d,
+		"cell": home.cell, "fwd": _up_basis(d).x, "state": 0,
+		"cargo_item": D.I_NONE, "cargo_n": 0, "target": -1})
+	next_rover_id += 1
+
+
+func _rpos(r: Dictionary) -> Vector3:
+	var d: Vector3 = r.dir
+	return d * planet.top_r(r.cell)
+
+
+## Ближайшая своя точка выгрузки, которая принимает item и где есть место. -1 — нет такой.
+func _find_unloader(team: int, item: int, from: Vector3) -> int:
+	var best := -1
+	var bd := INF
+	for b in buildings.values():
+		if b.type != D.UNLOADER or b.team != team or b.filter != item:
+			continue
+		if int(b.buf.get(item, 0)) >= D.UNLOADER_CAP:
+			continue
+		var d: float = from.distance_squared_to(_bpos(b))
+		if d < bd:
+			bd = d
+			best = b.id
+	return best
+
+
+## Едем по поверхности к точке. true — приехали.
+func _rover_move(r: Dictionary, target: Vector3) -> bool:
+	var pos := _rpos(r)
+	var dist := pos.distance_to(target)
+	if dist <= D.ROVER_REACH:
+		return true
+	var ud: Vector3 = r.dir
+	var tdir := target.normalized()
+	var tangent := tdir - ud * ud.dot(tdir)
+	if tangent.length() > 0.00001:
+		var step: float = minf(D.ROVER_SPEED, dist - D.ROVER_REACH + 0.01)
+		r.fwd = tangent.normalized()
+		r.dir = (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
+		r.cell = planet.walk(r.cell, r.dir)
+	return false
+
+
+## Ровер: дома грузится (до ROVER_CAP одного груза, у которого есть куда ехать),
+## везёт к ближайшей подходящей точке выгрузки, выгружает, возвращается.
+func _rovers_tick() -> void:
+	for r in rovers:
+		if not buildings.has(r.home):
+			continue
+		var home: Dictionary = buildings[r.home]
+		if r.state == 0:
+			# дома: выбираем груз, которого больше всего и для которого есть точка выгрузки
+			var buf: Dictionary = home.buf
+			var best_item := D.I_NONE
+			var best_n := 0
+			for it in buf:
+				var n := int(buf[it])
+				if n > best_n and _find_unloader(r.team, it, _rpos(r)) != -1:
+					best_n = n
+					best_item = it
+			if best_item != D.I_NONE:
+				var take := mini(best_n, D.ROVER_CAP)
+				buf[best_item] = best_n - take
+				r.cargo_item = best_item
+				r.cargo_n = take
+				r.target = _find_unloader(r.team, best_item, _rpos(r))
+				r.state = 1
+		elif r.state == 1:
+			# везём
+			if not buildings.has(r.target) or buildings[r.target].filter != r.cargo_item:
+				r.target = _find_unloader(r.team, r.cargo_item, _rpos(r))
+				if r.target == -1:
+					continue   # некуда — ждём на месте
+			var tgt: Dictionary = buildings[r.target]
+			if _rover_move(r, _bpos(tgt)):
+				var have := int(tgt.buf.get(r.cargo_item, 0))
+				var n := mini(D.UNLOADER_CAP - have, r.cargo_n)
+				if n > 0:
+					tgt.buf[r.cargo_item] = have + n
+					r.cargo_n -= n
+				if r.cargo_n <= 0:
+					r.cargo_item = D.I_NONE
+					r.state = 2
+				else:
+					r.target = _find_unloader(r.team, r.cargo_item, _rpos(r))   # эта полна — ищем другую
+		elif r.state == 2:
+			# домой
+			if _rover_move(r, _bpos(home)):
+				r.state = 0
 
 
 func _buf_take(b: Dictionary, item: int, n: int) -> bool:
@@ -918,6 +1100,13 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return item == D.I_WATER and o.water < D.BUFFER_CAP
 	if t == D.ASSEMBLER:
 		return item == D.I_IRON and o.store < D.UNIT_COST * 3
+	if t == D.LOADER:
+		if item == D.I_WATER:
+			return false
+		var total := 0
+		for it in buf:
+			total += int(buf[it])
+		return total < D.LOADER_CAP
 	return false
 
 
@@ -1130,10 +1319,13 @@ func _send_snapshot() -> void:
 	for pid in players:
 		var o: Dictionary = players[pid]
 		pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
+	var rv: Array = []
+	for r in rovers:
+		rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
 	for p in Net.ready_peers:
-		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, world_time)
+		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, rv, world_time)
 	if not headless:
-		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats)
+		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats, rv)
 
 
 # =====================================================================
@@ -1232,7 +1424,8 @@ func _build_scene() -> void:
 	iq.size = Vector2(0.5, 0.5)
 	var imat := ShaderMaterial.new()
 	imat.shader = ICON_SHADER
-	imat.set_shader_parameter("atlas", Icons.build_atlas())
+	icon_atlas = Icons.build_atlas()
+	imat.set_shader_parameter("atlas", icon_atlas)
 	imat.set_shader_parameter("grid", Vector2(Icons.COLS, Icons.ROWS))
 	iq.material = imat
 	mm_items.mesh = iq
@@ -1335,6 +1528,11 @@ func _build_scene() -> void:
 	radial = RadialMenu.new()
 	radial.info_func = _type_info
 	layer.add_child(radial)
+	item_radial = RadialMenu.new()
+	var item_name := func(it): return D.ITEM_NAMES[it]
+	item_radial.configure(D.FILTER_GROUPS, item_name, "колесо — сырьё / продукт")
+	item_radial.info_func = func(it): return [D.ITEM_NAMES[it], "Точка выгрузки будет принимать этот груз"]
+	layer.add_child(item_radial)
 
 	crosshair = Label.new()
 	crosshair.text = "+"
@@ -1469,6 +1667,19 @@ func _vis_add(b: Dictionary) -> void:
 		ind.material_override = _mat(STATE_COLORS[ST_IDLE], true)
 		n.add_child(ind)
 		root.set_meta("ind", ind)
+	if t == D.UNLOADER:
+		var sp := Sprite3D.new()
+		sp.texture = icon_atlas
+		sp.region_enabled = true
+		sp.region_rect = Rect2(0, 0, Icons.SIZE, Icons.SIZE)
+		sp.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		sp.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		sp.pixel_size = 0.07
+		sp.shaded = false
+		sp.position = Vector3(0, 1.9, 0)
+		sp.visible = false
+		n.add_child(sp)
+		root.set_meta("filter_sprite", sp)
 	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим)
 	if not multi and t != D.CONVEYOR and t != D.PIPE:
 		var body := StaticBody3D.new()
@@ -1495,6 +1706,8 @@ func _vis_add(b: Dictionary) -> void:
 	else:
 		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
+	if b.filter != D.I_NONE:
+		_apply_filter(b.id, b.filter)
 
 
 ## Простые формы построек. Светящиеся детали видны и в полной темноте.
@@ -1549,6 +1762,20 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	elif t == D.FUEL_SYNTH:
 		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), Color(0.3, 0.25, 0.4))
 		_box(n, Vector3(0.6, 0.25, 0.6), Vector3(0, 1.32, 0), Color(0.85, 0.45, 1.0), true)
+	elif t == D.LOADER:
+		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.85, 0.7, 0.15))
+		_box(n, Vector3(1.0, 0.5, 1.0), Vector3(0, 0.4, 0), Color(0.35, 0.36, 0.4))
+		_box(n, Vector3(0.12, 1.2, 0.12), Vector3(0.55, 0.6, 0.55), Color(0.85, 0.7, 0.15))
+		_box(n, Vector3(0.9, 0.12, 0.12), Vector3(0.15, 1.2, 0.55), Color(0.85, 0.7, 0.15))
+		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.66, -0.51), Color(1.0, 0.85, 0.2), true)
+	elif t == D.UNLOADER:
+		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.2, 0.45, 0.8))
+		_box(n, Vector3(0.9, 0.6, 0.9), Vector3(0, 0.45, 0), Color(0.4, 0.42, 0.46))
+		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.6, -0.46), Color(0.3, 0.7, 1.0), true)
+	elif t == D.CHIP_FACTORY:
+		_box(n, Vector3(1.3, 0.9, 1.3), Vector3(0, 0.45, 0), Color(0.15, 0.32, 0.2))
+		_box(n, Vector3(0.7, 0.12, 0.7), Vector3(0, 0.96, 0), Color(0.3, 1.0, 0.45), true)
+		_box(n, Vector3(0.12, 0.3, 0.12), Vector3(0.45, 1.05, 0.45), Color(0.95, 0.8, 0.3))
 	elif t == D.ASSEMBLER:
 		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), col.darkened(0.25))
 		_box(n, Vector3(0.7, 0.25, 0.7), Vector3(0, 1.32, 0), col, true)
@@ -1575,7 +1802,8 @@ func _vc_mat() -> Material:
 # =====================================================================
 
 func _apply_snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArray, pl: Array,
-		st: Array, hp: Array, pw: Array) -> void:
+		st: Array, hp: Array, pw: Array, rv: Array) -> void:
+	cur_rovers = rv
 	prev_units = cur_units
 	cur_units = u
 	cur_items = it
@@ -1648,6 +1876,7 @@ func _update_client(delta: float) -> void:
 	_update_units()
 	_update_items()
 	_update_players(delta)
+	_update_rovers(delta)
 
 	# стрельба
 	fire_cd -= delta
@@ -1661,7 +1890,7 @@ func _update_client(delta: float) -> void:
 	_update_hover()
 	var alive := not (player != null and player.dead)
 	ghost.visible = hover_cell != NO_CELL and not finished and my_team >= 0 \
-			and sel_type != D.WEAPON and alive and not radial.is_open
+			and sel_type != D.WEAPON and alive and not radial.is_open and not item_radial.is_open
 	if ghost.visible:
 		_update_ghost()
 		var ok := _can_place(my_team, sel_type, hover_cell, hover_dir)
@@ -1859,6 +2088,58 @@ func _update_players(delta: float) -> void:
 			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
 
 
+func _update_rovers(delta: float) -> void:
+	var seen := {}
+	var k := minf(1.0, delta * 12.0)
+	for e in cur_rovers:
+		var id: int = e[0]
+		var pos: Vector3 = e[1]
+		var fwd: Vector3 = e[2]
+		seen[id] = true
+		if not rover_nodes.has(id):
+			var nn := _make_rover(int(e[3]))
+			nn.position = pos
+			rover_nodes[id] = nn
+		var node: Node3D = rover_nodes[id]
+		var p := node.position.lerp(pos, k)
+		var up := p.normalized()
+		var f := fwd - up * fwd.dot(up)
+		if f.length() < 0.001:
+			f = _up_basis(up).z
+		f = f.normalized()
+		node.transform = Transform3D(Basis(f.cross(up), up, -f), p)
+		var crate: Node3D = node.get_meta("crate")
+		crate.visible = int(e[4]) > 0
+	for id in rover_nodes.keys():
+		if not seen.has(id):
+			rover_nodes[id].queue_free()
+			rover_nodes.erase(id)
+
+
+## Ровер-курьер: шасси на шести колёсах, кабина с фарами, ящик с грузом.
+func _make_rover(team: int) -> Node3D:
+	var n := Node3D.new()
+	var col: Color = D.TEAM_COLORS[team]
+	var body := _pmat(Color(0.82, 0.8, 0.72), 1)
+	var dark := _pmat(Color(0.2, 0.2, 0.22), 1)
+	_part(n, "box", Vector3(1.1, 0.3, 1.7), Vector3(0, 0.5, 0), body)
+	_part(n, "box", Vector3(0.9, 0.45, 0.55), Vector3(0, 0.85, -0.5), body)
+	_box(n, Vector3(0.7, 0.18, 0.05), Vector3(0, 0.92, -0.78), col, true)          # стекло кабины
+	for sx in [-0.42, 0.42]:
+		_box(n, Vector3(0.12, 0.08, 0.04), Vector3(sx, 0.55, -0.86), Color(1, 1, 0.85), true)   # фары
+	for sx in [-0.62, 0.62]:
+		for sz in [-0.6, 0.0, 0.6]:
+			var w := _part(n, "cyl", Vector3(0.24, 0.16, 0), Vector3(sx, 0.24, sz), dark)
+			w.rotation_degrees = Vector3(0, 0, 90)
+	_part(n, "cyl", Vector3(0.015, 0.5, 0), Vector3(0.35, 1.3, -0.45), dark)
+	_box(n, Vector3(0.06, 0.06, 0.06), Vector3(0.35, 1.56, -0.45), col, true)
+	var crate := _part(n, "box", Vector3(0.85, 0.45, 0.8), Vector3(0, 0.88, 0.35), _pmat(Color(0.6, 0.45, 0.25), 1))
+	crate.visible = false
+	n.set_meta("crate", crate)
+	add_child(n)
+	return n
+
+
 ## Космонавт: скафандр, шлем с визором, ранец с антенной цвета команды.
 ## Правая рука вытянута вперёд, в ней — предмет (метка "hand").
 func _make_avatar(team: int) -> Node3D:
@@ -2035,6 +2316,8 @@ func _update_hud() -> void:
 		if grid.has(hover_cell):
 			if inspect_text != "" and int(grid.get(inspect_cell, -1)) == int(grid[hover_cell]):
 				lines.append(inspect_text)
+			if _hover_own(D.UNLOADER):
+				lines.append("E (держать) — выбрать груз")
 		else:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
@@ -2063,7 +2346,8 @@ func _build_help() -> Control:
 Прыжок / бег                Space / Shift
 Фонарик                     F
 Меню построек               держать Z: мышь — группа, колесо — подтип
-Быстрый выбор группы        1–5,  бластер — 6
+Быстрый выбор группы        1–6,  бластер — 7
+Груз точки выгрузки         навестись и держать E
 Повернуть постройку         R
 Строить / снести            ЛКМ (можно тянуть) / ПКМ
 Орбитальная камера          Tab  (WASD — крутить планету, колесо — зум)
@@ -2096,16 +2380,41 @@ func _unhandled_input(event: InputEvent) -> void:
 			if player:
 				player.look_locked = false
 		return
+	# --- выбор груза точки выгрузки: навёлся на свою точку и держишь E ---
+	if kz and kz.keycode == KEY_E and not kz.echo:
+		if kz.pressed and not item_radial.is_open and not radial.is_open and _hover_own(D.UNLOADER):
+			filter_cell = hover_cell
+			var cur: Dictionary = buildings[grid[hover_cell]]
+			item_radial.open(cur.filter)
+			drag_mode = 0
+			if player:
+				player.look_locked = true
+		elif not kz.pressed and item_radial.is_open:
+			var res = item_radial.close()
+			if res != null and filter_cell != NO_CELL:
+				if is_server:
+					server_set_filter(my_team, filter_cell, res)
+				else:
+					req_set_filter.rpc_id(1, filter_cell, res)
+			filter_cell = NO_CELL
+			if player:
+				player.look_locked = false
+		return
+	var open_menu: RadialMenu = null
 	if radial.is_open:
+		open_menu = radial
+	elif item_radial.is_open:
+		open_menu = item_radial
+	if open_menu:
 		var mmo := event as InputEventMouseMotion
 		if mmo:
-			radial.on_mouse_motion(mmo.relative)
+			open_menu.on_mouse_motion(mmo.relative)
 		var mbo := event as InputEventMouseButton
 		if mbo and mbo.pressed:
 			if mbo.button_index == MOUSE_BUTTON_WHEEL_UP:
-				radial.on_scroll(-1)
+				open_menu.on_scroll(-1)
 			elif mbo.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				radial.on_scroll(1)
+				open_menu.on_scroll(1)
 		return
 	var mb := event as InputEventMouseButton
 	if mb:
@@ -2144,6 +2453,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_5:
 				_select_category(4)
 			KEY_6:
+				_select_category(5)
+			KEY_7:
 				sel_type = D.WEAPON
 			KEY_R:
 				sel_rot += 1
@@ -2173,6 +2484,13 @@ func _type_info(t: int) -> Array:
 		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.NUCLEAR_POWER), D.POWER_RING]
 	lines.append(extra)
 	return lines
+
+
+func _hover_own(type: int) -> bool:
+	if hover_cell == NO_CELL or not grid.has(hover_cell):
+		return false
+	var b: Dictionary = buildings[grid[hover_cell]]
+	return b.type == type and b.team == my_team
 
 
 func _cycle_slot(step: int) -> void:

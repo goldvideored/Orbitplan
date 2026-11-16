@@ -90,6 +90,16 @@ const SHAPES := {
 		"obbbdddo",
 		".oooooo.",
 	],
+	"chip": [
+		".s.s.s..",
+		"oooooooo",
+		"olllllbo",
+		"olbbbbbo",
+		"olbssbbo",
+		"olbbbbdo",
+		"oooooooo",
+		".s.s.s..",
+	],
 	"crystal": [
 		"...oo...",
 		"..olbo..",
@@ -120,6 +130,7 @@ const ICONS := {
 	D.I_URANIUM: ["rod", Color(0.3, 0.85, 0.25), Color(0.75, 1.0, 0.5)],
 	D.I_FUEL: ["canister", Color(0.6, 0.3, 0.8), Color(1.0, 0.7, 1.0)],
 	D.I_WATER: ["drop", Color(0.2, 0.5, 1.0), Color(0.7, 0.9, 1.0)],
+	D.I_CHIP: ["chip", Color(0.15, 0.5, 0.25), Color(0.95, 0.8, 0.3)],
 }
 
 

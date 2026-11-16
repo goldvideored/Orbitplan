@@ -33,6 +33,7 @@ const I_SILICON := 13
 const I_LEAD := 14
 const I_URANIUM := 15
 const I_FUEL := 16
+const I_CHIP := 17         # микросхема: кремний + медь на заводе микросхем
 # жидкость — только по трубам
 const I_WATER := 20
 
@@ -42,6 +43,7 @@ const ITEM_NAMES := {
 	I_URANIUM_ORE: "Урановая руда", I_HELIUM_ORE: "Гелиевый реголит",
 	I_COAL: "Уголь", I_COPPER: "Медь", I_IRON: "Железо", I_SILICON: "Кремний",
 	I_LEAD: "Свинец", I_URANIUM: "Уран", I_FUEL: "Топливо He-3", I_WATER: "Вода",
+	I_CHIP: "Микросхема",
 }
 const ITEM_COLORS := {
 	I_COAL_ORE: Color(0.12, 0.12, 0.13), I_COPPER_ORE: Color(0.78, 0.45, 0.25),
@@ -50,9 +52,9 @@ const ITEM_COLORS := {
 	I_URANIUM_ORE: Color(0.35, 0.8, 0.25), I_HELIUM_ORE: Color(0.75, 0.45, 0.95),
 	I_COAL: Color(0.2, 0.2, 0.22), I_COPPER: Color(1.0, 0.55, 0.25), I_IRON: Color(0.8, 0.8, 0.85),
 	I_SILICON: Color(0.35, 0.4, 0.55), I_LEAD: Color(0.55, 0.55, 0.75), I_URANIUM: Color(0.45, 1.0, 0.3),
-	I_FUEL: Color(0.9, 0.5, 1.0), I_WATER: Color(0.25, 0.55, 1.0),
+	I_FUEL: Color(0.9, 0.5, 1.0), I_WATER: Color(0.25, 0.55, 1.0), I_CHIP: Color(0.2, 0.6, 0.3),
 }
-const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL]
+const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP]
 const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE]   # базовый бур не берёт
 const CORE_CAP := 500          # ядро (база) хранит не больше 500 каждого ресурса
 const START_STORAGE := {I_COPPER: 150, I_IRON: 80, I_SILICON: 30}
@@ -76,6 +78,9 @@ const CRUSHER := 12
 const MELTER := 13
 const CENTRIFUGE := 14
 const FUEL_SYNTH := 15
+const LOADER := 16        # точка погрузки: принимает с конвейеров, тут живёт ровер
+const UNLOADER := 17      # точка выгрузки: ровер привозит выбранный груз
+const CHIP_FACTORY := 18  # завод микросхем
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -85,6 +90,7 @@ const NAMES := {
 	SMELTER: "Плавильня", CRUSHER: "Дробилка", MELTER: "Растопитель",
 	CENTRIFUGE: "Центрифуга", FUEL_SYNTH: "Синтезатор топлива",
 	TURRET: "Турель", ASSEMBLER: "Сборщик юнитов",
+	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
 	CONVEYOR: "везёт твёрдые предметы, воду не берёт",
@@ -102,6 +108,9 @@ const DESC := {
 	FUEL_SYNTH: "2 гелиевого реголита + 2 воды -> топливо. 150 энергии",
 	TURRET: "стреляет по вражеским юнитам",
 	ASSEMBLER: "железо -> боевой юнит",
+	LOADER: "принимает грузы с конвейеров, ровер развозит их по точкам выгрузки",
+	UNLOADER: "ровер привозит сюда выбранный груз (E — выбрать), выдаёт на конвейеры",
+	CHIP_FACTORY: "1 кремний + 1 медь -> микросхема. 80 энергии",
 }
 const COST := {
 	CORE: {},
@@ -120,16 +129,20 @@ const COST := {
 	FUEL_SYNTH: {I_IRON: 50, I_SILICON: 40, I_LEAD: 20},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
+	LOADER: {I_IRON: 20, I_CHIP: 10},
+	UNLOADER: {I_IRON: 15, I_CHIP: 5},
+	CHIP_FACTORY: {I_COPPER: 40, I_IRON: 30, I_SILICON: 10},
 }
 const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
+	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
-	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3,
+	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3,
 }
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
 const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
@@ -139,7 +152,8 @@ const CATEGORIES := [
 	["Транспорт", [CONVEYOR, PIPE]],
 	["Добыча", [DRILL, DRILL2, DRILL3]],
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR]],
-	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH]],
+	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
+	["Логистика", [LOADER, UNLOADER]],
 	["Оборона", [TURRET, ASSEMBLER]],
 ]
 
@@ -153,7 +167,7 @@ const DRILL_TICKS := {DRILL: 16.0, DRILL2: 6.0, DRILL3: 2.5}   # тиков на
 const DRILL3_WATER_PER := 4            # бур III тратит 1 воду на 4 руды
 
 const POWER_USE := {DRILL2: 50.0, DRILL3: 150.0, SMELTER: 60.0, CRUSHER: 40.0,
-	MELTER: 30.0, CENTRIFUGE: 200.0, FUEL_SYNTH: 150.0}
+	MELTER: 30.0, CENTRIFUGE: 200.0, FUEL_SYNTH: 150.0, CHIP_FACTORY: 80.0}
 const SOLAR_POWER := 100.0             # при свете 16/16
 const COAL_POWER := 500.0
 const COAL_BURN_TICKS := 20            # 1 уголь = 2 с работы
@@ -175,7 +189,29 @@ const RECIPES := {
 	MELTER: [{"in": {I_ICE: 1}, "out": I_WATER, "n": 2, "t": 6.0}],
 	CENTRIFUGE: [{"in": {I_URANIUM_ORE: 4}, "out": I_URANIUM, "n": 1, "t": 40.0}],
 	FUEL_SYNTH: [{"in": {I_HELIUM_ORE: 2, I_WATER: 2}, "out": I_FUEL, "n": 1, "t": 30.0}],
+	CHIP_FACTORY: [{"in": {I_SILICON: 1, I_COPPER: 1}, "out": I_CHIP, "n": 1, "t": 12.0}],
 }
+
+# ---------------------------------------------------------------------
+# Логистика: точки погрузки/выгрузки и роверы-курьеры
+# ---------------------------------------------------------------------
+const ROVER_CAP := 25          # единиц груза за рейс
+const ROVER_SPEED := 0.5       # м за тик (5 м/с)
+const ROVER_REACH := 2.5       # с какого расстояния ровер грузится/выгружается
+const LOADER_CAP := 100        # сколько всего держит точка погрузки
+const UNLOADER_CAP := 50       # сколько держит точка выгрузки
+# группы для меню выбора груза точки выгрузки (колесо — сырьё/продукт)
+const FILTER_GROUPS := [
+	["Уголь", [I_COAL_ORE, I_COAL]],
+	["Медь", [I_COPPER_ORE, I_COPPER]],
+	["Железо", [I_IRON_ORE, I_IRON]],
+	["Кремний", [I_QUARTZ, I_SILICON]],
+	["Свинец", [I_LEAD_ORE, I_LEAD]],
+	["Уран", [I_URANIUM_ORE, I_URANIUM]],
+	["Топливо", [I_HELIUM_ORE, I_FUEL]],
+	["Лёд", [I_ICE]],
+	["Микросхемы", [I_CHIP]],
+]
 
 const TEAM_NAMES := ["Синие", "Красные"]
 const TEAM_COLORS := [Color(0.25, 0.6, 1.0), Color(1.0, 0.35, 0.25)]
