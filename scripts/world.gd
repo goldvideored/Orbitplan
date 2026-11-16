@@ -627,10 +627,10 @@ func _status(b: Dictionary) -> Array:
 	if t == D.TURRET:
 		return [ST_OK, "в строю, лазер %d клеток" % int(round(D.TURRET_RANGE / D.CELL_M))]
 	if t == D.TURRET2:
-		var lead := int(b.buf.get(D.I_LEAD, 0))
-		if not creative and lead <= 0 and int(b.get("ammo", 0)) <= 0:
-			return [ST_STOP, "нет свинца"]
-		return [ST_OK, "свинец %d" % lead if not creative else "боеприпасы бесконечны"]
+		var cu := int(b.buf.get(D.I_COPPER, 0))
+		if not creative and cu <= 0 and int(b.get("ammo", 0)) <= 0:
+			return [ST_STOP, "нет меди"]
+		return [ST_OK, "медь %d" % cu if not creative else "боеприпасы бесконечны"]
 	if t == D.TURRET3:
 		var lead := int(b.buf.get(D.I_LEAD, 0))
 		var ur := int(b.buf.get(D.I_URANIUM, 0))
@@ -1164,7 +1164,7 @@ func _accepts(o: Dictionary, item: int) -> bool:
 	if t == D.ASSEMBLER:
 		return item == D.I_IRON and o.store < D.UNIT_COST * 3
 	if t == D.TURRET2:
-		return item == D.I_LEAD and int(buf.get(item, 0)) < D.T2_AMMO_CAP
+		return item == D.I_COPPER and int(buf.get(item, 0)) < D.T2_AMMO_CAP
 	if t == D.TURRET3:
 		if item != D.I_LEAD and item != D.I_URANIUM:
 			return false
@@ -1289,9 +1289,9 @@ func _turret2_tick(b: Dictionary) -> void:
 		b.timer -= 1
 		return
 	if not creative and int(b.get("ammo", 0)) <= 0:
-		if not _buf_take(b, D.I_LEAD, 1):
+		if not _buf_take(b, D.I_COPPER, 1):
 			return
-		b["ammo"] = D.T2_SHOTS_PER_LEAD
+		b["ammo"] = D.T2_SHOTS_PER_COPPER
 	var from := _muzzle(b, 1.3)
 	var tgt := _find_target(b.team, from, D.T2_RANGE, false)
 	if tgt.is_empty():
@@ -2202,7 +2202,7 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		var pitch := _turret_head(n, Vector3(0, 0.68, 0), Vector3(0.1, 0.04, 0))
 		var head: Node3D = n.get_meta("head")
 		_box(head, Vector3(0.6, 0.35, 0.6), Vector3.ZERO, Color(0.5, 0.52, 0.56))
-		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.55, 0.55, 0.75))   # короб со свинцом
+		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.9, 0.5, 0.22))   # короб с медными патронами
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
 	elif t == D.TURRET3:

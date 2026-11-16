@@ -81,7 +81,7 @@ const FUEL_SYNTH := 15
 const LOADER := 16        # точка погрузки: принимает с конвейеров, тут живёт ровер
 const UNLOADER := 17      # точка выгрузки: ровер привозит выбранный груз
 const CHIP_FACTORY := 18  # завод микросхем
-const TURRET2 := 19       # пулемётная турель (свинец)
+const TURRET2 := 19       # пулемётная турель (медь)
 const TURRET3 := 20       # артиллерия (свинец или уран, взрыв)
 const WEAPON := -1        # не постройка: бластер в руках
 
@@ -110,7 +110,7 @@ const DESC := {
 	CENTRIFUGE: "4 урановой руды -> уран. 200 энергии",
 	FUEL_SYNTH: "2 гелиевого реголита + 2 воды -> топливо. 150 энергии",
 	TURRET: "лазер на 6 клеток, без энергии и боеприпасов",
-	TURRET2: "пули на 10 клеток, свинец с конвейера (1 свинец = 4 пули)",
+	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "железо -> боевой юнит",
 	LOADER: "принимает грузы с конвейеров, ровер развозит их по точкам выгрузки",
@@ -133,7 +133,7 @@ const COST := {
 	CENTRIFUGE: {I_IRON: 60, I_SILICON: 30, I_LEAD: 20},
 	FUEL_SYNTH: {I_IRON: 50, I_SILICON: 40, I_LEAD: 20},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
-	TURRET2: {I_IRON: 40, I_LEAD: 15, I_CHIP: 5},
+	TURRET2: {I_IRON: 40, I_COPPER: 20, I_CHIP: 5},
 	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
@@ -248,7 +248,7 @@ const T2_RANGE := 10 * CELL_M
 const T2_DMG := 9
 const T2_CD := 2
 const T2_SPEED := 45.0         # м/с
-const T2_SHOTS_PER_LEAD := 4
+const T2_SHOTS_PER_COPPER := 4
 const T2_AMMO_CAP := 20
 
 # III — артиллерия: навесной снаряд со взрывом
