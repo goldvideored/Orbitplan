@@ -11,6 +11,7 @@ const SENS := 0.0025
 
 var active := true       # false, когда включена орбитальная камера
 var dead := false
+var look_locked := false  # true, пока открыто круговое меню
 var head: Node3D
 var cam: Camera3D
 
@@ -42,7 +43,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not active or dead:
 		return
 	var mm := event as InputEventMouseMotion
-	if mm and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	if mm and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not look_locked:
 		rotate_object_local(Vector3.UP, -mm.relative.x * SENS)
 		head.rotation.x = clampf(head.rotation.x - mm.relative.y * SENS, -1.5, 1.5)
 

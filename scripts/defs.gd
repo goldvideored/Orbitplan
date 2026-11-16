@@ -125,6 +125,14 @@ const HP := {
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
 }
+# размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
+const SIZE := {
+	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
+	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3,
+}
+const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
+const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
+
 # группы для клавиш 1–5 (повторное нажатие листает внутри группы), 6 — бластер
 const CATEGORIES := [
 	["Транспорт", [CONVEYOR, PIPE]],

@@ -199,7 +199,7 @@ func _build_relief(seed_val: int) -> void:
 	for k in common.size():
 		var nz := FastNoiseLite.new()
 		nz.seed = seed_val + 101 + k * 17
-		nz.frequency = 0.09
+		nz.frequency = 0.13
 		nz.fractal_type = FastNoiseLite.FRACTAL_NONE
 		noises.append(nz)
 	var ice_n := FastNoiseLite.new()
@@ -211,11 +211,11 @@ func _build_relief(seed_val: int) -> void:
 		var p := dirs[i] * D.PLANET_R
 		# лёд: полярные шапки и редкие озёра в низинах
 		var icy := ice_n.get_noise_3dv(p)
-		if (absf(dirs[i].y) > 0.8 and icy > -0.1) or (level[i] == 0 and icy > 0.45):
+		if (absf(dirs[i].y) > 0.88 and icy > 0.15) or (level[i] == 0 and icy > 0.6):
 			ore[i] = D.I_ICE
 			continue
 		var best := -1
-		var bv := 0.55
+		var bv := 0.72   # высокий порог — пятна мелкие и редкие
 		for k in common.size():
 			var v: float = noises[k].get_noise_3dv(p)
 			if v > bv:
@@ -267,11 +267,11 @@ func _build_relief(seed_val: int) -> void:
 					spawn_set = true
 			elif dist == 3:
 				level[c] = mini(level[c], 2)
-				ore[c] = starter[(k / 2) % starter.size()]
+				ore[c] = starter[(k / 3) % starter.size()] if k % 3 == 0 else D.I_NONE
 				k += 1
 			else:
 				level[c] = mini(level[c], 2)
-				if c % 6 == 0:
+				if c % 12 == 0:
 					ore[c] = D.I_ICE
 
 

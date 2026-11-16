@@ -7,6 +7,7 @@ const D = preload("res://scripts/defs.gd")
 const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
 const SkyCalc = preload("res://scripts/sky.gd")
+const RadialMenu = preload("res://scripts/radial_menu.gd")
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const NO_CELL := -1
@@ -31,6 +32,9 @@ var next_id := 1
 var next_unit_id := 1
 var tick_acc := 0.0
 var players := {}       # peer_id -> {team, pos, fwd, hp, dead_t, last_shot}
+var power_dirty := true # пересобрать энергосети (после стройки/сноса)
+var power_root := {}    # id постройки -> id корня её энергосети
+var power_has_gen := {} # корень -> есть ли в сети генератор
 
 # --- только клиент ---
 var bnodes := {}
@@ -41,6 +45,14 @@ var orbit_pitch := 0.0
 var orbit_dist := 230.0
 var ghost: Node3D
 var ghost_mat: StandardMaterial3D
+var ghost_foot: MeshInstance3D    # контур будущей постройки по клеткам
+var ghost_arrow: Node3D           # куда смотрит постройка
+var ghost_cover: MeshInstance3D   # зона питания генератора
+var ghost_key := ""
+var radial: RadialMenu
+var inspect_cell := NO_CELL
+var inspect_text := ""
+var inspect_acc := 0.0
 var sel_type := D.CONVEYOR
 var sel_rot := 0
 var mm_items: MultiMesh
@@ -103,12 +115,59 @@ func _new_id() -> int:
 	return i
 
 
-func _cells_of(type: int, cell: int) -> Array:
+func _size_of(type: int) -> int:
+	return 7 if type == D.CORE else int(D.SIZE.get(type, 1))
+
+
+## Клетки, которые займёт постройка: 1 клетка, 3 (треугольник), 9 (ромб 3×3), ядро — 7.
+func _footprint(type: int, cell: int, dir: int) -> Array:
+	var nb: PackedInt32Array = planet.nbrs[cell]
+	var k := nb.size()
 	if type == D.CORE:
-		var arr: Array = [cell]
-		arr.append_array(Array(planet.nbrs[cell]))
-		return arr
+		var core_cells: Array = [cell]
+		core_cells.append_array(Array(nb))
+		return core_cells
+	var size := _size_of(type)
+	if size == 3:
+		return [cell, nb[posmod(dir, k)], nb[posmod(dir + 1, k)]]
+	if size == 9:
+		var o: Vector3 = planet.dirs[cell]
+		var v1: Vector3 = planet.dirs[nb[posmod(dir, k)]] - o
+		var v2: Vector3 = planet.dirs[nb[posmod(dir + 1, k)]] - o
+		var rhombus: Array = []
+		for a in [-1.0, 0.0, 1.0]:
+			for bb in [-1.0, 0.0, 1.0]:
+				var p: Vector3 = (o + v1 * float(a) + v2 * float(bb)).normalized()
+				var c := planet.walk(cell, p)
+				if not rhombus.has(c):
+					rhombus.append(c)
+		return rhombus   # у пятиугольника может выйти меньше 9 — тогда ставить нельзя
 	return [cell]
+
+
+## Какую руду добывает бур на этих клетках: [тип, сколько клеток с ней].
+func _drill_ore(cells: Array) -> Array:
+	var cnt := {}
+	for c in cells:
+		var o: int = planet.ore[c]
+		if o != D.I_NONE:
+			cnt[o] = int(cnt.get(o, 0)) + 1
+	var best := D.I_NONE
+	var bn := 0
+	for o in cnt:
+		if int(cnt[o]) > bn:
+			bn = cnt[o]
+			best = o
+	return [best, bn]
+
+
+func _foot_center(cells: Array) -> Vector3:
+	var d := Vector3.ZERO
+	var r := 0.0
+	for c in cells:
+		d += planet.dirs[c]
+		r = maxf(r, planet.top_r(c))
+	return d.normalized() * r
 
 
 func _arc(a: int, b: int) -> float:
@@ -155,21 +214,25 @@ func _cost_text(type: int) -> String:
 	return ", ".join(parts)
 
 
-func _can_place(team: int, type: int, cell: int) -> bool:
+func _can_place(team: int, type: int, cell: int, dir: int) -> bool:
 	if team < 0 or finished or cell < 0 or cell >= planet.count():
 		return false
-	if not D.COST.has(type) or grid.has(cell):
+	if not D.COST.has(type):
 		return false
-	if planet.level[cell] >= D.MAX_LEVEL:
+	var foot := _footprint(type, cell, dir)
+	if foot.size() != _size_of(type):
 		return false
+	for c in foot:
+		if grid.has(c) or planet.level[c] >= D.MAX_LEVEL:
+			return false
+		if _arc(c, planet.core_center[team]) > D.BUILD_ARC:
+			return false
 	if _is_drill(type):
-		var dep: int = planet.ore[cell]
+		var dep: int = _drill_ore(foot)[0]
 		if dep == D.I_NONE:
 			return false
 		if type == D.DRILL and D.RARE_ORES.has(dep):
 			return false
-	if _arc(cell, planet.core_center[team]) > D.BUILD_ARC:
-		return false
 	return _can_afford(team, type)
 
 
@@ -185,10 +248,26 @@ func _add_building(d: Dictionary) -> void:
 		"store": 0, "timer": 0, "rr": 0,
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
+		"pr": 0.0, "pout": 0.0,
 	}
+	var cells := _footprint(b.type, b.cell, b.dir)
+	b["cells"] = cells
+	# соседние клетки снаружи контура — сюда машина отдаёт продукт
+	var outs: Array = []
+	for c in cells:
+		var nb: PackedInt32Array = planet.nbrs[c]
+		for x in nb:
+			if not cells.has(x) and not outs.has(x):
+				outs.append(x)
+	b["outs"] = outs
+	if _is_drill(b.type):
+		var info := _drill_ore(cells)
+		b["ore"] = info[0]
+		b["ore_n"] = info[1]
 	buildings[b.id] = b
-	for c in _cells_of(b.type, b.cell):
+	for c in cells:
 		grid[c] = b.id
+	power_dirty = true
 	next_id = maxi(next_id, b.id + 1)
 	if not headless:
 		_vis_add(b)
@@ -198,9 +277,10 @@ func _remove_building(id: int) -> void:
 	if not buildings.has(id):
 		return
 	var b: Dictionary = buildings[id]
-	for c in _cells_of(b.type, b.cell):
+	for c in b.cells:
 		grid.erase(c)
 	buildings.erase(id)
+	power_dirty = true
 	if bnodes.has(id):
 		bnodes[id].queue_free()
 		bnodes.erase(id)
@@ -217,7 +297,9 @@ func _bdata(b: Dictionary) -> Dictionary:
 func server_place(team: int, type: int, cell: int, dir: int) -> void:
 	if not D.COST.has(type) or type == D.CORE:
 		return
-	if not _can_place(team, type, cell):
+	var nb0: PackedInt32Array = planet.nbrs[cell]
+	dir = posmod(dir, nb0.size())
+	if not _can_place(team, type, cell, dir):
 		return
 	var st: Dictionary = storage[team]
 	var cost: Dictionary = D.COST[type]
@@ -411,6 +493,75 @@ func snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArra
 		world_time = lerpf(world_time, t, 0.1)
 
 
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func req_inspect(cell: int) -> void:
+	if multiplayer.is_server():
+		inspect_reply.rpc_id(multiplayer.get_remote_sender_id(), cell, _inspect_text(cell))
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func inspect_reply(cell: int, text: String) -> void:
+	inspect_cell = cell
+	inspect_text = text
+
+
+## Состояние постройки текстом (считает сервер — только у него есть внутренности машин).
+func _inspect_text(cell: int) -> String:
+	if not grid.has(cell):
+		return ""
+	var b: Dictionary = buildings[grid[cell]]
+	var t: int = b.type
+	var L := PackedStringArray()
+	L.append("%s  [%s]   прочность %d/%d" % [D.NAMES[t], D.TEAM_NAMES[b.team], b.hp, D.HP[t]])
+	if t == D.CORE:
+		L.append("Принимает только переработанное (сырую руду — нет)")
+	elif _is_drill(t):
+		L.append("Добывает: %s  (рудных клеток %d из %d)" % [D.ITEM_NAMES[b.ore], b.ore_n, b.cells.size()])
+		if t == D.DRILL3:
+			L.append("Вода: %d" % b.water)
+		if b.blocked:
+			L.append("СТОИТ: некуда отдавать руду")
+		elif t == D.DRILL3 and b.water <= 0:
+			L.append("СТОИТ: нет воды (подведи трубу)")
+	elif t == D.CONVEYOR or t == D.PIPE:
+		L.append("Везёт: " + (D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"))
+	elif D.RECIPES.has(t):
+		L.append("Внутри: " + _buf_text(b.buf))
+		if b.cur != -1:
+			var rec: Dictionary = D.RECIPES[t][b.cur]
+			L.append("Делает: %s  %d%%" % [D.ITEM_NAMES[rec["out"]], int(100.0 * b.prog / float(rec["t"]))])
+		elif b.out_n > 0:
+			L.append("СТОИТ: готово %d × %s, некуда отдать" % [b.out_n, D.ITEM_NAMES[b.out_item]])
+		else:
+			L.append("Ждёт сырьё")
+	elif t == D.SOLAR:
+		L.append("Выработка: %d  (свет %d/16)" % [int(b.pout), SkyCalc.level_at(planet.dirs[b.cell], SkyCalc.state(world_time))])
+	elif t == D.COAL_PLANT:
+		L.append("Уголь: %d   выработка: %d" % [int(b.buf.get(D.I_COAL, 0)), int(b.pout)])
+	elif t == D.NUCLEAR:
+		L.append("Уран: %d   вода: %d   выработка: %d" % [int(b.buf.get(D.I_URANIUM, 0)),
+			int(b.buf.get(D.I_WATER, 0)), int(b.pout)])
+		if not b.cool:
+			L.append("СТОИТ: нет воды для охлаждения")
+	elif t == D.ASSEMBLER:
+		L.append("Железо: %d" % b.store)
+	if D.POWER_USE.has(t):
+		var root: int = power_root.get(b.id, b.id)
+		if not power_has_gen.has(root):
+			L.append("Энергия: НЕТ — рядом нет генератора (зона %d колец)" % D.POWER_RING)
+		else:
+			L.append("Энергия: %d%% (нужно %d)" % [int(b.pr * 100.0), int(D.POWER_USE[t])])
+	return "\n".join(L)
+
+
+func _buf_text(buf: Dictionary) -> String:
+	var parts := PackedStringArray()
+	for it in buf:
+		if int(buf[it]) > 0:
+			parts.append("%s %d" % [D.ITEM_NAMES[it], buf[it]])
+	return "пусто" if parts.is_empty() else ", ".join(parts)
+
+
 @rpc("authority", "call_remote", "unreliable")
 func fx_shot(from: Vector3, to: Vector3) -> void:
 	_tracer(from, to)
@@ -434,25 +585,74 @@ func _process(delta: float) -> void:
 		_update_client(delta)
 
 
+## Энергосети: генератор питает всё в D.POWER_RING кольцах вокруг себя.
+## Генераторы и потребители, связанные зонами, образуют одну сеть.
+func _rebuild_power() -> void:
+	power_dirty = false
+	var parent := {}
+	for b in buildings.values():
+		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type):
+			parent[b.id] = b.id
+	for b in buildings.values():
+		if not D.GENERATORS.has(b.type):
+			continue
+		var covered := {}
+		for c in b.cells:
+			var r := planet.rings(c, D.POWER_RING)
+			for x in r:
+				covered[x] = true
+		for x in covered:
+			if grid.has(x):
+				var oid: int = grid[x]
+				if parent.has(oid) and buildings[oid].team == b.team:
+					_uf_union(parent, b.id, oid)
+	power_root.clear()
+	power_has_gen.clear()
+	for id in parent:
+		var root := _uf_find(parent, id)
+		power_root[id] = root
+		if D.GENERATORS.has(buildings[id].type):
+			power_has_gen[root] = true
+
+
+func _uf_find(parent: Dictionary, x: int) -> int:
+	while parent[x] != x:
+		parent[x] = parent[parent[x]]
+		x = parent[x]
+	return x
+
+
+func _uf_union(parent: Dictionary, a: int, b: int) -> void:
+	var ra := _uf_find(parent, a)
+	var rb := _uf_find(parent, b)
+	if ra != rb:
+		parent[ra] = rb
+
+
 func _sim_tick() -> void:
+	if power_dirty:
+		_rebuild_power()
 	var sky := SkyCalc.state(world_time)
 	var prod := [0.0, 0.0]
 	var demand := [0.0, 0.0]
+	var gprod := {}   # корень сети -> выработка
+	var gdem := {}    # корень сети -> спрос
 	var list: Array = buildings.values()
 
 	# проход 1: генераторы и спрос на энергию
 	for b in list:
 		var t: int = b.type
 		var team: int = b.team
+		var out := 0.0
 		if t == D.SOLAR:
 			var lvl := SkyCalc.level_at(planet.dirs[b.cell], sky)
-			prod[team] += D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
+			out = D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
 		elif t == D.COAL_PLANT:
 			if b.burn <= 0 and _buf_take(b, D.I_COAL, 1):
 				b.burn = D.COAL_BURN_TICKS
 			if b.burn > 0:
 				b.burn -= 1
-				prod[team] += D.COAL_POWER
+				out = D.COAL_POWER
 		elif t == D.NUCLEAR:
 			b.wt += 1
 			if b.wt >= D.NUCLEAR_WATER_TICKS:
@@ -462,15 +662,21 @@ func _sim_tick() -> void:
 				b.burn = D.NUCLEAR_URANIUM_TICKS
 			if b.burn > 0 and b.cool:
 				b.burn -= 1
-				prod[team] += D.NUCLEAR_POWER
+				out = D.NUCLEAR_POWER
+		var root: int = power_root.get(b.id, b.id)
+		if D.GENERATORS.has(t):
+			b.pout = out
+			prod[team] += out
+			gprod[root] = float(gprod.get(root, 0.0)) + out
 		if D.POWER_USE.has(t) and _wants_power(b):
 			demand[team] += D.POWER_USE[t]
+			gdem[root] = float(gdem.get(root, 0.0)) + float(D.POWER_USE[t])
 
-	# общая энергосеть команды: не хватает энергии — все машины работают медленнее
-	var ratio := [1.0, 1.0]
+	# в каждой сети: не хватает энергии — все её машины работают медленнее
+	var gratio := {}
+	for root in gdem:
+		gratio[root] = minf(1.0, float(gprod.get(root, 0.0)) / float(gdem[root]))
 	for team in 2:
-		if demand[team] > 0.0:
-			ratio[team] = minf(1.0, prod[team] / demand[team])
 		power_stats[team] = [prod[team], demand[team]]
 
 	# проход 2: работа
@@ -478,7 +684,11 @@ func _sim_tick() -> void:
 		if not buildings.has(b.id):
 			continue
 		var t: int = b.type
-		var r: float = ratio[b.team] if D.POWER_USE.has(t) else 1.0
+		var r := 1.0
+		if D.POWER_USE.has(t):
+			var root: int = power_root.get(b.id, b.id)
+			r = float(gratio.get(root, 1.0 if power_has_gen.has(root) else 0.0))
+			b.pr = r
 		if _is_drill(t):
 			_drill_tick(b, r)
 		elif t == D.CONVEYOR or t == D.PIPE:
@@ -520,7 +730,7 @@ func _wants_power(b: Dictionary) -> bool:
 
 func _drill_tick(b: Dictionary, r: float) -> void:
 	var t: int = b.type
-	var ore: int = planet.ore[b.cell]
+	var ore: int = b.ore
 	if b.blocked:
 		# выход забит — пробуем выгрузить готовую руду
 		if _output(b, ore):
@@ -530,7 +740,9 @@ func _drill_tick(b: Dictionary, r: float) -> void:
 	if t == D.DRILL3 and b.water <= 0:
 		return
 	b.prog += r
-	if b.prog >= float(D.DRILL_TICKS[t]):
+	# скорость пропорциональна доле рудных клеток под буром
+	var need: float = float(D.DRILL_TICKS[t]) * float(b.cells.size()) / float(maxi(int(b.ore_n), 1))
+	if b.prog >= need:
 		if t == D.DRILL3:
 			b.wuse += 1
 			if b.wuse >= D.DRILL3_WATER_PER:
@@ -547,7 +759,7 @@ func _belt_tick(b: Dictionary) -> void:
 		return
 	var speed: float = D.PIPE_SPEED if b.type == D.PIPE else D.CONVEYOR_SPEED
 	b.prog = minf(b.prog + speed, 1.0)
-	if b.prog >= 1.0 and _push(_out_cell(b), b.cell, b.team, b.item):
+	if b.prog >= 1.0 and _push(_out_cell(b), b.id, b.team, b.item):
 		b.item = D.I_NONE
 		b.prog = 0.0
 
@@ -587,13 +799,13 @@ func _has_inputs(b: Dictionary, ins: Dictionary) -> bool:
 	return true
 
 
-## Выдать 1 предмет в любую соседнюю клетку (по кругу). true — если кто-то взял.
+## Выдать 1 предмет в любую клетку вокруг контура (по кругу). true — если кто-то взял.
 func _output(b: Dictionary, item: int) -> bool:
-	var nb: PackedInt32Array = planet.nbrs[b.cell]
-	var k := nb.size()
+	var outs: Array = b.outs
+	var k := outs.size()
 	for i in k:
 		var idx: int = (b.rr + i) % k
-		if _push(nb[idx], b.cell, b.team, item):
+		if _push(outs[idx], b.id, b.team, item):
 			b.rr = (idx + 1) % k
 			return true
 	return false
@@ -623,8 +835,8 @@ func _accepts(o: Dictionary, item: int) -> bool:
 	return false
 
 
-## Положить предмет в клетку cell, пришедший из клетки from. true — если взяли.
-func _push(cell: int, from: int, team: int, item: int) -> bool:
+## Положить предмет в клетку cell от постройки src_id. true — если взяли.
+func _push(cell: int, src_id: int, team: int, item: int) -> bool:
 	if not grid.has(cell):
 		return false
 	var o: Dictionary = buildings[grid[cell]]
@@ -635,7 +847,8 @@ func _push(cell: int, from: int, team: int, item: int) -> bool:
 		# вода — только в трубы, всё твёрдое — только на конвейеры
 		if (item == D.I_WATER) != (t == D.PIPE):
 			return false
-		if o.item != D.I_NONE or _out_cell(o) == from:
+		# лента, которая смотрит в источник, у него ничего не берёт
+		if o.item != D.I_NONE or int(grid.get(_out_cell(o), -1)) == src_id:
 			return false
 		o.item = item
 		o.prog = 0.0
@@ -956,28 +1169,37 @@ func _build_scene() -> void:
 	var cd: Vector3 = planet.dirs[planet.core_center[maxi(my_team, 0)]]
 	_orbit_look_at(cd)
 
-	# призрак постройки: шестигранник + стрелка направления
+	# призрак постройки: контур по клеткам + стрелка + зона питания генератора
 	ghost = Node3D.new()
 	ghost_mat = StandardMaterial3D.new()
 	ghost_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	ghost_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	var gh := MeshInstance3D.new()
-	var ghm := CylinderMesh.new()
-	ghm.top_radius = 0.95
-	ghm.bottom_radius = 0.95
-	ghm.height = 0.3
-	ghm.radial_segments = 6
-	gh.mesh = ghm
-	gh.position.y = 0.15
-	gh.material_override = ghost_mat
-	ghost.add_child(gh)
+	ghost_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	ghost_mat.vertex_color_use_as_albedo = true
+	ghost_foot = MeshInstance3D.new()
+	ghost_foot.material_override = ghost_mat
+	ghost.add_child(ghost_foot)
+	ghost_arrow = Node3D.new()
 	var ga := MeshInstance3D.new()
 	var gam := BoxMesh.new()
-	gam.size = Vector3(0.8, 0.35, 0.2)
+	gam.size = Vector3(0.8, 0.2, 0.2)
 	ga.mesh = gam
-	ga.position = Vector3(0.45, 0.3, 0)
-	ga.material_override = ghost_mat
-	ghost.add_child(ga)
+	ga.position = Vector3(0.45, 0.45, 0)
+	var arrow_mat := StandardMaterial3D.new()
+	arrow_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	arrow_mat.albedo_color = Color(1, 1, 1, 0.8)
+	arrow_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ga.material_override = arrow_mat
+	ghost_arrow.add_child(ga)
+	ghost.add_child(ghost_arrow)
+	ghost_cover = MeshInstance3D.new()
+	var cover_mat := StandardMaterial3D.new()
+	cover_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	cover_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cover_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	cover_mat.albedo_color = Color(1.0, 0.9, 0.2, 0.18)
+	ghost_cover.material_override = cover_mat
+	ghost.add_child(ghost_cover)
 	add_child(ghost)
 
 	# интерфейс
@@ -1000,6 +1222,10 @@ func _build_scene() -> void:
 	big_msg.add_theme_constant_override("outline_size", 10)
 	big_msg.add_theme_color_override("font_outline_color", Color.BLACK)
 	layer.add_child(big_msg)
+
+	radial = RadialMenu.new()
+	radial.info_func = _type_info
+	layer.add_child(radial)
 
 	crosshair = Label.new()
 	crosshair.text = "+"
@@ -1079,13 +1305,16 @@ func _orient(n: Node3D, cell: int, toward: int) -> void:
 
 func _vis_add(b: Dictionary) -> void:
 	var root := Node3D.new()   # в мировых координатах
-	var n := Node3D.new()      # повёрнут по клетке (см. _orient)
+	var n := Node3D.new()      # декор, повёрнут по клетке
 	root.add_child(n)
 	var col: Color = D.TEAM_COLORS[b.team]
 	var t: int = b.type
-	if t == D.CORE:
-		# основание — 7 призм точно по контуру клеток ядра
-		var pr: Array = planet.prism(_cells_of(t, b.cell), CORE_H, 0.94, col.darkened(0.55), col.darkened(0.3))
+	var cells: Array = b.cells
+	var multi := cells.size() > 1
+	var base_h := CORE_H if t == D.CORE else 0.45
+	if multi:
+		# основание — призмы точно по контуру клеток
+		var pr: Array = planet.prism(cells, base_h, 0.94, col.darkened(0.55), col.darkened(0.3))
 		var mi := MeshInstance3D.new()
 		mi.mesh = pr[0]
 		mi.material_override = _vc_mat()
@@ -1098,25 +1327,36 @@ func _vis_add(b: Dictionary) -> void:
 		pcol.shape = pshape
 		pbody.add_child(pcol)
 		root.add_child(pbody)
-		# башня в центральной клетке
-		_cyl(n, 0.9, 0.5, Vector3(0, CORE_H + 0.25, 0), col.darkened(0.2), 6)
-		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, CORE_H + 1.3, 0), col, true)
+	if t == D.CORE:
+		_cyl(n, 0.9, 0.5, Vector3(0, 0.25, 0), col.darkened(0.2), 6)
+		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, 1.3, 0), col, true)
 	else:
 		_vis_shape(n, t, col)
-	# твёрдое тело, чтобы персонаж не проходил сквозь постройки (по конвейерам ходим)
-	if t != D.CONVEYOR and t != D.PIPE:
-		var size := Vector3(1.1, CORE_H + 2.1, 1.1) if t == D.CORE else Vector3(1.2, 1.3, 1.2)
+	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим)
+	if not multi and t != D.CONVEYOR and t != D.PIPE:
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
-		shape.size = size
+		shape.size = Vector3(1.2, 1.3, 1.2)
 		shape_node.shape = shape
-		shape_node.position.y = size.y / 2.0
+		shape_node.position.y = 0.65
 		body.add_child(shape_node)
 		n.add_child(body)
 	add_child(root)
+
 	var nb: PackedInt32Array = planet.nbrs[b.cell]
-	_orient(n, b.cell, nb[int(b.dir) % nb.size()])
+	var toward: int = nb[int(b.dir) % nb.size()]
+	if multi:
+		# декор — в центре контура, поверх основания, крупнее
+		var center := _foot_center(cells)
+		var up := center.normalized()
+		var f := planet.top_pos(toward) - planet.top_pos(b.cell)
+		f = (f - up * f.dot(up)).normalized()
+		n.transform = Transform3D(Basis(f, up, f.cross(up)), center + up * base_h)
+		if t != D.CORE:
+			n.scale = Vector3.ONE * (1.6 if cells.size() == 3 else 2.4)
+	else:
+		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
 
 
@@ -1281,12 +1521,21 @@ func _update_client(delta: float) -> void:
 	_update_hover()
 	var alive := not (player != null and player.dead)
 	ghost.visible = hover_cell != NO_CELL and not finished and my_team >= 0 \
-			and sel_type != D.WEAPON and alive
+			and sel_type != D.WEAPON and alive and not radial.is_open
 	if ghost.visible:
-		var nb: PackedInt32Array = planet.nbrs[hover_cell]
-		_orient(ghost, hover_cell, nb[hover_dir])
-		var ok := _can_place(my_team, sel_type, hover_cell)
+		_update_ghost()
+		var ok := _can_place(my_team, sel_type, hover_cell, hover_dir)
 		ghost_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.45) if ok else Color(1.0, 0.25, 0.2, 0.45)
+
+	# осмотр постройки под прицелом (данные присылает сервер)
+	inspect_acc += delta
+	if hover_cell != NO_CELL and grid.has(hover_cell) and inspect_acc >= 0.25:
+		inspect_acc = 0.0
+		if is_server:
+			inspect_cell = hover_cell
+			inspect_text = _inspect_text(hover_cell)
+		else:
+			req_inspect.rpc_id(1, hover_cell)
 	if drag_mode != 0 and hover_cell != NO_CELL and hover_cell != drag_last and alive:
 		drag_last = hover_cell
 		if drag_mode == 1 and sel_type != D.WEAPON:
@@ -1330,6 +1579,28 @@ func light_level_at(pos: Vector3) -> int:
 	if sky_state.is_empty():
 		return 0
 	return SkyCalc.level_at(pos.normalized(), sky_state)
+
+
+## Перестраивает меш призрака, только когда сменилась клетка, тип или поворот.
+func _update_ghost() -> void:
+	var nb: PackedInt32Array = planet.nbrs[hover_cell]
+	_orient(ghost_arrow, hover_cell, nb[hover_dir])
+	var key := "%d|%d|%d" % [sel_type, hover_cell, hover_dir]
+	if key == ghost_key:
+		return
+	ghost_key = key
+	var foot := _footprint(sel_type, hover_cell, hover_dir)
+	var pr: Array = planet.prism(foot, 0.35, 0.96, Color.WHITE, Color.WHITE)
+	ghost_foot.mesh = pr[0]
+	ghost_cover.visible = D.GENERATORS.has(sel_type)
+	if ghost_cover.visible:
+		var zone := {}
+		for c in foot:
+			var r := planet.rings(c, D.POWER_RING)
+			for x in r:
+				zone[x] = true
+		var cp: Array = planet.prism(zone.keys(), 0.08, 0.9, Color.WHITE, Color.WHITE)
+		ghost_cover.mesh = cp[0]
 
 
 func _update_units() -> void:
@@ -1514,18 +1785,11 @@ func _update_hud() -> void:
 	lines.append("")
 
 	# выбор постройки
-	var cats := PackedStringArray()
-	for i in D.CATEGORIES.size():
-		cats.append("[%d] %s" % [i + 1, D.CATEGORIES[i][0]])
-	cats.append("[6] Бластер")
-	lines.append("   ".join(cats) + "   (повторное нажатие — следующая в группе)")
+	lines.append("Z (держать) — меню построек: мышь — группа, колесо — подтип")
 	if sel_type == D.WEAPON:
 		lines.append("В руках: Бластер  (ЛКМ — огонь)")
 	else:
-		var power_txt := ""
-		if D.POWER_USE.has(sel_type):
-			power_txt = "   энергия: %d" % int(D.POWER_USE[sel_type])
-		lines.append("В руках: %s — %s   цена: %s%s" % [D.NAMES[sel_type], D.DESC[sel_type], _cost_text(sel_type), power_txt])
+		lines.append("В руках: %s (%d кл.)   цена: %s" % [D.NAMES[sel_type], _size_of(sel_type), _cost_text(sel_type)])
 	if hover_cell != NO_CELL:
 		var lv: int = planet.level[hover_cell]
 		var dep: int = planet.ore[hover_cell]
@@ -1536,10 +1800,12 @@ func _update_hud() -> void:
 				txt += " (редкая, нужен Бур II+)"
 		if lv >= D.MAX_LEVEL:
 			txt += ", скалы — строить нельзя"
-		if grid.has(hover_cell):
-			var hb: Dictionary = buildings[grid[hover_cell]]
-			txt += ", стоит: " + D.NAMES[hb.type]
 		lines.append(txt)
+		# состояние постройки под прицелом
+		if grid.has(hover_cell) and inspect_cell != NO_CELL and inspect_text != "" \
+				and int(grid.get(inspect_cell, -1)) == int(grid[hover_cell]):
+			lines.append("")
+			lines.append(inspect_text)
 
 	if fps_mode:
 		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести   R — повернуть   F — фонарик")
@@ -1552,6 +1818,32 @@ func _update_hud() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if headless:
+		return
+	# --- круговое меню: держишь Z ---
+	var kz := event as InputEventKey
+	if kz and kz.keycode == KEY_Z and not kz.echo:
+		if kz.pressed and not radial.is_open:
+			radial.open(sel_type)
+			drag_mode = 0
+			if player:
+				player.look_locked = true
+		elif not kz.pressed and radial.is_open:
+			var res = radial.close()
+			if res != null:
+				sel_type = res
+			if player:
+				player.look_locked = false
+		return
+	if radial.is_open:
+		var mmo := event as InputEventMouseMotion
+		if mmo:
+			radial.on_mouse_motion(mmo.relative)
+		var mbo := event as InputEventMouseButton
+		if mbo and mbo.pressed:
+			if mbo.button_index == MOUSE_BUTTON_WHEEL_UP:
+				radial.on_scroll(-1)
+			elif mbo.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				radial.on_scroll(1)
 		return
 	var mb := event as InputEventMouseButton
 	if mb:
@@ -1601,6 +1893,24 @@ func _unhandled_input(event: InputEvent) -> void:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
+## Строки для кругового меню: название, описание, цена, размер, энергия.
+func _type_info(t: int) -> Array:
+	if t == D.WEAPON:
+		return ["Бластер", "ЛКМ — огонь. Бьёт вражеских юнитов и игроков"]
+	var lines: Array = [D.NAMES[t], D.DESC[t], "Цена: " + _cost_text(t)]
+	var extra := "Размер: %d %s" % [_size_of(t), "клетка" if _size_of(t) == 1 else "клетки" if _size_of(t) < 5 else "клеток"]
+	if D.POWER_USE.has(t):
+		extra += "   |   Потребляет энергии: %d" % int(D.POWER_USE[t])
+	elif t == D.SOLAR:
+		extra += "   |   Выработка: до %d (зависит от света)   |   Зона: %d колец" % [int(D.SOLAR_POWER), D.POWER_RING]
+	elif t == D.COAL_PLANT:
+		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.COAL_POWER), D.POWER_RING]
+	elif t == D.NUCLEAR:
+		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.NUCLEAR_POWER), D.POWER_RING]
+	lines.append(extra)
+	return lines
+
+
 func _cycle_slot(step: int) -> void:
 	var i := all_slots.find(sel_type)
 	sel_type = all_slots[posmod(i + step, all_slots.size())]
@@ -1613,7 +1923,7 @@ func _select_category(ci: int) -> void:
 
 
 func _request_place(cell: int, dir: int) -> void:
-	if not _can_place(my_team, sel_type, cell):
+	if not _can_place(my_team, sel_type, cell, dir):
 		return
 	if is_server:
 		server_place(my_team, sel_type, cell, dir)
