@@ -83,6 +83,7 @@ const UNLOADER := 17      # точка выгрузки: ровер привоз
 const CHIP_FACTORY := 18  # завод микросхем
 const TURRET2 := 19       # пулемётная турель (медь)
 const TURRET3 := 20       # артиллерия (свинец или уран, взрыв)
+const LAUNCH_PAD := 21    # стартовая площадка: собирает корабли и заправляет их
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -92,7 +93,7 @@ const NAMES := {
 	SMELTER: "Плавильня", CRUSHER: "Дробилка", MELTER: "Растопитель",
 	CENTRIFUGE: "Центрифуга", FUEL_SYNTH: "Синтезатор топлива",
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
-	ASSEMBLER: "Сборщик юнитов",
+	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
@@ -110,6 +111,7 @@ const DESC := {
 	CENTRIFUGE: "4 урановой руды -> уран. 200 энергии",
 	FUEL_SYNTH: "2 гелиевого реголита + 2 воды -> топливо. 150 энергии",
 	TURRET: "лазер на 6 клеток, без энергии и боеприпасов",
+	LAUNCH_PAD: "собирает корабли (E) и заправляет их топливом He-3 с конвейера",
 	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "железо -> боевой юнит",
@@ -134,6 +136,7 @@ const COST := {
 	FUEL_SYNTH: {I_IRON: 50, I_SILICON: 40, I_LEAD: 20},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
 	TURRET2: {I_IRON: 40, I_COPPER: 20, I_CHIP: 5},
+	LAUNCH_PAD: {I_IRON: 150, I_SILICON: 40, I_CHIP: 30, I_LEAD: 20},
 	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
@@ -144,12 +147,12 @@ const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200,
+	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
-	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9,
+	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9,
 }
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
 const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
@@ -162,6 +165,7 @@ const CATEGORIES := [
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER]],
 	["Оборона", [TURRET, TURRET2, TURRET3, ASSEMBLER]],
+	["Космос", [LAUNCH_PAD]],
 ]
 
 # ---------------------------------------------------------------------
@@ -287,3 +291,27 @@ const SUN_VIS_DIST := 12000.0  # где рисовать солнце
 const SUN_VIS_R := 70.0        # маленькая яркая точка
 const LIGHT_LEVELS := 16
 const GIANT_MAX_LEVEL := 4     # гигант даёт максимум 4 уровня из 16
+
+# ---------------------------------------------------------------------
+# Корабли. Разведчик: 1 игрок, топливо He-3, Δv по формуле Циолковского
+#   Δv = VE * ln((сухая масса + топливо) / сухая масса)
+# Бюджет для этой системы (считал по орбитам и симуляцией): взлёт на орбиту ~35 м/с,
+# перелёт к соседней луне ~17 м/с (уход с орбиты + Гоман + захват), посадка ~30 м/с.
+# Полный бак разведчика даёт ~116 м/с — с запасом на ошибки пилота.
+# ---------------------------------------------------------------------
+const SCOUT_COST := {I_IRON: 60, I_COPPER: 30, I_SILICON: 20, I_CHIP: 20}
+const SCOUT_BUILD_TICKS := 150     # сборка 15 с
+const SCOUT_DRY := 2.0             # сухая масса, т
+const FUEL_UNIT_MASS := 0.15       # т на 1 единицу топлива
+const SCOUT_TANK := 12             # единиц топлива в баке
+const SCOUT_VE := 180.0            # скорость истечения, м/с
+const SCOUT_THRUST := 35.0         # тяга (т·м/с²): на полном баке ускорение ~9 м/с² при g=6
+const SHIP_MU := 6.0 * 84.0 * 84.0 # гравитационный параметр луны: g * R²
+const SHIP_TURN := 1.3             # рад/с — скорость поворота
+const SHIP_CRASH_SPEED := 6.0      # посадка быстрее — корабль разбит
+const PAD_FUEL_CAP := 24           # сколько топлива держит площадка
+const DV_LAUNCH := 35              # справочные цифры для интерфейса (проверено симуляцией взлёта)
+const DV_TRANSFER := 17
+const DV_LAND := 30
+# орбиты лун вокруг гиганта (на будущее, для перелётов): наша — 6000 м
+const MOON_ORBITS := [4000.0, 6000.0, 8500.0, 11000.0, 14000.0]
