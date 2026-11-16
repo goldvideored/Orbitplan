@@ -8,6 +8,7 @@ const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
 const NO_CELL := -1
 const SLOTS := [D.CONVEYOR, D.DRILL, D.ASSEMBLER, D.TURRET, D.WEAPON]
+const CORE_H := 1.1   # высота основания ядра
 
 var my_team := 0
 var is_server := false
@@ -36,7 +37,7 @@ var mats := {}
 var orbit_cam: Camera3D
 var orbit_yaw := 0.0
 var orbit_pitch := 0.0
-var orbit_dist := 75.0
+var orbit_dist := 230.0
 var ghost: Node3D
 var ghost_mat: StandardMaterial3D
 var sel_type := D.CONVEYOR
@@ -61,6 +62,7 @@ var send_acc := 0.0
 var fire_cd := 0.0
 var hover_cell := NO_CELL
 var hover_dir := 0
+var hover_seed := NO_CELL
 var terrain_body: StaticBody3D
 
 
@@ -661,11 +663,7 @@ func _build_scene() -> void:
 	var built: Array = planet.build_mesh()
 	var terrain := MeshInstance3D.new()
 	terrain.mesh = built[0]
-	var tmat := StandardMaterial3D.new()
-	tmat.vertex_color_use_as_albedo = true
-	tmat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	tmat.roughness = 0.95
-	terrain.material_override = tmat
+	terrain.material_override = _vc_mat()
 	add_child(terrain)
 	terrain_body = StaticBody3D.new()
 	var tcol := CollisionShape3D.new()
@@ -679,12 +677,12 @@ func _build_scene() -> void:
 	# газовый гигант, вокруг которого мы крутимся, и звёзды
 	var giant := MeshInstance3D.new()
 	var sm := SphereMesh.new()
-	sm.radius = 700
-	sm.height = 1400
+	sm.radius = 1800
+	sm.height = 3600
 	sm.radial_segments = 96
 	sm.rings = 48
 	giant.mesh = sm
-	giant.position = Vector3(-600, 500, -2400)
+	giant.position = Vector3(-1500, 1200, -6000)
 	var gmat := StandardMaterial3D.new()
 	gmat.albedo_color = Color(0.85, 0.55, 0.3)
 	gmat.emission_enabled = true
@@ -696,8 +694,8 @@ func _build_scene() -> void:
 	stars.transform_format = MultiMesh.TRANSFORM_3D
 	stars.instance_count = 600
 	var star_mesh := SphereMesh.new()
-	star_mesh.radius = 3.0
-	star_mesh.height = 6.0
+	star_mesh.radius = 8.0
+	star_mesh.height = 16.0
 	star_mesh.radial_segments = 4
 	star_mesh.rings = 2
 	var star_mat := StandardMaterial3D.new()
@@ -709,7 +707,7 @@ func _build_scene() -> void:
 	rng.seed = 12345
 	for i in stars.instance_count:
 		var v := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)).normalized()
-		stars.set_instance_transform(i, Transform3D(Basis(), v * 3500.0))
+		stars.set_instance_transform(i, Transform3D(Basis(), v * 9000.0))
 	var stars_mmi := MultiMeshInstance3D.new()
 	stars_mmi.multimesh = stars
 	add_child(stars_mmi)
@@ -746,7 +744,7 @@ func _build_scene() -> void:
 
 	# орбитальная камера
 	orbit_cam = Camera3D.new()
-	orbit_cam.far = 6000
+	orbit_cam.far = 15000
 	add_child(orbit_cam)
 	var cd: Vector3 = planet.dirs[planet.core_center[maxi(my_team, 0)]]
 	_orbit_look_at(cd)
@@ -864,12 +862,29 @@ func _orient(n: Node3D, cell: int, toward: int) -> void:
 
 
 func _vis_add(b: Dictionary) -> void:
-	var n := Node3D.new()
+	var root := Node3D.new()   # в мировых координатах
+	var n := Node3D.new()      # повёрнут по клетке (см. _orient)
+	root.add_child(n)
 	var col: Color = D.TEAM_COLORS[b.team]
 	var t: int = b.type
 	if t == D.CORE:
-		_cyl(n, 2.6, 1.4, Vector3(0, 0.7, 0), col.darkened(0.4), 6)
-		_box(n, Vector3(1.6, 1.4, 1.6), Vector3(0, 2.1, 0), col, true)
+		# основание — 7 призм точно по контуру клеток ядра
+		var pr: Array = planet.prism(_cells_of(t, b.cell), CORE_H, 0.94, col.darkened(0.55), col.darkened(0.3))
+		var mi := MeshInstance3D.new()
+		mi.mesh = pr[0]
+		mi.material_override = _vc_mat()
+		root.add_child(mi)
+		var pbody := StaticBody3D.new()
+		var pcol := CollisionShape3D.new()
+		var pshape := ConcavePolygonShape3D.new()
+		pshape.backface_collision = true
+		pshape.set_faces(pr[1])
+		pcol.shape = pshape
+		pbody.add_child(pcol)
+		root.add_child(pbody)
+		# башня в центральной клетке
+		_cyl(n, 0.9, 0.5, Vector3(0, CORE_H + 0.25, 0), col.darkened(0.2), 6)
+		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, CORE_H + 1.3, 0), col, true)
 	elif t == D.CONVEYOR:
 		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6)
 		_box(n, Vector3(0.8, 0.12, 0.22), Vector3(0.2, 0.12, 0), col, true)
@@ -884,7 +899,7 @@ func _vis_add(b: Dictionary) -> void:
 		_box(n, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0.75, 0), Color(0.75, 0.75, 0.8))
 	# твёрдое тело, чтобы персонаж не проходил сквозь постройки (по конвейерам ходим)
 	if t != D.CONVEYOR:
-		var size := Vector3(4.4, 2.8, 4.4) if t == D.CORE else Vector3(1.2, 1.3, 1.2)
+		var size := Vector3(1.1, CORE_H + 2.1, 1.1) if t == D.CORE else Vector3(1.2, 1.3, 1.2)
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
@@ -893,10 +908,20 @@ func _vis_add(b: Dictionary) -> void:
 		shape_node.position.y = size.y / 2.0
 		body.add_child(shape_node)
 		n.add_child(body)
-	add_child(n)
+	add_child(root)
 	var nb: PackedInt32Array = planet.nbrs[b.cell]
 	_orient(n, b.cell, nb[int(b.dir) % nb.size()])
-	bnodes[b.id] = n
+	bnodes[b.id] = root
+
+
+func _vc_mat() -> StandardMaterial3D:
+	if mats.has("vc"):
+		return mats["vc"]
+	var m := StandardMaterial3D.new()
+	m.vertex_color_use_as_albedo = true
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mats["vc"] = m
+	return m
 
 
 # =====================================================================
@@ -944,7 +969,7 @@ func _update_orbit_cam() -> void:
 
 func _update_client(delta: float) -> void:
 	if not fps_mode:
-		var sp := delta * 1.2 * (orbit_dist / 75.0)
+		var sp := delta * 0.6 * ((orbit_dist - D.PLANET_R) / 150.0)
 		if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
 			orbit_pitch += sp
 		if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
@@ -1050,7 +1075,8 @@ func _update_hover() -> void:
 	if hit.is_empty():
 		return
 	var hp: Vector3 = hit.position
-	hover_cell = planet.nearest_cell(hp.normalized())
+	hover_cell = planet.walk(hover_seed, hp.normalized())
+	hover_seed = hover_cell
 
 	# направление постройки: сосед, который ближе всего к «вперёд» камеры
 	var fwd: Vector3 = (-c.global_transform.basis.z) if fps_mode else c.global_transform.basis.y
@@ -1192,12 +1218,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			if fps_mode:
 				_cycle_slot(-1)
 			else:
-				orbit_dist = maxf(D.PLANET_R + 8.0, orbit_dist - 4.0)
+				orbit_dist = maxf(D.PLANET_R + 10.0, orbit_dist - (orbit_dist - D.PLANET_R) * 0.12)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			if fps_mode:
 				_cycle_slot(1)
 			else:
-				orbit_dist = minf(250.0, orbit_dist + 4.0)
+				orbit_dist = minf(800.0, orbit_dist + (orbit_dist - D.PLANET_R) * 0.12 + 1.0)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			drag_mode = 1 if mb.pressed else 0
 			drag_last = NO_CELL

@@ -4,9 +4,9 @@ extends RefCounted
 const TICK := 0.1          # шаг симуляции сервера, сек (10 тиков/с)
 
 # Планета
-const SUBDIV := 14         # детализация сферы: клеток = 10*SUBDIV^2 + 2 (14 -> 1962)
-const PLANET_R := 28.0     # радиус планеты, м
-const LEVEL_STEP := 0.5    # высота одной террасы рельефа, м
+const SUBDIV := 42         # детализация сферы: клеток = 10*SUBDIV^2 + 2 (42 -> 17642, клетка ~2 м)
+const PLANET_R := 84.0     # радиус планеты, м
+const LEVEL_STEP := 0.4    # высота одной террасы рельефа, м
 const MAX_LEVEL := 4       # уровень 4 — скалы, строить нельзя
 const CORE_DIRS := [Vector3(1, 0, 0), Vector3(-1, 0, 0)]   # ядра на противоположных сторонах
 
@@ -26,7 +26,7 @@ const TEAM_NAMES := ["Синие", "Красные"]
 const TEAM_COLORS := [Color(0.25, 0.6, 1.0), Color(1.0, 0.35, 0.25)]
 
 const START_ORE := 60
-const BUILD_ARC := 32.0        # строить можно в этом радиусе (по поверхности, м) от своего ядра
+const BUILD_ARC := 40.0        # строить можно в этом радиусе (по поверхности, м) от своего ядра
 
 const DRILL_TICKS := 8         # бур выдаёт 1 руду раз в 8 тиков
 const CONVEYOR_SPEED := 0.25   # доля клетки за тик
@@ -34,7 +34,7 @@ const CONVEYOR_SPEED := 0.25   # доля клетки за тик
 const UNIT_COST := 8           # руды на одного юнита
 const UNIT_BUILD_TICKS := 25
 const UNIT_HP := 60
-const UNIT_SPEED := 0.3        # м за тик
+const UNIT_SPEED := 0.4        # м за тик (ядра в ~260 м друг от друга)
 const UNIT_RANGE := 2.2
 const UNIT_AGGRO := 7.0
 const UNIT_DMG := 6

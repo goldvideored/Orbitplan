@@ -176,23 +176,24 @@ func _build_relief(seed_val: int) -> void:
 	ore.resize(cnt)
 	var hn := FastNoiseLite.new()
 	hn.seed = seed_val
-	hn.frequency = 0.05
+	hn.frequency = 0.03
 	hn.fractal_octaves = 3
 	var on := FastNoiseLite.new()
 	on.seed = seed_val + 101
-	on.frequency = 0.12
+	on.frequency = 0.1
 	for i in cnt:
 		var p := dirs[i] * D.PLANET_R
 		var h := hn.get_noise_3dv(p)
-		var lv := 0
-		if h > 0.35:
+		# пороги разнесены широко: больше ровных участков, скалы — редкость
+		var lv := 1
+		if h > 0.45:
 			lv = 4
-		elif h > 0.18:
+		elif h > 0.3:
 			lv = 3
-		elif h > 0.02:
+		elif h > 0.12:
 			lv = 2
-		elif h > -0.15:
-			lv = 1
+		elif h < -0.2:
+			lv = 0
 		level[i] = lv
 		ore[i] = 1 if (lv < D.MAX_LEVEL and on.get_noise_3dv(p) > 0.38) else 0
 
@@ -230,12 +231,12 @@ func build_mesh() -> Array:
 	_mv = PackedVector3Array()
 	_mn = PackedVector3Array()
 	_mc = PackedColorArray()
-	var base_r: float = D.PLANET_R - 1.0
 	for c in count():
 		var r := top_r(c)
 		var n := dirs[c]
 		var ctr := n * r
 		var cs: PackedVector3Array = corners[c]
+		var nb: PackedInt32Array = nbrs[c]
 		var k := cs.size()
 		var fill: Color = Color(0.80, 0.50, 0.20) if ore[c] == 1 else LEVEL_COLORS[level[c]]
 		var edge := fill.darkened(0.35)
@@ -248,13 +249,57 @@ func build_mesh() -> Array:
 			_tri(ctr, ia, ib, n, fill)
 			_tri(ia, a, b, n, edge)
 			_tri(ia, b, ib, n, edge)
-			if level[c] > 0:
-				var a2 := cs[i] * base_r
-				var b2 := cs[(i + 1) % k] * base_r
+			# стенка вниз — только если сосед за этой гранью ниже
+			var mid := (cs[i] + cs[(i + 1) % k]).normalized()
+			var other := nb[0]
+			for x in nb:
+				if dirs[x].dot(mid) > dirs[other].dot(mid):
+					other = x
+			if level[other] < level[c]:
+				var r2 := top_r(other)
+				var a2 := cs[i] * r2
+				var b2 := cs[(i + 1) % k] * r2
 				var wn := ((a + b) * 0.5 - ctr)
 				wn = (wn - n * wn.dot(n)).normalized()
 				_tri(a, b, b2, wn, wall)
 				_tri(a, b2, a2, wn, wall)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = _mv
+	arr[Mesh.ARRAY_NORMAL] = _mn
+	arr[Mesh.ARRAY_COLOR] = _mc
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var faces := _mv
+	_mv = PackedVector3Array()
+	_mn = PackedVector3Array()
+	_mc = PackedColorArray()
+	return [am, faces]
+
+
+## Призмы точно по контуру клеток (для построек «по форме клеток»).
+## Координаты мировые. Возвращает [ArrayMesh, PackedVector3Array для коллизии].
+func prism(cells: Array, height: float, inset: float, side_col: Color, top_col: Color) -> Array:
+	_mv = PackedVector3Array()
+	_mn = PackedVector3Array()
+	_mc = PackedColorArray()
+	for c in cells:
+		var r := top_r(c)
+		var n := dirs[c]
+		var ctr := n * r
+		var top := ctr + n * height
+		var cs: PackedVector3Array = corners[c]
+		var k := cs.size()
+		for i in k:
+			var a := ctr + (cs[i] * r - ctr) * inset
+			var b := ctr + (cs[(i + 1) % k] * r - ctr) * inset
+			var a2 := a + n * height
+			var b2 := b + n * height
+			_tri(top, a2, b2, n, top_col)
+			var sn := ((a + b) * 0.5 - ctr)
+			sn = (sn - n * sn.dot(n)).normalized()
+			_tri(a, b, b2, sn, side_col)
+			_tri(a, b2, a2, sn, side_col)
 	var arr := []
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = _mv
