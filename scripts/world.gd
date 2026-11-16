@@ -231,7 +231,7 @@ func send_full_sync(peer: int) -> void:
 func req_place(type: int, x: int, y: int, dir: int) -> void:
 	if not multiplayer.is_server():
 		return
-	var team := Net.team_of(multiplayer.get_remote_sender_id())
+	var team: int = Net.team_of(multiplayer.get_remote_sender_id())
 	server_place(team, type, x, y, dir)
 
 
@@ -239,7 +239,7 @@ func req_place(type: int, x: int, y: int, dir: int) -> void:
 func req_remove(x: int, y: int) -> void:
 	if not multiplayer.is_server():
 		return
-	var team := Net.team_of(multiplayer.get_remote_sender_id())
+	var team: int = Net.team_of(multiplayer.get_remote_sender_id())
 	server_remove(team, x, y)
 
 
@@ -297,7 +297,7 @@ func fx_shot(from: Vector3, to: Vector3) -> void:
 # =====================================================================
 
 func server_player_state(peer: int, pos: Vector3, yaw: float) -> void:
-	var team := Net.team_of(peer)
+	var team: int = Net.team_of(peer)
 	if team < 0:
 		return
 	if not players.has(peer):
@@ -868,12 +868,12 @@ func _vis_add(b: Dictionary) -> void:
 	if t != D.CONVEYOR:
 		var size := Vector3(2.8, 2.2, 2.8) if t == D.CORE else Vector3(0.9, 1.0, 0.9)
 		var body := StaticBody3D.new()
-		var col := CollisionShape3D.new()
+		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
 		shape.size = size
-		col.shape = shape
-		col.position.y = size.y / 2.0
-		body.add_child(col)
+		shape_node.shape = shape
+		shape_node.position.y = size.y / 2.0
+		body.add_child(shape_node)
 		n.add_child(body)
 	add_child(n)
 	bnodes[b.id] = n
