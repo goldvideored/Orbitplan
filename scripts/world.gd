@@ -91,6 +91,8 @@ var item_radial: RadialMenu    # меню выбора груза для точ�
 var filter_cell := NO_CELL
 var cur_rovers: Array = []
 var rover_nodes := {}          # id ровера -> Node3D
+var turret_nodes := {}         # id турели -> декор с поворотной башней
+var turret_aim := {}           # id турели -> куда целится (мировое направление)
 var mm_proj: MultiMesh
 var proj_pos := PackedVector3Array()
 var proj_vel := PackedVector3Array()
@@ -331,6 +333,8 @@ func _remove_building(id: int) -> void:
 	if bnodes.has(id):
 		bnodes[id].queue_free()
 		bnodes.erase(id)
+	turret_nodes.erase(id)
+	turret_aim.erase(id)
 
 
 func _bdata(b: Dictionary) -> Dictionary:
@@ -736,6 +740,16 @@ func _buf_text(buf: Dictionary) -> String:
 @rpc("authority", "call_remote", "unreliable")
 func fx_shot(from: Vector3, to: Vector3) -> void:
 	_tracer(from, to)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func turret_aims(ids: PackedInt32Array, dirs: PackedVector3Array) -> void:
+	_apply_aims(ids, dirs)
+
+
+func _apply_aims(ids: PackedInt32Array, dirs: PackedVector3Array) -> void:
+	for i in ids.size():
+		turret_aim[ids[i]] = dirs[i]
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -1265,6 +1279,7 @@ func _turret_tick(b: Dictionary) -> void:
 		return
 	_hit_target(tgt, D.TURRET_DMG)
 	b.timer = D.TURRET_CD
+	b["aim"] = (Vector3(tgt.pos) - from).normalized()
 	_fx_beam(from, tgt.pos, 1)
 
 
@@ -1284,6 +1299,7 @@ func _turret2_tick(b: Dictionary) -> void:
 	var vel := _aim(from, tgt.pos, D.T2_SPEED, 1.0)
 	if vel == Vector3.ZERO:
 		return
+	b["aim"] = vel.normalized()
 	_spawn_proj(from, vel, b.team, 0, D.T2_DMG, 1.2, b.cell)
 	if not creative:
 		b["ammo"] = int(b.ammo) - 1
@@ -1309,6 +1325,7 @@ func _turret3_tick(b: Dictionary) -> void:
 	var kind := 2 if has_u else 1
 	if not creative:
 		_buf_take(b, D.I_URANIUM if has_u else D.I_LEAD, 1)
+	b["aim"] = vel.normalized()
 	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell)
 	b.timer = D.T3_CD
 
@@ -1660,6 +1677,12 @@ func _send_snapshot() -> void:
 	for pid in players:
 		var o: Dictionary = players[pid]
 		pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
+	var aim_ids := PackedInt32Array()
+	var aim_dirs := PackedVector3Array()
+	for b in buildings.values():
+		if b.has("aim"):
+			aim_ids.append(b.id)
+			aim_dirs.append(b.aim)
 	var pp := PackedVector3Array()
 	var pv := PackedVector3Array()
 	var pk := PackedByteArray()
@@ -1673,9 +1696,12 @@ func _send_snapshot() -> void:
 	for p in Net.ready_peers:
 		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, rv, world_time)
 		proj_snap.rpc_id(p, pp, pv, pk)
+		if not aim_ids.is_empty():
+			turret_aims.rpc_id(p, aim_ids, aim_dirs)
 	if not headless:
 		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats, rv)
 		_apply_proj(pp, pv, pk)
+		_apply_aims(aim_ids, aim_dirs)
 
 
 # =====================================================================
@@ -2037,6 +2063,8 @@ func _vis_add(b: Dictionary) -> void:
 		ind.material_override = _mat(STATE_COLORS[ST_IDLE], true)
 		n.add_child(ind)
 		root.set_meta("ind", ind)
+	if n.has_meta("pitch"):
+		turret_nodes[b.id] = n
 	if t == D.UNLOADER:
 		var sp := Sprite3D.new()
 		sp.texture = icon_atlas
@@ -2078,6 +2106,20 @@ func _vis_add(b: Dictionary) -> void:
 	bnodes[b.id] = root
 	if b.filter != D.I_NONE:
 		_apply_filter(b.id, b.filter)
+
+
+## Поворотная часть турели: head крутится вокруг вертикали, pitch внутри неё поднимает ствол.
+## Ствол строится вдоль локальной +X внутри pitch. Возвращает pitch.
+func _turret_head(n: Node3D, head_pos: Vector3, pitch_pos: Vector3) -> Node3D:
+	var head := Node3D.new()
+	head.position = head_pos
+	n.add_child(head)
+	var pitch := Node3D.new()
+	pitch.position = pitch_pos
+	head.add_child(pitch)
+	n.set_meta("head", head)
+	n.set_meta("pitch", pitch)
+	return pitch
 
 
 ## Простые формы построек. Светящиеся детали видны и в полной темноте.
@@ -2151,20 +2193,26 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(n, Vector3(0.7, 0.25, 0.7), Vector3(0, 1.32, 0), col, true)
 	elif t == D.TURRET:
 		_cyl(n, 0.55, 0.6, Vector3(0, 0.3, 0), col.darkened(0.35))
-		_box(n, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0.75, 0), Color(0.75, 0.75, 0.8))
-		_box(n, Vector3(0.08, 0.12, 0.12), Vector3(0.92, 0.75, 0), Color(1.0, 0.25, 0.2), true)   # линза лазера
+		var pitch := _turret_head(n, Vector3(0, 0.75, 0), Vector3.ZERO)
+		_cyl(pitch, 0.22, 0.25, Vector3(0, -0.05, 0), Color(0.6, 0.6, 0.65))
+		_box(pitch, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0, 0), Color(0.75, 0.75, 0.8))
+		_box(pitch, Vector3(0.08, 0.12, 0.12), Vector3(0.92, 0, 0), Color(1.0, 0.25, 0.2), true)   # линза лазера
 	elif t == D.TURRET2:
 		_box(n, Vector3(1.0, 0.5, 1.0), Vector3(0, 0.25, 0), col.darkened(0.35))
-		_box(n, Vector3(0.6, 0.35, 0.6), Vector3(0, 0.68, 0), Color(0.5, 0.52, 0.56))
+		var pitch := _turret_head(n, Vector3(0, 0.68, 0), Vector3(0.1, 0.04, 0))
+		var head: Node3D = n.get_meta("head")
+		_box(head, Vector3(0.6, 0.35, 0.6), Vector3.ZERO, Color(0.5, 0.52, 0.56))
+		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.55, 0.55, 0.75))   # короб со свинцом
 		for sz in [-0.12, 0.12]:
-			_box(n, Vector3(0.75, 0.08, 0.08), Vector3(0.6, 0.72, sz), Color(0.25, 0.25, 0.28))
-		_box(n, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, 0.6, 0), Color(0.55, 0.55, 0.75))   # короб со свинцом
+			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
 	elif t == D.TURRET3:
 		_cyl(n, 0.65, 0.5, Vector3(0, 0.25, 0), col.darkened(0.35))
-		_box(n, Vector3(0.8, 0.55, 0.7), Vector3(0, 0.75, 0), Color(0.45, 0.47, 0.42))
-		var barrel := _box(n, Vector3(1.5, 0.16, 0.16), Vector3(0.6, 1.15, 0), Color(0.3, 0.31, 0.3))
-		barrel.rotation_degrees = Vector3(0, 0, 25)
-		_box(n, Vector3(0.08, 0.18, 0.18), Vector3(1.3, 1.48, 0), Color(1.0, 0.55, 0.2), true)
+		var pitch := _turret_head(n, Vector3(0, 0.75, 0), Vector3(0.15, 0.35, 0))
+		var head: Node3D = n.get_meta("head")
+		_box(head, Vector3(0.8, 0.55, 0.7), Vector3.ZERO, Color(0.45, 0.47, 0.42))
+		_box(pitch, Vector3(1.5, 0.16, 0.16), Vector3(0.65, 0, 0), Color(0.3, 0.31, 0.3))
+		_box(pitch, Vector3(0.08, 0.18, 0.18), Vector3(1.42, 0, 0), Color(1.0, 0.55, 0.2), true)
+		pitch.rotation_degrees = Vector3(0, 0, 25)   # пока цели нет — ствол приподнят
 	# метка команды — маленький огонёк, чтобы своё было видно ночью
 	if t != D.CONVEYOR and t != D.PIPE:
 		_box(n, Vector3(0.15, 0.15, 0.15), Vector3(-0.5, 0.15, -0.5), col, true)
@@ -2261,6 +2309,7 @@ func _update_client(delta: float) -> void:
 	_update_players(delta)
 	_update_rovers(delta)
 	_update_proj(delta)
+	_update_turrets(delta)
 
 	# стрельба
 	fire_cd -= delta
@@ -2470,6 +2519,27 @@ func _update_players(delta: float) -> void:
 		player.dead = my_hp <= 0
 		if not finished:
 			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
+
+
+## Башня поворачивается к цели (рысканье), ствол поднимается на угол выстрела (тангаж).
+func _update_turrets(delta: float) -> void:
+	var k := minf(1.0, delta * 6.0)
+	for id in turret_nodes.keys():
+		var n: Node3D = turret_nodes[id]
+		if not is_instance_valid(n):
+			turret_nodes.erase(id)
+			continue
+		if not turret_aim.has(id):
+			continue
+		var d: Vector3 = turret_aim[id]
+		# переводим мировое направление в локальные оси декора (масштаб убираем)
+		var local := n.global_transform.basis.orthonormalized().inverse() * d
+		var yaw := atan2(-local.z, local.x)
+		var pitch_ang := atan2(local.y, Vector2(local.x, local.z).length())
+		var head: Node3D = n.get_meta("head")
+		var pitch: Node3D = n.get_meta("pitch")
+		head.rotation.y = lerp_angle(head.rotation.y, yaw, k)
+		pitch.rotation.z = lerp_angle(pitch.rotation.z, pitch_ang, k)
 
 
 func _update_proj(delta: float) -> void:
