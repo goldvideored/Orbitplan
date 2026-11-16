@@ -10,6 +10,9 @@ const SkyCalc = preload("res://scripts/sky.gd")
 const RadialMenu = preload("res://scripts/radial_menu.gd")
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
+const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
+const RINGS_SHADER = preload("res://shaders/rings.gdshader")
+const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const NO_CELL := -1
 const CORE_H := 1.1   # высота основания ядра
 
@@ -99,7 +102,7 @@ var terrain_body: StaticBody3D
 var world_time: float = D.DAY_LENGTH * 0.25   # старт: у обоих ядер рассвет/закат
 var giant_node: MeshInstance3D
 var sun_node: MeshInstance3D
-var stars_node: MultiMeshInstance3D
+var stars_node: Node3D   # сфера звёздного неба
 var flash_on := false
 var sky_state := {}
 
@@ -1143,7 +1146,9 @@ func _build_scene() -> void:
 	var built: Array = planet.build_mesh()
 	var terrain := MeshInstance3D.new()
 	terrain.mesh = built[0]
-	terrain.material_override = _vc_mat()
+	var tmat := ShaderMaterial.new()
+	tmat.shader = TERRAIN_SHADER
+	terrain.material_override = tmat
 	add_child(terrain)
 	terrain_body = StaticBody3D.new()
 	var tcol := CollisionShape3D.new()
@@ -1166,6 +1171,16 @@ func _build_scene() -> void:
 	gmat.shader = GIANT_SHADER
 	giant_node.material_override = gmat
 	add_child(giant_node)
+	# кольца: плоский квадрат с шейдером, наклонён относительно экватора гиганта
+	var rings := MeshInstance3D.new()
+	var rq := QuadMesh.new()
+	rq.size = Vector2.ONE * D.GIANT_R * 2.0 * 2.3
+	rings.mesh = rq
+	var rmat := ShaderMaterial.new()
+	rmat.shader = RINGS_SHADER
+	rings.material_override = rmat
+	rings.rotation_degrees = Vector3(-90 + 18, 0, 8)
+	giant_node.add_child(rings)
 
 	# солнце — маленькая очень яркая точка
 	sun_node = MeshInstance3D.new()
@@ -1182,27 +1197,20 @@ func _build_scene() -> void:
 	sun_node.material_override = sun_mat
 	add_child(sun_node)
 
-	var stars := MultiMesh.new()
-	stars.transform_format = MultiMesh.TRANSFORM_3D
-	stars.instance_count = 600
-	var star_mesh := SphereMesh.new()
-	star_mesh.radius = 8.0
-	star_mesh.height = 16.0
-	star_mesh.radial_segments = 4
-	star_mesh.rings = 2
-	var star_mat := StandardMaterial3D.new()
-	star_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	star_mat.albedo_color = Color(1, 1, 1)
-	star_mesh.material = star_mat
-	stars.mesh = star_mesh
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 12345
-	for i in stars.instance_count:
-		var v := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)).normalized()
-		stars.set_instance_transform(i, Transform3D(Basis(), v * 9000.0))
-	stars_node = MultiMeshInstance3D.new()
-	stars_node.multimesh = stars
-	add_child(stars_node)
+	# звёздное небо — огромная сфера изнутри
+	var sky_mesh := SphereMesh.new()
+	sky_mesh.radius = 14000.0
+	sky_mesh.height = 28000.0
+	sky_mesh.radial_segments = 48
+	sky_mesh.rings = 24
+	var sky_mi := MeshInstance3D.new()
+	sky_mi.mesh = sky_mesh
+	var skymat := ShaderMaterial.new()
+	skymat.shader = SKY_SHADER
+	sky_mi.material_override = skymat
+	sky_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	stars_node = sky_mi
+	add_child(sky_mi)
 
 	# руда на лентах
 	mm_items = MultiMesh.new()
@@ -1364,7 +1372,20 @@ func _mat(color: Color, glow := false) -> Material:
 	return m
 
 
-func _box(parent: Node3D, size: Vector3, pos: Vector3, color: Color, glow := false) -> void:
+## Материал с пиксельным узором: 0 гладко, 1 металл, 2 лента конвейера, 3 труба с водой.
+func _pmat(color: Color, pattern: int) -> Material:
+	var key := "p%d|%s" % [pattern, color]
+	if mats.has(key):
+		return mats[key]
+	var sh := ShaderMaterial.new()
+	sh.shader = LIT_SHADER
+	sh.set_shader_parameter("albedo", color)
+	sh.set_shader_parameter("pattern", pattern)
+	mats[key] = sh
+	return sh
+
+
+func _box(parent: Node3D, size: Vector3, pos: Vector3, color: Color, glow := false) -> MeshInstance3D:
 	var m := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = size
@@ -1372,9 +1393,10 @@ func _box(parent: Node3D, size: Vector3, pos: Vector3, color: Color, glow := fal
 	m.position = pos
 	m.material_override = _mat(color, glow)
 	parent.add_child(m)
+	return m
 
 
-func _cyl(parent: Node3D, r: float, h: float, pos: Vector3, color: Color, segs := 16) -> void:
+func _cyl(parent: Node3D, r: float, h: float, pos: Vector3, color: Color, segs := 16) -> MeshInstance3D:
 	var m := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
 	cm.top_radius = r
@@ -1385,6 +1407,7 @@ func _cyl(parent: Node3D, r: float, h: float, pos: Vector3, color: Color, segs :
 	m.position = pos
 	m.material_override = _mat(color)
 	parent.add_child(m)
+	return m
 
 
 ## Ставит узел на верх клетки: локальная Y — нормаль, локальная X — в сторону соседа.
@@ -1470,10 +1493,12 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	var dark := col.darkened(0.45)
 	var metal := Color(0.6, 0.6, 0.65)
 	if t == D.CONVEYOR:
-		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6)
+		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6).material_override = \
+				_pmat(Color(0.3, 0.3, 0.33), 2)
 		_box(n, Vector3(0.8, 0.12, 0.22), Vector3(0.2, 0.12, 0), col, true)
 	elif t == D.PIPE:
-		_cyl(n, 0.6, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.35, 0.45), 6)
+		_cyl(n, 0.6, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.35, 0.45), 6).material_override = \
+				_pmat(Color(0.25, 0.4, 0.6), 3)
 		_box(n, Vector3(0.8, 0.14, 0.2), Vector3(0.2, 0.14, 0), Color(0.25, 0.55, 1.0), true)
 	elif t == D.DRILL:
 		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), dark)

@@ -17,6 +17,8 @@ var spawn_cell := [0, 0]
 var _mv := PackedVector3Array()
 var _mn := PackedVector3Array()
 var _mc := PackedColorArray()
+var _mu := PackedVector2Array()    # UV: пиксельные координаты в плоскости клетки (м)
+var _mu2 := PackedVector2Array()   # UV2: (уровень, вид грани * 16 + руда + 1) — для шейдера
 
 
 func generate(seed_val: int) -> void:
@@ -307,9 +309,7 @@ const LEVEL_COLORS := [
 
 ## Возвращает [ArrayMesh, PackedVector3Array треугольников для коллизии].
 func build_mesh() -> Array:
-	_mv = PackedVector3Array()
-	_mn = PackedVector3Array()
-	_mc = PackedColorArray()
+	_reset_buffers()
 	for c in count():
 		var r := top_r(c)
 		var n := dirs[c]
@@ -320,16 +320,28 @@ func build_mesh() -> Array:
 		var fill: Color = LEVEL_COLORS[level[c]]
 		if ore[c] != D.I_NONE:
 			fill = D.ITEM_COLORS[ore[c]]
-		var edge := fill.darkened(0.35)
-		var wall := fill.darkened(0.5)
+		# касательная плоскость клетки — в ней квадратные пиксели
+		var helper := Vector3.UP if absf(n.y) < 0.9 else Vector3.RIGHT
+		var t1 := n.cross(helper).normalized()
+		var t2 := n.cross(t1)
+		var off := Vector2(float(c % 97), float(c % 89)) * 3.7   # чтобы соседние клетки не повторялись
+		var ore_code: int = ore[c] + 1
+		var top2 := Vector2(level[c], 0 * 16 + ore_code)
+		var rim2 := Vector2(level[c], 1 * 16 + ore_code)
+		var wall2 := Vector2(level[c], 2 * 16)
+		var uc := off
 		for i in k:
 			var a := cs[i] * r
 			var b := cs[(i + 1) % k] * r
 			var ia := ctr + (a - ctr) * 0.86
 			var ib := ctr + (b - ctr) * 0.86
-			_tri(ctr, ia, ib, n, fill)
-			_tri(ia, a, b, n, edge)
-			_tri(ia, b, ib, n, edge)
+			var ua := Vector2((a - ctr).dot(t1), (a - ctr).dot(t2)) + off
+			var ub := Vector2((b - ctr).dot(t1), (b - ctr).dot(t2)) + off
+			var uia := Vector2((ia - ctr).dot(t1), (ia - ctr).dot(t2)) + off
+			var uib := Vector2((ib - ctr).dot(t1), (ib - ctr).dot(t2)) + off
+			_tri(ctr, ia, ib, n, fill, uc, uia, uib, top2)
+			_tri(ia, a, b, n, fill, uia, ua, ub, rim2)
+			_tri(ia, b, ib, n, fill, uia, ub, uib, rim2)
 			# стенка вниз — только если сосед за этой гранью ниже
 			var mid := (cs[i] + cs[(i + 1) % k]).normalized()
 			var other := nb[0]
@@ -342,28 +354,45 @@ func build_mesh() -> Array:
 				var b2 := cs[(i + 1) % k] * r2
 				var wn := ((a + b) * 0.5 - ctr)
 				wn = (wn - n * wn.dot(n)).normalized()
-				_tri(a, b, b2, wn, wall)
-				_tri(a, b2, a2, wn, wall)
+				# у стенки UV.y — радиус: слои породы идут вокруг всей планеты
+				var edge_len := a.distance_to(b)
+				var wa := Vector2(off.x, r)
+				var wb := Vector2(off.x + edge_len, r)
+				var wa2 := Vector2(off.x, r2)
+				var wb2 := Vector2(off.x + edge_len, r2)
+				_tri(a, b, b2, wn, fill, wa, wb, wb2, wall2)
+				_tri(a, b2, a2, wn, fill, wa, wb2, wa2, wall2)
+	var am := _commit_mesh()
+	var faces := _mv
+	_reset_buffers()
+	return [am, faces]
+
+
+func _reset_buffers() -> void:
+	_mv = PackedVector3Array()
+	_mn = PackedVector3Array()
+	_mc = PackedColorArray()
+	_mu = PackedVector2Array()
+	_mu2 = PackedVector2Array()
+
+
+func _commit_mesh() -> ArrayMesh:
 	var arr := []
 	arr.resize(Mesh.ARRAY_MAX)
 	arr[Mesh.ARRAY_VERTEX] = _mv
 	arr[Mesh.ARRAY_NORMAL] = _mn
 	arr[Mesh.ARRAY_COLOR] = _mc
+	arr[Mesh.ARRAY_TEX_UV] = _mu
+	arr[Mesh.ARRAY_TEX_UV2] = _mu2
 	var am := ArrayMesh.new()
 	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-	var faces := _mv
-	_mv = PackedVector3Array()
-	_mn = PackedVector3Array()
-	_mc = PackedColorArray()
-	return [am, faces]
+	return am
 
 
 ## Призмы точно по контуру клеток (для построек «по форме клеток»).
 ## Координаты мировые. Возвращает [ArrayMesh, PackedVector3Array для коллизии].
 func prism(cells: Array, height: float, inset: float, side_col: Color, top_col: Color) -> Array:
-	_mv = PackedVector3Array()
-	_mn = PackedVector3Array()
-	_mc = PackedColorArray()
+	_reset_buffers()
 	for c in cells:
 		var r := top_r(c)
 		var n := dirs[c]
@@ -381,24 +410,21 @@ func prism(cells: Array, height: float, inset: float, side_col: Color, top_col: 
 			sn = (sn - n * sn.dot(n)).normalized()
 			_tri(a, b, b2, sn, side_col)
 			_tri(a, b2, a2, sn, side_col)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = _mv
-	arr[Mesh.ARRAY_NORMAL] = _mn
-	arr[Mesh.ARRAY_COLOR] = _mc
-	var am := ArrayMesh.new()
-	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var am := _commit_mesh()
 	var faces := _mv
-	_mv = PackedVector3Array()
-	_mn = PackedVector3Array()
-	_mc = PackedColorArray()
+	_reset_buffers()
 	return [am, faces]
 
 
-func _tri(a: Vector3, b: Vector3, c: Vector3, n: Vector3, col: Color) -> void:
+func _tri(a: Vector3, b: Vector3, c: Vector3, n: Vector3, col: Color,
+		ua := Vector2.ZERO, ub := Vector2.ZERO, uc := Vector2.ZERO, u2 := Vector2.ZERO) -> void:
 	_mv.append(a)
 	_mv.append(b)
 	_mv.append(c)
+	_mu.append(ua)
+	_mu.append(ub)
+	_mu.append(uc)
 	for i in 3:
 		_mn.append(n)
 		_mc.append(col)
+		_mu2.append(u2)
