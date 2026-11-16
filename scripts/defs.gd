@@ -43,3 +43,12 @@ const TURRET_DMG := 8
 const TURRET_CD := 4
 
 const WAVE_TICKS := 300        # волна от пустой (без игроков) команды раз в 30 с
+
+# Персонаж
+const WEAPON := -1             # "постройка" в слоте 5 = бластер
+const PLAYER_HP := 100
+const RESPAWN_TICKS := 50      # 5 с до респауна
+const GUN_DMG := 15
+const GUN_RANGE := 40.0
+const GUN_CD_MS := 200
+const BUILD_REACH := 12.0      # дальность стройки от первого лица

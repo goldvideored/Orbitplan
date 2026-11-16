@@ -4,6 +4,7 @@ extends Node3D
 ## На клиенте: отрисовка, камера, ввод. Хост делает и то и другое.
 
 const D = preload("res://scripts/defs.gd")
+const Player = preload("res://scripts/player.gd")
 const NO_TILE := Vector2i(-9999, -9999)
 
 var my_team := 0
@@ -25,6 +26,7 @@ var next_unit_id := 1
 var tick_acc := 0.0
 var wave_timer := [0, 0]
 var wave_count := [0, 0]
+var players := {}    # peer_id -> {team, pos: Vector3, yaw, hp, dead_t, last_shot}
 
 # --- только клиент ---
 var bnodes := {}
@@ -46,6 +48,14 @@ var cur_items := PackedVector2Array()
 var snap_time := 0.0
 var drag_mode := 0   # 0 нет, 1 строим, 2 сносим
 var drag_last := NO_TILE
+var player: Player = null
+var fps_mode := true
+var crosshair: Label
+var cur_players: Array = []
+var others := {}     # peer_id -> Node3D (чужие персонажи)
+var my_hp := D.PLAYER_HP
+var send_acc := 0.0
+var fire_cd := 0.0
 
 
 func setup(seed_val: int, team: int, server: bool, dedicated: bool) -> void:
@@ -100,6 +110,12 @@ func _tiles_of(type: int, pos: Vector2i) -> Array:
 				arr.append(pos + Vector2i(dx, dy))
 		return arr
 	return [pos]
+
+
+func _spawn_point(team: int) -> Vector3:
+	var c: Vector2i = D.CORE_POS[team]
+	var side := 3.0 if team == 0 else -3.0
+	return Vector3(c.x + 0.5 + side, 0.5, c.y + 0.5)
 
 
 func _bcenter(b: Dictionary) -> Vector2:
@@ -250,8 +266,127 @@ func full_sync(list: Array) -> void:
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func snapshot(u: PackedFloat32Array, it: PackedVector2Array, st: Array, hp: Array) -> void:
-	_apply_snapshot(u, it, st, hp)
+func snapshot(u: PackedFloat32Array, it: PackedVector2Array, pl: Array, st: Array, hp: Array) -> void:
+	_apply_snapshot(u, it, pl, st, hp)
+
+
+@rpc("any_peer", "call_remote", "unreliable_ordered")
+func req_player_state(pos: Vector3, yaw: float) -> void:
+	if multiplayer.is_server():
+		server_player_state(multiplayer.get_remote_sender_id(), pos, yaw)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_shoot(from: Vector3, dir: Vector3) -> void:
+	if multiplayer.is_server():
+		server_shoot(multiplayer.get_remote_sender_id(), from, dir)
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_respawn(pos: Vector3) -> void:
+	_do_respawn(pos)
+
+
+@rpc("authority", "call_remote", "unreliable")
+func fx_shot(from: Vector3, to: Vector3) -> void:
+	_tracer(from, to)
+
+
+# =====================================================================
+# Сервер: персонажи
+# =====================================================================
+
+func server_player_state(peer: int, pos: Vector3, yaw: float) -> void:
+	var team := Net.team_of(peer)
+	if team < 0:
+		return
+	if not players.has(peer):
+		players[peer] = {"team": team, "pos": pos, "yaw": yaw, "hp": D.PLAYER_HP, "dead_t": 0, "last_shot": 0}
+	var pl: Dictionary = players[peer]
+	if pl.hp <= 0:
+		return
+	pl.pos = pos
+	pl.yaw = yaw
+
+
+func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
+	if finished or not players.has(peer):
+		return
+	var pl: Dictionary = players[peer]
+	if pl.hp <= 0:
+		return
+	var now := Time.get_ticks_msec()
+	if now - int(pl.last_shot) < D.GUN_CD_MS:
+		return
+	pl.last_shot = now
+	dir = dir.normalized()
+
+	var best_t: float = D.GUN_RANGE
+	var hit_unit = null
+	var hit_peer := -1
+	for u in units:
+		if u.team == pl.team or u.hp <= 0:
+			continue
+		var c := Vector3(u.pos.x, 0.25, u.pos.y)
+		var t: float = (c - from).dot(dir)
+		if t > 0.0 and t < best_t and (from + dir * t).distance_to(c) < 0.45:
+			best_t = t
+			hit_unit = u
+			hit_peer = -1
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == pl.team or o.hp <= 0:
+			continue
+		var c: Vector3 = o.pos + Vector3(0, 0.9, 0)
+		var t: float = (c - from).dot(dir)
+		var closest: Vector3 = from + dir * t
+		var horiz := Vector2(closest.x - c.x, closest.z - c.z).length()
+		if t > 0.0 and t < best_t and horiz < 0.45 and absf(closest.y - c.y) < 0.95:
+			best_t = t
+			hit_unit = null
+			hit_peer = pid
+
+	if hit_unit != null:
+		hit_unit.hp -= D.GUN_DMG
+	elif hit_peer != -1:
+		_damage_player(hit_peer, D.GUN_DMG)
+
+	var end := from + dir * best_t
+	for p in Net.ready_peers:
+		if p != peer:
+			fx_shot.rpc_id(p, from, end)
+	if not headless and peer != 1:
+		_tracer(from, end)
+
+
+func _damage_player(pid: int, dmg: int) -> void:
+	if not players.has(pid):
+		return
+	var o: Dictionary = players[pid]
+	if o.hp <= 0:
+		return
+	o.hp -= dmg
+	if o.hp <= 0:
+		o.hp = 0
+		o.dead_t = D.RESPAWN_TICKS
+
+
+func _players_tick() -> void:
+	for pid in players.keys():
+		if Net.team_of(pid) < 0 and pid != 1:
+			players.erase(pid)   # игрок вышел
+			continue
+		var o: Dictionary = players[pid]
+		if o.hp > 0:
+			continue
+		o.dead_t -= 1
+		if o.dead_t <= 0:
+			o.hp = D.PLAYER_HP
+			o.pos = _spawn_point(o.team)
+			if pid == 1 and not headless:
+				_do_respawn(o.pos)
+			elif Net.ready_peers.has(pid):
+				ev_respawn.rpc_id(pid, o.pos)
 
 
 # =====================================================================
@@ -297,6 +432,7 @@ func _sim_tick() -> void:
 				b.timer = D.UNIT_BUILD_TICKS
 		elif t == D.TURRET:
 			_turret_tick(b)
+	_players_tick()
 	_waves()
 	_units_tick()
 
@@ -397,10 +533,27 @@ func _units_tick() -> void:
 				# чтобы свои не слипались в одну точку
 				u.pos += (u.pos - o.pos).normalized() * 0.05
 
+		var target_player := -1
+		var player_pos := Vector2.ZERO
+		for pid in players:
+			var pl: Dictionary = players[pid]
+			if pl.team == u.team or pl.hp <= 0:
+				continue
+			var pp := Vector2(pl.pos.x, pl.pos.z)
+			var d: float = u.pos.distance_to(pp)
+			if d < best:
+				best = d
+				target_unit = null
+				target_player = pid
+				player_pos = pp
+
 		var tpos: Vector2
 		var reach: float
 		var target_b = null
-		if target_unit != null:
+		if target_player != -1:
+			tpos = player_pos
+			reach = D.UNIT_RANGE
+		elif target_unit != null:
 			tpos = target_unit.pos
 			reach = D.UNIT_RANGE
 		else:
@@ -416,7 +569,9 @@ func _units_tick() -> void:
 			u.pos += (tpos - u.pos).normalized() * step
 		elif u.cd == 0:
 			u.cd = D.UNIT_CD
-			if target_unit != null:
+			if target_player != -1:
+				_damage_player(target_player, D.UNIT_DMG)
+			elif target_unit != null:
 				target_unit.hp -= D.UNIT_DMG
 			else:
 				_damage_building(target_b, D.UNIT_DMG)
@@ -470,10 +625,14 @@ func _send_snapshot() -> void:
 		if b.type == D.CONVEYOR and b.item:
 			var dv: Vector2 = Vector2(D.DIRS[b.dir])
 			it.append(_bcenter(b) + dv * (float(b.prog) - 0.5))
+	var pl: Array = []
+	for pid in players:
+		var o: Dictionary = players[pid]
+		pl.append([pid, o.pos, o.yaw, o.team, o.hp])
 	for p in Net.ready_peers:
-		snapshot.rpc_id(p, u, it, storage, core_hp)
+		snapshot.rpc_id(p, u, it, pl, storage, core_hp)
 	if not headless:
-		_apply_snapshot(u, it, storage, core_hp)
+		_apply_snapshot(u, it, pl, storage, core_hp)
 
 
 # =====================================================================
@@ -506,6 +665,14 @@ func _build_scene() -> void:
 	ground.position = Vector3(D.MAP / 2.0, 0, D.MAP / 2.0)
 	ground.material_override = _mat(Color(0.16, 0.15, 0.19))
 	add_child(ground)
+	var ground_body := StaticBody3D.new()
+	var gcol := CollisionShape3D.new()
+	var gshape := BoxShape3D.new()
+	gshape.size = Vector3(D.MAP, 1, D.MAP)
+	gcol.shape = gshape
+	ground_body.add_child(gcol)
+	ground_body.position = Vector3(D.MAP / 2.0, -0.5, D.MAP / 2.0)
+	add_child(ground_body)
 
 	# газовый гигант на фоне
 	var giant := MeshInstance3D.new()
@@ -617,6 +784,27 @@ func _build_scene() -> void:
 	big_msg.add_theme_color_override("font_outline_color", Color.BLACK)
 	layer.add_child(big_msg)
 
+	crosshair = Label.new()
+	crosshair.text = "+"
+	crosshair.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	crosshair.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	crosshair.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crosshair.add_theme_font_size_override("font_size", 28)
+	crosshair.add_theme_constant_override("outline_size", 4)
+	crosshair.add_theme_color_override("font_outline_color", Color.BLACK)
+	layer.add_child(crosshair)
+
+	# персонаж от первого лица
+	if my_team >= 0:
+		player = Player.new()
+		player.position = _spawn_point(my_team)
+		player.rotation.y = -PI / 2.0 if my_team == 0 else PI / 2.0  # лицом к врагу
+		add_child(player)
+		_set_fps(true)
+	else:
+		_set_fps(false)
+
 
 func _mat(color: Color, glow := false) -> StandardMaterial3D:
 	var key := "%s|%s" % [color, glow]
@@ -676,6 +864,17 @@ func _vis_add(b: Dictionary) -> void:
 	elif t == D.TURRET:
 		_cyl(n, 0.4, 0.4, Vector3(0, 0.2, 0), col.darkened(0.35))
 		_box(n, Vector3(0.7, 0.15, 0.15), Vector3(0.3, 0.5, 0), Color(0.75, 0.75, 0.8))
+	# твёрдое тело, чтобы персонаж не проходил сквозь постройки (по конвейерам ходим)
+	if t != D.CONVEYOR:
+		var size := Vector3(2.8, 2.2, 2.8) if t == D.CORE else Vector3(0.9, 1.0, 0.9)
+		var body := StaticBody3D.new()
+		var col := CollisionShape3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = size
+		col.shape = shape
+		col.position.y = size.y / 2.0
+		body.add_child(col)
+		n.add_child(body)
 	add_child(n)
 	bnodes[b.id] = n
 
@@ -684,33 +883,67 @@ func _vis_add(b: Dictionary) -> void:
 # Клиент: снапшоты, камера, ввод
 # =====================================================================
 
-func _apply_snapshot(u: PackedFloat32Array, it: PackedVector2Array, st: Array, hp: Array) -> void:
+func _apply_snapshot(u: PackedFloat32Array, it: PackedVector2Array, pl: Array, st: Array, hp: Array) -> void:
 	prev_units = cur_units
 	cur_units = u
 	cur_items = it
+	cur_players = pl
 	snap_time = 0.0
 	if not is_server:
 		storage = st
 		core_hp = hp
 
 
+func _set_fps(on: bool) -> void:
+	fps_mode = on and player != null
+	if player:
+		player.active = fps_mode
+	if fps_mode:
+		player.cam.current = true
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	else:
+		cam.current = true
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	crosshair.visible = fps_mode
+
+
+func _do_respawn(pos: Vector3) -> void:
+	if player:
+		player.position = pos
+		player.velocity = Vector3.ZERO
+
+
 func _update_client(delta: float) -> void:
-	# камера
-	var mv := Vector3.ZERO
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
-		mv.z -= 1
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-		mv.z += 1
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-		mv.x -= 1
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-		mv.x += 1
-	if mv != Vector3.ZERO:
-		cam_target += mv.normalized() * delta * cam_dist * 1.2
-	cam_target.x = clampf(cam_target.x, 0, D.MAP)
-	cam_target.z = clampf(cam_target.z, 0, D.MAP)
-	cam.position = cam_target + Vector3(0, cam_dist * 0.85, cam_dist * 0.55)
-	cam.look_at(cam_target, Vector3.UP)
+	# камера вида сверху (работает, только когда она активна)
+	if not fps_mode:
+		var mv := Vector3.ZERO
+		if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+			mv.z -= 1
+		if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+			mv.z += 1
+		if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+			mv.x -= 1
+		if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+			mv.x += 1
+		if mv != Vector3.ZERO:
+			cam_target += mv.normalized() * delta * cam_dist * 1.2
+		cam_target.x = clampf(cam_target.x, 0, D.MAP)
+		cam_target.z = clampf(cam_target.z, 0, D.MAP)
+		cam.position = cam_target + Vector3(0, cam_dist * 0.85, cam_dist * 0.55)
+		cam.look_at(cam_target, Vector3.UP)
+	elif player:
+		# в режиме от первого лица верхняя камера висит над персонажем
+		cam_target = Vector3(player.position.x, 0, player.position.z)
+
+	# отправляем свою позицию серверу 20 раз в секунду
+	if player:
+		send_acc += delta
+		if send_acc >= 0.05:
+			send_acc = 0.0
+			if is_server:
+				server_player_state(1, player.position, player.rotation.y)
+			else:
+				req_player_state.rpc_id(1, player.position, player.rotation.y)
 
 	# юниты (плавно между снапшотами)
 	snap_time += delta
@@ -737,22 +970,108 @@ func _update_client(delta: float) -> void:
 		mm_items.set_instance_transform(i, Transform3D(Basis(), Vector3(p.x, 0.22, p.y)))
 	mm_items.visible_instance_count = m
 
+	_update_players(delta)
+
+	# стрельба
+	fire_cd -= delta
+	if fps_mode and sel_type == D.WEAPON and not player.dead and not finished \
+			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED \
+			and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and fire_cd <= 0.0:
+		fire_cd = D.GUN_CD_MS / 1000.0
+		_fire()
+
 	# призрак и строительство протяжкой
 	var tile := _mouse_tile()
-	ghost.visible = tile != NO_TILE and not finished and my_team >= 0
+	ghost.visible = tile != NO_TILE and not finished and my_team >= 0 and sel_type != D.WEAPON \
+			and not (player != null and player.dead)
 	if ghost.visible:
 		ghost.position = Vector3(tile.x + 0.5, 0.15, tile.y + 0.5)
 		ghost.rotation.y = -float(sel_dir) * PI / 2.0
 		var ok := _can_place(my_team, sel_type, tile)
 		ghost_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.45) if ok else Color(1.0, 0.25, 0.2, 0.45)
-		if drag_mode != 0 and tile != drag_last:
-			drag_last = tile
-			if drag_mode == 1:
-				_request_place(tile)
-			else:
-				_request_remove(tile)
+	if drag_mode != 0 and tile != NO_TILE and tile != drag_last and not (player != null and player.dead):
+		drag_last = tile
+		if drag_mode == 1 and sel_type != D.WEAPON:
+			_request_place(tile)
+		elif drag_mode == 2:
+			_request_remove(tile)
 
 	_update_hud()
+
+
+func _update_players(delta: float) -> void:
+	var me := multiplayer.get_unique_id()
+	var seen := {}
+	var k := minf(1.0, delta * 15.0)
+	for e in cur_players:
+		var pid: int = e[0]
+		var pos: Vector3 = e[1]
+		var yaw: float = e[2]
+		var hp: int = e[4]
+		if pid == me:
+			my_hp = hp
+			continue
+		seen[pid] = true
+		if not others.has(pid):
+			var av := _make_avatar(e[3])
+			av.position = pos
+			others[pid] = av
+		var node: Node3D = others[pid]
+		node.visible = hp > 0
+		node.position = node.position.lerp(pos, k)
+		node.rotation.y = lerp_angle(node.rotation.y, yaw, k)
+	for pid in others.keys():
+		if not seen.has(pid):
+			others[pid].queue_free()
+			others.erase(pid)
+
+	if player:
+		player.dead = my_hp <= 0
+		if not finished:
+			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
+
+
+func _make_avatar(team: int) -> Node3D:
+	var n := Node3D.new()
+	var col: Color = D.TEAM_COLORS[team]
+	var body := MeshInstance3D.new()
+	var cm := CapsuleMesh.new()
+	cm.radius = 0.35
+	cm.height = 1.8
+	body.mesh = cm
+	body.position.y = 0.9
+	body.material_override = _mat(col.darkened(0.2))
+	n.add_child(body)
+	_box(n, Vector3(0.5, 0.2, 0.2), Vector3(0, 1.55, -0.28), Color(0.4, 0.9, 1.0), true)  # визор
+	add_child(n)
+	return n
+
+
+func _fire() -> void:
+	var from := player.cam.global_position
+	var dir := player.look_dir()
+	# свой трассер рисуем сразу, чуть ниже и правее глаз, чтобы было видно
+	var b := player.cam.global_transform.basis
+	var muzzle := from + b.x * 0.25 - b.y * 0.2 + dir * 0.5
+	_tracer(muzzle, from + dir * D.GUN_RANGE)
+	if is_server:
+		server_shoot(1, from, dir)
+	else:
+		req_shoot.rpc_id(1, from, dir)
+
+
+func _tracer(a: Vector3, b: Vector3) -> void:
+	if headless:
+		return
+	var im := ImmediateMesh.new()
+	im.surface_begin(Mesh.PRIMITIVE_LINES, _mat(Color(1.0, 0.85, 0.3), true))
+	im.surface_add_vertex(a)
+	im.surface_add_vertex(b)
+	im.surface_end()
+	var mi := MeshInstance3D.new()
+	mi.mesh = im
+	add_child(mi)
+	get_tree().create_timer(0.08).timeout.connect(mi.queue_free)
 
 
 func _update_hud() -> void:
@@ -760,24 +1079,40 @@ func _update_hud() -> void:
 		return
 	var enemy := 1 - my_team
 	var lines := PackedStringArray()
-	lines.append("Команда: %s" % D.TEAM_NAMES[my_team])
+	lines.append("Команда: %s     Здоровье: %d" % [D.TEAM_NAMES[my_team], my_hp])
 	lines.append("Руда в ядре: %d" % storage[my_team])
 	lines.append("Ядро: %d   |   Ядро врага: %d" % [core_hp[my_team], core_hp[enemy]])
 	lines.append("")
-	lines.append("[1] Конвейер (%d)   [2] Бур (%d)   [3] Сборщик (%d)   [4] Турель (%d)" % [
+	lines.append("[1] Конвейер (%d)   [2] Бур (%d)   [3] Сборщик (%d)   [4] Турель (%d)   [5] Бластер" % [
 		D.COST[D.CONVEYOR], D.COST[D.DRILL], D.COST[D.ASSEMBLER], D.COST[D.TURRET]])
-	lines.append("Выбрано: %s   направление %s  (R — повернуть)" % [D.NAMES[sel_type], D.DIR_ARROWS[sel_dir]])
-	lines.append("ЛКМ — строить (можно тянуть)   ПКМ — снести   WASD — камера   колесо — зум")
+	if sel_type == D.WEAPON:
+		lines.append("В руках: Бластер  (ЛКМ — огонь)")
+	else:
+		lines.append("В руках: %s   направление %s  (R — повернуть)" % [D.NAMES[sel_type], D.DIR_ARROWS[sel_dir]])
+	if fps_mode:
+		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести")
+		lines.append("Tab — вид сверху   Esc — отпустить курсор")
+	else:
+		lines.append("ЛКМ — строить (можно тянуть)   ПКМ — снести   WASD — камера   колесо — зум")
+		lines.append("Tab — от первого лица")
 	hud.text = "\n".join(lines)
 
 
 func _mouse_tile() -> Vector2i:
-	var mp := get_viewport().get_mouse_position()
-	var from := cam.project_ray_origin(mp)
-	var dir := cam.project_ray_normal(mp)
+	var c: Camera3D = player.cam if fps_mode else cam
+	var mp: Vector2
+	if fps_mode:
+		mp = get_viewport().get_visible_rect().size / 2.0
+	else:
+		mp = get_viewport().get_mouse_position()
+	var from := c.project_ray_origin(mp)
+	var dir := c.project_ray_normal(mp)
 	if dir.y > -0.001:
 		return NO_TILE
-	var hit := from + dir * (-from.y / dir.y)
+	var dist := -from.y / dir.y
+	if fps_mode and dist > D.BUILD_REACH:
+		return NO_TILE
+	var hit := from + dir * dist
 	var t := Vector2i(floori(hit.x), floori(hit.z))
 	return t if _in_map(t) else NO_TILE
 
@@ -787,10 +1122,20 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	var mb := event as InputEventMouseButton
 	if mb:
+		# в режиме от первого лица первый клик только захватывает курсор
+		if fps_mode and mb.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+			return
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			cam_dist = maxf(8.0, cam_dist - 2.0)
+			if fps_mode:
+				_cycle_slot(-1)
+			else:
+				cam_dist = maxf(8.0, cam_dist - 2.0)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			cam_dist = minf(70.0, cam_dist + 2.0)
+			if fps_mode:
+				_cycle_slot(1)
+			else:
+				cam_dist = minf(70.0, cam_dist + 2.0)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			drag_mode = 1 if mb.pressed else 0
 			drag_last = NO_TILE
@@ -809,8 +1154,21 @@ func _unhandled_input(event: InputEvent) -> void:
 				sel_type = D.ASSEMBLER
 			KEY_4:
 				sel_type = D.TURRET
+			KEY_5:
+				sel_type = D.WEAPON
 			KEY_R:
 				sel_dir = (sel_dir + 1) % 4
+			KEY_TAB:
+				_set_fps(not fps_mode)
+			KEY_ESCAPE:
+				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+const SLOTS := [D.CONVEYOR, D.DRILL, D.ASSEMBLER, D.TURRET, D.WEAPON]
+
+func _cycle_slot(step: int) -> void:
+	var i := SLOTS.find(sel_type)
+	sel_type = SLOTS[posmod(i + step, SLOTS.size())]
 
 
 func _request_place(tile: Vector2i) -> void:

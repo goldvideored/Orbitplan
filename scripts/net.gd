@@ -128,6 +128,7 @@ func _on_failed() -> void:
 
 func _on_server_gone() -> void:
 	print("Сервер отключился")
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if world:
 		world.queue_free()
 		world = null
