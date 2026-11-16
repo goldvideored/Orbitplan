@@ -6,10 +6,10 @@ extends Node3D
 const D = preload("res://scripts/defs.gd")
 const Planet = preload("res://scripts/planet.gd")
 const Player = preload("res://scripts/player.gd")
+const Sky = preload("res://scripts/sky.gd")
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const NO_CELL := -1
-const SLOTS := [D.CONVEYOR, D.DRILL, D.ASSEMBLER, D.TURRET, D.WEAPON]
 const CORE_H := 1.1   # высота основания ядра
 
 var my_team := 0
@@ -20,7 +20,8 @@ var planet: Planet
 # --- общее состояние (есть у всех) ---
 var grid := {}       # клетка -> id постройки
 var buildings := {}  # id -> Dictionary
-var storage := [D.START_ORE, D.START_ORE]
+var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate()]   # предмет -> количество
+var power_stats := [[0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
 var core_hp := [D.HP[D.CORE], D.HP[D.CORE]]
 var finished := false
 
@@ -29,8 +30,6 @@ var units: Array = []   # {id, team, dir: Vector3, cell, hp, cd}
 var next_id := 1
 var next_unit_id := 1
 var tick_acc := 0.0
-var wave_timer := [0, 0]
-var wave_count := [0, 0]
 var players := {}       # peer_id -> {team, pos, fwd, hp, dead_t, last_shot}
 
 # --- только клиент ---
@@ -52,6 +51,8 @@ var crosshair: Label
 var prev_units := PackedFloat32Array()
 var cur_units := PackedFloat32Array()
 var cur_items := PackedVector3Array()
+var cur_item_types := PackedByteArray()
+var all_slots: Array = []   # все постройки по порядку + бластер (для колеса мыши)
 var cur_players: Array = []
 var snap_time := 0.0
 var drag_mode := 0   # 0 нет, 1 строим, 2 сносим
@@ -73,10 +74,7 @@ var giant_node: MeshInstance3D
 var sun_node: MeshInstance3D
 var stars_node: MultiMeshInstance3D
 var flash_on := false
-var sky_sun_dir := Vector3.FORWARD
-var sky_sun_level := 1.0
-var sky_giant_dir := Vector3.RIGHT
-var sky_giant_level := 0.0
+var sky_state := {}
 
 
 func setup(seed_val: int, team: int, server: bool, dedicated: bool) -> void:
@@ -85,6 +83,9 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool) -> void:
 	headless = dedicated
 	planet = Planet.new()
 	planet.generate(seed_val)
+	for cat in D.CATEGORIES:
+		all_slots.append_array(cat[1])
+	all_slots.append(D.WEAPON)
 	if not headless:
 		_build_scene()
 	if is_server:
@@ -133,20 +134,43 @@ func _spawn_pos(team: int) -> Vector3:
 	return planet.dirs[c] * (planet.top_r(c) + 1.0)
 
 
+func _is_drill(t: int) -> bool:
+	return t == D.DRILL or t == D.DRILL2 or t == D.DRILL3
+
+
+func _can_afford(team: int, type: int) -> bool:
+	var st: Dictionary = storage[team]
+	var cost: Dictionary = D.COST[type]
+	for it in cost:
+		if int(st.get(it, 0)) < int(cost[it]):
+			return false
+	return true
+
+
+func _cost_text(type: int) -> String:
+	var parts := PackedStringArray()
+	var cost: Dictionary = D.COST[type]
+	for it in cost:
+		parts.append("%s %d" % [D.ITEM_NAMES[it], cost[it]])
+	return ", ".join(parts)
+
+
 func _can_place(team: int, type: int, cell: int) -> bool:
 	if team < 0 or finished or cell < 0 or cell >= planet.count():
 		return false
-	if grid.has(cell):
+	if not D.COST.has(type) or grid.has(cell):
 		return false
 	if planet.level[cell] >= D.MAX_LEVEL:
 		return false
-	if type == D.DRILL and planet.ore[cell] == 0:
-		return false
+	if _is_drill(type):
+		var dep: int = planet.ore[cell]
+		if dep == D.I_NONE:
+			return false
+		if type == D.DRILL and D.RARE_ORES.has(dep):
+			return false
 	if _arc(cell, planet.core_center[team]) > D.BUILD_ARC:
 		return false
-	if storage[team] < D.COST[type]:
-		return false
-	return true
+	return _can_afford(team, type)
 
 
 # =====================================================================
@@ -157,8 +181,10 @@ func _add_building(d: Dictionary) -> void:
 	var b := {
 		"id": int(d.id), "type": int(d.type), "team": int(d.team),
 		"cell": int(d.cell), "dir": int(d.dir),
-		"hp": D.HP[int(d.type)], "item": false, "prog": 0.0,
+		"hp": D.HP[int(d.type)], "item": D.I_NONE, "prog": 0.0,
 		"store": 0, "timer": 0, "rr": 0,
+		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
+		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 	}
 	buildings[b.id] = b
 	for c in _cells_of(b.type, b.cell):
@@ -193,7 +219,10 @@ func server_place(team: int, type: int, cell: int, dir: int) -> void:
 		return
 	if not _can_place(team, type, cell):
 		return
-	storage[team] -= D.COST[type]
+	var st: Dictionary = storage[team]
+	var cost: Dictionary = D.COST[type]
+	for it in cost:
+		st[it] = int(st.get(it, 0)) - int(cost[it])
 	var nb: PackedInt32Array = planet.nbrs[cell]
 	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size())}
 	_add_building(d)
@@ -207,7 +236,10 @@ func server_remove(team: int, cell: int) -> void:
 	var b: Dictionary = buildings[grid[cell]]
 	if b.team != team or b.type == D.CORE:
 		return
-	storage[team] += D.COST[b.type] / 2
+	var st: Dictionary = storage[team]
+	var cost: Dictionary = D.COST[b.type]
+	for it in cost:
+		st[it] = int(st.get(it, 0)) + int(cost[it]) / 2   # возврат половины
 	_destroy(b.id)
 
 
@@ -369,8 +401,9 @@ func full_sync(list: Array) -> void:
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func snapshot(u: PackedFloat32Array, it: PackedVector3Array, pl: Array, st: Array, hp: Array, t: float) -> void:
-	_apply_snapshot(u, it, pl, st, hp)
+func snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArray, pl: Array,
+		st: Array, hp: Array, pw: Array, t: float) -> void:
+	_apply_snapshot(u, it, itt, pl, st, hp, pw)
 	# часы клиента подтягиваем к серверным
 	if absf(world_time - t) > 1.0:
 		world_time = t
@@ -402,20 +435,56 @@ func _process(delta: float) -> void:
 
 
 func _sim_tick() -> void:
-	for b in buildings.values():
+	var sky := Sky.state(world_time)
+	var prod := [0.0, 0.0]
+	var demand := [0.0, 0.0]
+	var list: Array = buildings.values()
+
+	# проход 1: генераторы и спрос на энергию
+	for b in list:
+		var t: int = b.type
+		var team: int = b.team
+		if t == D.SOLAR:
+			var lvl := Sky.level_at(planet.dirs[b.cell], sky)
+			prod[team] += D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
+		elif t == D.COAL_PLANT:
+			if b.burn <= 0 and _buf_take(b, D.I_COAL, 1):
+				b.burn = D.COAL_BURN_TICKS
+			if b.burn > 0:
+				b.burn -= 1
+				prod[team] += D.COAL_POWER
+		elif t == D.NUCLEAR:
+			b.wt += 1
+			if b.wt >= D.NUCLEAR_WATER_TICKS:
+				b.wt = 0
+				b.cool = _buf_take(b, D.I_WATER, 1)
+			if b.burn <= 0 and b.cool and _buf_take(b, D.I_URANIUM, 1):
+				b.burn = D.NUCLEAR_URANIUM_TICKS
+			if b.burn > 0 and b.cool:
+				b.burn -= 1
+				prod[team] += D.NUCLEAR_POWER
+		if D.POWER_USE.has(t) and _wants_power(b):
+			demand[team] += D.POWER_USE[t]
+
+	# общая энергосеть команды: не хватает энергии — все машины работают медленнее
+	var ratio := [1.0, 1.0]
+	for team in 2:
+		if demand[team] > 0.0:
+			ratio[team] = minf(1.0, prod[team] / demand[team])
+		power_stats[team] = [prod[team], demand[team]]
+
+	# проход 2: работа
+	for b in list:
 		if not buildings.has(b.id):
 			continue
 		var t: int = b.type
-		if t == D.DRILL:
-			b.timer += 1
-			if b.timer >= D.DRILL_TICKS:
-				b.timer = 0 if _drill_output(b) else D.DRILL_TICKS
-		elif t == D.CONVEYOR:
-			if b.item:
-				b.prog = minf(b.prog + D.CONVEYOR_SPEED, 1.0)
-				if b.prog >= 1.0 and _push(_out_cell(b), b.cell, b.team):
-					b.item = false
-					b.prog = 0.0
+		var r: float = ratio[b.team] if D.POWER_USE.has(t) else 1.0
+		if _is_drill(t):
+			_drill_tick(b, r)
+		elif t == D.CONVEYOR or t == D.PIPE:
+			_belt_tick(b)
+		elif D.RECIPES.has(t):
+			_factory_tick(b, r)
 		elif t == D.ASSEMBLER:
 			if b.timer > 0:
 				b.timer -= 1
@@ -427,42 +496,167 @@ func _sim_tick() -> void:
 		elif t == D.TURRET:
 			_turret_tick(b)
 	_players_tick()
-	_waves()
 	_units_tick()
 
 
-## Положить 1 руду в клетку cell, пришедшую из клетки from. true — если взяли.
-func _push(cell: int, from: int, team: int) -> bool:
+func _buf_take(b: Dictionary, item: int, n: int) -> bool:
+	var buf: Dictionary = b.buf
+	if int(buf.get(item, 0)) >= n:
+		buf[item] = int(buf[item]) - n
+		return true
+	return false
+
+
+func _wants_power(b: Dictionary) -> bool:
+	var t: int = b.type
+	if t == D.DRILL2:
+		return not b.blocked
+	if t == D.DRILL3:
+		return not b.blocked and b.water > 0
+	if D.RECIPES.has(t):
+		return b.cur != -1
+	return false
+
+
+func _drill_tick(b: Dictionary, r: float) -> void:
+	var t: int = b.type
+	var ore: int = planet.ore[b.cell]
+	if b.blocked:
+		# выход забит — пробуем выгрузить готовую руду
+		if _output(b, ore):
+			b.blocked = false
+			b.prog = 0.0
+		return
+	if t == D.DRILL3 and b.water <= 0:
+		return
+	b.prog += r
+	if b.prog >= float(D.DRILL_TICKS[t]):
+		if t == D.DRILL3:
+			b.wuse += 1
+			if b.wuse >= D.DRILL3_WATER_PER:
+				b.wuse = 0
+				b.water -= 1
+		if _output(b, ore):
+			b.prog = 0.0
+		else:
+			b.blocked = true
+
+
+func _belt_tick(b: Dictionary) -> void:
+	if b.item == D.I_NONE:
+		return
+	var speed: float = D.PIPE_SPEED if b.type == D.PIPE else D.CONVEYOR_SPEED
+	b.prog = minf(b.prog + speed, 1.0)
+	if b.prog >= 1.0 and _push(_out_cell(b), b.cell, b.team, b.item):
+		b.item = D.I_NONE
+		b.prog = 0.0
+
+
+func _factory_tick(b: Dictionary, r: float) -> void:
+	var recs: Array = D.RECIPES[b.type]
+	if b.out_n > 0:
+		if _output(b, b.out_item):
+			b.out_n -= 1
+		if b.out_n > 0:
+			return   # ждём, пока выгрузим готовое
+	if b.cur == -1:
+		for i in recs.size():
+			var cand: Dictionary = recs[i]
+			var ins: Dictionary = cand["in"]
+			if _has_inputs(b, ins):
+				for it in ins:
+					b.buf[it] = int(b.buf[it]) - int(ins[it])
+				b.cur = i
+				b.prog = 0.0
+				break
+	if b.cur != -1:
+		var rec: Dictionary = recs[b.cur]
+		b.prog += r
+		if b.prog >= float(rec["t"]):
+			b.out_item = rec["out"]
+			b.out_n = rec["n"]
+			b.cur = -1
+			b.prog = 0.0
+
+
+func _has_inputs(b: Dictionary, ins: Dictionary) -> bool:
+	var buf: Dictionary = b.buf
+	for it in ins:
+		if int(buf.get(it, 0)) < int(ins[it]):
+			return false
+	return true
+
+
+## Выдать 1 предмет в любую соседнюю клетку (по кругу). true — если кто-то взял.
+func _output(b: Dictionary, item: int) -> bool:
+	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var k := nb.size()
+	for i in k:
+		var idx: int = (b.rr + i) % k
+		if _push(nb[idx], b.cell, b.team, item):
+			b.rr = (idx + 1) % k
+			return true
+	return false
+
+
+## Может ли постройка o принять предмет (не конвейер и не ядро).
+func _accepts(o: Dictionary, item: int) -> bool:
+	var t: int = o.type
+	var buf: Dictionary = o.buf
+	if D.RECIPES.has(t):
+		for rec in D.RECIPES[t]:
+			if rec["in"].has(item):
+				return int(buf.get(item, 0)) < D.BUFFER_CAP
+		return false
+	if t == D.COAL_PLANT:
+		return item == D.I_COAL and int(buf.get(item, 0)) < D.BUFFER_CAP
+	if t == D.NUCLEAR:
+		if item == D.I_URANIUM:
+			return int(buf.get(item, 0)) < D.NUCLEAR_URANIUM_CAP
+		if item == D.I_WATER:
+			return int(buf.get(item, 0)) < D.NUCLEAR_WATER_CAP
+		return false
+	if t == D.DRILL3:
+		return item == D.I_WATER and o.water < D.BUFFER_CAP
+	if t == D.ASSEMBLER:
+		return item == D.I_IRON and o.store < D.UNIT_COST * 3
+	return false
+
+
+## Положить предмет в клетку cell, пришедший из клетки from. true — если взяли.
+func _push(cell: int, from: int, team: int, item: int) -> bool:
 	if not grid.has(cell):
 		return false
 	var o: Dictionary = buildings[grid[cell]]
 	if o.team != team:
 		return false
-	if o.type == D.CONVEYOR:
-		if o.item or _out_cell(o) == from:
+	var t: int = o.type
+	if t == D.CONVEYOR or t == D.PIPE:
+		# вода — только в трубы, всё твёрдое — только на конвейеры
+		if (item == D.I_WATER) != (t == D.PIPE):
 			return false
-		o.item = true
+		if o.item != D.I_NONE or _out_cell(o) == from:
+			return false
+		o.item = item
 		o.prog = 0.0
 		return true
-	if o.type == D.CORE:
-		storage[team] += 1
+	if t == D.CORE:
+		# сырую руду ядро не принимает — только переработанное
+		if not D.CORE_ACCEPT.has(item):
+			return false
+		var st: Dictionary = storage[team]
+		st[item] = int(st.get(item, 0)) + 1
 		return true
-	if o.type == D.ASSEMBLER:
-		if o.store < D.UNIT_COST * 3:
-			o.store += 1
-			return true
-	return false
-
-
-func _drill_output(b: Dictionary) -> bool:
-	var nb: PackedInt32Array = planet.nbrs[b.cell]
-	var k := nb.size()
-	for i in k:
-		var idx: int = (b.rr + i) % k
-		if _push(nb[idx], b.cell, b.team):
-			b.rr = (idx + 1) % k
-			return true
-	return false
+	if not _accepts(o, item):
+		return false
+	if t == D.DRILL3:
+		o.water += 1
+	elif t == D.ASSEMBLER:
+		o.store += 1
+	else:
+		var buf: Dictionary = o.buf
+		buf[item] = int(buf.get(item, 0)) + 1
+	return true
 
 
 func _turret_tick(b: Dictionary) -> void:
@@ -510,23 +704,6 @@ func _players_tick() -> void:
 					player.teleport(o.pos)
 			elif Net.ready_peers.has(pid):
 				ev_respawn.rpc_id(pid, o.pos)
-
-
-## Пока ботов нет: команда без игроков шлёт волны юнитов из ядра (временный PvE).
-func _waves() -> void:
-	if Net.peer_team.is_empty():
-		return
-	for t in 2:
-		if Net.team_has_players(t):
-			continue
-		wave_timer[t] += 1
-		if wave_timer[t] >= D.WAVE_TICKS:
-			wave_timer[t] = 0
-			wave_count[t] += 1
-			var nb: PackedInt32Array = planet.nbrs[planet.core_center[t]]
-			var n: int = 1 + wave_count[t] / 2
-			for i in n:
-				_spawn_unit(t, nb[i % nb.size()])
 
 
 func _units_tick() -> void:
@@ -640,20 +817,22 @@ func _send_snapshot() -> void:
 		u.append(float(x.team))
 		u.append(float(x.hp) / D.UNIT_HP)
 	var it := PackedVector3Array()
+	var itt := PackedByteArray()
 	for b in buildings.values():
-		if b.type == D.CONVEYOR and b.item:
+		if (b.type == D.CONVEYOR or b.type == D.PIPE) and b.item != D.I_NONE:
 			var a := _bpos(b)
 			var nxt := planet.top_pos(_out_cell(b))
 			var up: Vector3 = planet.dirs[b.cell]
 			it.append(a + (nxt - a) * (float(b.prog) - 0.5) + up * 0.3)
+			itt.append(b.item)
 	var pl: Array = []
 	for pid in players:
 		var o: Dictionary = players[pid]
 		pl.append([pid, o.pos, o.fwd, o.team, o.hp])
 	for p in Net.ready_peers:
-		snapshot.rpc_id(p, u, it, pl, storage, core_hp, world_time)
+		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, world_time)
 	if not headless:
-		_apply_snapshot(u, it, pl, storage, core_hp)
+		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats)
 
 
 # =====================================================================
@@ -739,12 +918,18 @@ func _build_scene() -> void:
 	# руда на лентах
 	mm_items = MultiMesh.new()
 	mm_items.transform_format = MultiMesh.TRANSFORM_3D
+	mm_items.use_colors = true
 	mm_items.instance_count = 8192
 	mm_items.visible_instance_count = 0
 	var isph := SphereMesh.new()
 	isph.radius = 0.18
 	isph.height = 0.36
-	isph.material = _mat(Color(1.0, 0.6, 0.25), true)
+	isph.radial_segments = 8
+	isph.rings = 4
+	var imat := StandardMaterial3D.new()
+	imat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	imat.vertex_color_use_as_albedo = true
+	isph.material = imat
 	mm_items.mesh = isph
 	var items_mmi := MultiMeshInstance3D.new()
 	items_mmi.multimesh = mm_items
@@ -916,20 +1101,10 @@ func _vis_add(b: Dictionary) -> void:
 		# башня в центральной клетке
 		_cyl(n, 0.9, 0.5, Vector3(0, CORE_H + 0.25, 0), col.darkened(0.2), 6)
 		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, CORE_H + 1.3, 0), col, true)
-	elif t == D.CONVEYOR:
-		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6)
-		_box(n, Vector3(0.8, 0.12, 0.22), Vector3(0.2, 0.12, 0), col, true)
-	elif t == D.DRILL:
-		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), col.darkened(0.45))
-		_cyl(n, 0.28, 0.8, Vector3(0, 1.1, 0), Color(0.85, 0.6, 0.3))
-	elif t == D.ASSEMBLER:
-		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), col.darkened(0.25))
-		_box(n, Vector3(0.7, 0.25, 0.7), Vector3(0, 1.32, 0), col, true)
-	elif t == D.TURRET:
-		_cyl(n, 0.55, 0.6, Vector3(0, 0.3, 0), col.darkened(0.35))
-		_box(n, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0.75, 0), Color(0.75, 0.75, 0.8))
+	else:
+		_vis_shape(n, t, col)
 	# твёрдое тело, чтобы персонаж не проходил сквозь постройки (по конвейерам ходим)
-	if t != D.CONVEYOR:
+	if t != D.CONVEYOR and t != D.PIPE:
 		var size := Vector3(1.1, CORE_H + 2.1, 1.1) if t == D.CORE else Vector3(1.2, 1.3, 1.2)
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
@@ -943,6 +1118,67 @@ func _vis_add(b: Dictionary) -> void:
 	var nb: PackedInt32Array = planet.nbrs[b.cell]
 	_orient(n, b.cell, nb[int(b.dir) % nb.size()])
 	bnodes[b.id] = root
+
+
+## Простые формы построек. Светящиеся детали видны и в полной темноте.
+func _vis_shape(n: Node3D, t: int, col: Color) -> void:
+	var dark := col.darkened(0.45)
+	var metal := Color(0.6, 0.6, 0.65)
+	if t == D.CONVEYOR:
+		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6)
+		_box(n, Vector3(0.8, 0.12, 0.22), Vector3(0.2, 0.12, 0), col, true)
+	elif t == D.PIPE:
+		_cyl(n, 0.6, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.35, 0.45), 6)
+		_box(n, Vector3(0.8, 0.14, 0.2), Vector3(0.2, 0.14, 0), Color(0.25, 0.55, 1.0), true)
+	elif t == D.DRILL:
+		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), dark)
+		_cyl(n, 0.28, 0.8, Vector3(0, 1.1, 0), Color(0.85, 0.6, 0.3))
+	elif t == D.DRILL2:
+		_box(n, Vector3(1.2, 0.8, 1.2), Vector3(0, 0.4, 0), dark)
+		_cyl(n, 0.32, 1.1, Vector3(0, 1.35, 0), metal)
+		_box(n, Vector3(0.3, 0.15, 0.3), Vector3(0, 2.0, 0), Color(1.0, 0.9, 0.3), true)
+	elif t == D.DRILL3:
+		_box(n, Vector3(1.3, 0.9, 1.3), Vector3(0, 0.45, 0), dark)
+		_cyl(n, 0.38, 1.3, Vector3(0, 1.55, 0), metal)
+		_cyl(n, 0.2, 0.9, Vector3(0.45, 1.3, 0.0), Color(0.25, 0.55, 1.0))
+		_box(n, Vector3(0.35, 0.15, 0.35), Vector3(0, 2.3, 0), Color(0.4, 0.8, 1.0), true)
+	elif t == D.SOLAR:
+		_cyl(n, 0.08, 0.6, Vector3(0, 0.3, 0), metal)
+		_box(n, Vector3(1.5, 0.06, 1.5), Vector3(0, 0.65, 0), Color(0.12, 0.18, 0.4))
+	elif t == D.COAL_PLANT:
+		_box(n, Vector3(1.4, 1.0, 1.4), Vector3(0, 0.5, 0), Color(0.3, 0.28, 0.27))
+		_cyl(n, 0.22, 1.4, Vector3(0.35, 1.7, 0.35), Color(0.4, 0.38, 0.36))
+		_box(n, Vector3(0.5, 0.2, 0.1), Vector3(0, 0.5, 0.71), Color(1.0, 0.45, 0.15), true)
+	elif t == D.NUCLEAR:
+		_cyl(n, 0.85, 1.8, Vector3(0, 0.9, 0), Color(0.75, 0.75, 0.72), 6)
+		_cyl(n, 0.4, 0.15, Vector3(0, 1.85, 0), Color(0.4, 1.0, 0.3))
+		_box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 2.0, 0), Color(0.4, 1.0, 0.3), true)
+	elif t == D.SMELTER:
+		_box(n, Vector3(1.3, 1.0, 1.3), Vector3(0, 0.5, 0), Color(0.35, 0.3, 0.28))
+		_box(n, Vector3(0.7, 0.2, 0.7), Vector3(0, 1.1, 0), Color(1.0, 0.5, 0.15), true)
+	elif t == D.CRUSHER:
+		_box(n, Vector3(1.3, 0.8, 1.3), Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.42))
+		_cyl(n, 0.3, 0.5, Vector3(0.3, 1.0, 0), metal)
+		_cyl(n, 0.3, 0.5, Vector3(-0.3, 1.0, 0), metal)
+	elif t == D.MELTER:
+		_cyl(n, 0.6, 1.0, Vector3(0, 0.5, 0), Color(0.45, 0.5, 0.55))
+		_cyl(n, 0.4, 0.15, Vector3(0, 1.05, 0), Color(0.5, 0.8, 1.0))
+		_box(n, Vector3(0.25, 0.25, 0.25), Vector3(0, 1.2, 0), Color(0.4, 0.75, 1.0), true)
+	elif t == D.CENTRIFUGE:
+		_cyl(n, 0.55, 1.6, Vector3(0, 0.8, 0), Color(0.5, 0.55, 0.5))
+		_box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 1.75, 0), Color(0.45, 1.0, 0.3), true)
+	elif t == D.FUEL_SYNTH:
+		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), Color(0.3, 0.25, 0.4))
+		_box(n, Vector3(0.6, 0.25, 0.6), Vector3(0, 1.32, 0), Color(0.85, 0.45, 1.0), true)
+	elif t == D.ASSEMBLER:
+		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), col.darkened(0.25))
+		_box(n, Vector3(0.7, 0.25, 0.7), Vector3(0, 1.32, 0), col, true)
+	elif t == D.TURRET:
+		_cyl(n, 0.55, 0.6, Vector3(0, 0.3, 0), col.darkened(0.35))
+		_box(n, Vector3(1.0, 0.2, 0.2), Vector3(0.4, 0.75, 0), Color(0.75, 0.75, 0.8))
+	# метка команды — маленький огонёк, чтобы своё было видно ночью
+	if t != D.CONVEYOR and t != D.PIPE:
+		_box(n, Vector3(0.15, 0.15, 0.15), Vector3(-0.5, 0.15, -0.5), col, true)
 
 
 func _vc_mat() -> Material:
@@ -959,10 +1195,13 @@ func _vc_mat() -> Material:
 # Клиент: снапшоты, камера, ввод
 # =====================================================================
 
-func _apply_snapshot(u: PackedFloat32Array, it: PackedVector3Array, pl: Array, st: Array, hp: Array) -> void:
+func _apply_snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArray, pl: Array,
+		st: Array, hp: Array, pw: Array) -> void:
 	prev_units = cur_units
 	cur_units = u
 	cur_items = it
+	cur_item_types = itt
+	power_stats = pw
 	cur_players = pl
 	snap_time = 0.0
 	if not is_server:
@@ -1062,33 +1301,19 @@ func _update_client(delta: float) -> void:
 ## планета вращается вокруг наклонённой оси и летит по орбите вокруг гиганта,
 ## поэтому для нас движутся солнце, гигант и звёзды.
 func _update_sky() -> void:
-	var theta := TAU * world_time / D.DAY_LENGTH
-	var phi := TAU * world_time / D.ORBIT_PERIOD
-	var frame := Basis(Vector3.UP, -theta) * Basis(Vector3.RIGHT, deg_to_rad(D.AXIS_TILT))
-	var sun: Vector3 = (frame * D.SUN_DIR).normalized()
-	# положение планеты на орбите в неподвижной системе -> где гигант относительно нас
-	var orbit_pos := Vector3(cos(phi), 0.0, sin(phi)) * D.GIANT_DIST
-	var giant_rel := frame * (-orbit_pos)
-	var gdir := giant_rel.normalized()
-	# затмение: диск гиганта закрывает солнце
-	var ang_r := asin(D.GIANT_R / D.GIANT_DIST)
-	var sep := sun.angle_to(gdir)
-	var sun_level := smoothstep(ang_r * 0.92, ang_r * 1.08, sep)
-	# фаза гиганта: какая доля видимого диска освещена солнцем
-	var phase := (1.0 - sun.dot(gdir)) * 0.5
-
-	sky_sun_dir = sun
-	sky_sun_level = sun_level
-	sky_giant_dir = gdir
-	sky_giant_level = phase
+	var st := Sky.state(world_time)
+	sky_state = st
+	var sun: Vector3 = st.sun
+	var gdir: Vector3 = st.gdir
+	var frame: Basis = st.frame
+	var giant_rel: Vector3 = st.giant_rel
 	RenderingServer.global_shader_parameter_set("sun_dir", sun)
-	RenderingServer.global_shader_parameter_set("sun_level", sun_level)
+	RenderingServer.global_shader_parameter_set("sun_level", float(st.sun_level))
 	RenderingServer.global_shader_parameter_set("giant_dir", gdir)
-	RenderingServer.global_shader_parameter_set("giant_level", phase)
-
+	RenderingServer.global_shader_parameter_set("giant_level", float(st.phase))
 	giant_node.position = giant_rel
 	sun_node.position = sun * D.SUN_VIS_DIST
-	sun_node.visible = sun_level > 0.02
+	sun_node.visible = float(st.sun_level) > 0.02
 	stars_node.transform = Transform3D(frame, Vector3.ZERO)
 
 
@@ -1102,12 +1327,9 @@ func _update_flashlight() -> void:
 
 ## Уровень света 0..16 в точке поверхности (то же, что считает шейдер, без фонарика).
 func light_level_at(pos: Vector3) -> int:
-	var up := pos.normalized()
-	var sd := up.dot(sky_sun_dir)
-	var gd := up.dot(sky_giant_dir)
-	var s := maxf(sd, 0.0) * smoothstep(-0.03, 0.03, sd) * sky_sun_level
-	var g := maxf(gd, 0.0) * smoothstep(-0.03, 0.03, gd) * sky_giant_level * D.GIANT_MAX_LEVEL / D.LIGHT_LEVELS
-	return clampi(floori((s + g) * D.LIGHT_LEVELS + 0.5), 0, D.LIGHT_LEVELS)
+	if sky_state.is_empty():
+		return 0
+	return Sky.level_at(pos.normalized(), sky_state)
 
 
 func _update_units() -> void:
@@ -1132,6 +1354,8 @@ func _update_items() -> void:
 	var m := mini(cur_items.size(), mm_items.instance_count)
 	for i in m:
 		mm_items.set_instance_transform(i, Transform3D(Basis(), cur_items[i]))
+		var ty := int(cur_item_types[i]) if i < cur_item_types.size() else D.I_COPPER
+		mm_items.set_instance_color(i, D.ITEM_COLORS.get(ty, Color.WHITE))
 	mm_items.visible_instance_count = m
 
 
@@ -1267,26 +1491,58 @@ func _update_hud() -> void:
 	var enemy := 1 - my_team
 	var lines := PackedStringArray()
 	var lvl := light_level_at(player.global_position) if player else 0
-	var hours := fmod(world_time / D.DAY_LENGTH, 1.0)
-	lines.append("Команда: %s     Здоровье: %d     Свет: %d/16     Фонарик: %s" % [
-		D.TEAM_NAMES[my_team], my_hp, lvl, "вкл" if flash_on else "выкл"])
-	lines.append("Сутки: %d%%   Затмение: %s" % [int(hours * 100.0), "ДА" if sky_sun_level < 0.5 else "нет"])
-	lines.append("Руда в ядре: %d" % storage[my_team])
-	lines.append("Ядро: %d   |   Ядро врага: %d (на другой стороне планеты)" % [core_hp[my_team], core_hp[enemy]])
+	var day := fmod(world_time / D.DAY_LENGTH, 1.0)
+	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
+	lines.append("Команда: %s     Здоровье: %d     Свет: %d/16     Фонарик: %s     Сутки: %d%%%s" % [
+		D.TEAM_NAMES[my_team], my_hp, lvl, "вкл" if flash_on else "выкл", int(day * 100.0),
+		"   ЗАТМЕНИЕ" if eclipse else ""])
+	lines.append("Ядро: %d   |   Ядро врага: %d" % [core_hp[my_team], core_hp[enemy]])
+
+	# склад ядра
+	var st: Dictionary = storage[my_team]
+	var parts := PackedStringArray()
+	for it in D.CORE_ACCEPT:
+		parts.append("%s %d" % [D.ITEM_NAMES[it], int(st.get(it, 0))])
+	lines.append("Склад: " + "   ".join(parts))
+
+	# энергия
+	var pw: Array = power_stats[my_team]
+	var prod: float = pw[0]
+	var dem: float = pw[1]
+	var pct := 100 if dem <= 0.0 else int(minf(1.0, prod / dem) * 100.0)
+	lines.append("Энергия: выработка %d / потребление %d  (машины работают на %d%%)" % [int(prod), int(dem), pct])
 	lines.append("")
-	lines.append("[1] Конвейер (%d)   [2] Бур (%d)   [3] Сборщик (%d)   [4] Турель (%d)   [5] Бластер" % [
-		D.COST[D.CONVEYOR], D.COST[D.DRILL], D.COST[D.ASSEMBLER], D.COST[D.TURRET]])
+
+	# выбор постройки
+	var cats := PackedStringArray()
+	for i in D.CATEGORIES.size():
+		cats.append("[%d] %s" % [i + 1, D.CATEGORIES[i][0]])
+	cats.append("[6] Бластер")
+	lines.append("   ".join(cats) + "   (повторное нажатие — следующая в группе)")
 	if sel_type == D.WEAPON:
 		lines.append("В руках: Бластер  (ЛКМ — огонь)")
 	else:
-		var info := ""
-		if hover_cell != NO_CELL:
-			var lv: int = planet.level[hover_cell]
-			info = "   | клетка: высота %d%s%s" % [lv, ", руда" if planet.ore[hover_cell] == 1 else "",
-				", скалы — нельзя" if lv >= D.MAX_LEVEL else ""]
-		lines.append("В руках: %s   (направление — куда смотришь, R — повернуть)%s" % [D.NAMES[sel_type], info])
+		var power_txt := ""
+		if D.POWER_USE.has(sel_type):
+			power_txt = "   энергия: %d" % int(D.POWER_USE[sel_type])
+		lines.append("В руках: %s — %s   цена: %s%s" % [D.NAMES[sel_type], D.DESC[sel_type], _cost_text(sel_type), power_txt])
+	if hover_cell != NO_CELL:
+		var lv: int = planet.level[hover_cell]
+		var dep: int = planet.ore[hover_cell]
+		var txt := "Клетка: высота %d" % lv
+		if dep != D.I_NONE:
+			txt += ", залежь: " + D.ITEM_NAMES[dep]
+			if D.RARE_ORES.has(dep):
+				txt += " (редкая, нужен Бур II+)"
+		if lv >= D.MAX_LEVEL:
+			txt += ", скалы — строить нельзя"
+		if grid.has(hover_cell):
+			var hb: Dictionary = buildings[grid[hover_cell]]
+			txt += ", стоит: " + D.NAMES[hb.type]
+		lines.append(txt)
+
 	if fps_mode:
-		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести   F — фонарик")
+		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести   R — повернуть   F — фонарик")
 		lines.append("Tab — орбитальная камера   Esc — отпустить курсор")
 	else:
 		lines.append("ЛКМ — строить (можно тянуть)   ПКМ — снести   WASD — крутить планету   колесо — зум")
@@ -1324,14 +1580,16 @@ func _unhandled_input(event: InputEvent) -> void:
 	if k and k.pressed and not k.echo:
 		match k.keycode:
 			KEY_1:
-				sel_type = D.CONVEYOR
+				_select_category(0)
 			KEY_2:
-				sel_type = D.DRILL
+				_select_category(1)
 			KEY_3:
-				sel_type = D.ASSEMBLER
+				_select_category(2)
 			KEY_4:
-				sel_type = D.TURRET
+				_select_category(3)
 			KEY_5:
+				_select_category(4)
+			KEY_6:
 				sel_type = D.WEAPON
 			KEY_R:
 				sel_rot += 1
@@ -1344,8 +1602,14 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _cycle_slot(step: int) -> void:
-	var i := SLOTS.find(sel_type)
-	sel_type = SLOTS[posmod(i + step, SLOTS.size())]
+	var i := all_slots.find(sel_type)
+	sel_type = all_slots[posmod(i + step, all_slots.size())]
+
+
+func _select_category(ci: int) -> void:
+	var group: Array = D.CATEGORIES[ci][1]
+	var i := group.find(sel_type)
+	sel_type = group[(i + 1) % group.size()] if i >= 0 else group[0]
 
 
 func _request_place(cell: int, dir: int) -> void:

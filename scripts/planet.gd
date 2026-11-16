@@ -9,7 +9,7 @@ var dirs := PackedVector3Array()   # центр клетки, единичный
 var nbrs: Array = []               # [PackedInt32Array] соседи, по кругу
 var corners: Array = []            # [PackedVector3Array] углы (единичные), по кругу
 var level := PackedInt32Array()    # высота террасы
-var ore := PackedByteArray()       # 1 = руда
+var ore := PackedInt32Array()      # тип залежи (D.I_*) или D.I_NONE
 var core_center := [0, 0]
 var spawn_cell := [0, 0]
 
@@ -174,16 +174,13 @@ func _build_relief(seed_val: int) -> void:
 	var cnt := count()
 	level.resize(cnt)
 	ore.resize(cnt)
+	ore.fill(D.I_NONE)
 	var hn := FastNoiseLite.new()
 	hn.seed = seed_val
 	hn.frequency = 0.03
 	hn.fractal_octaves = 3
-	var on := FastNoiseLite.new()
-	on.seed = seed_val + 101
-	on.frequency = 0.1
 	for i in cnt:
-		var p := dirs[i] * D.PLANET_R
-		var h := hn.get_noise_3dv(p)
+		var h := hn.get_noise_3dv(dirs[i] * D.PLANET_R)
 		# пороги разнесены широко: больше ровных участков, скалы — редкость
 		var lv := 1
 		if h > 0.45:
@@ -195,25 +192,87 @@ func _build_relief(seed_val: int) -> void:
 		elif h < -0.2:
 			lv = 0
 		level[i] = lv
-		ore[i] = 1 if (lv < D.MAX_LEVEL and on.get_noise_3dv(p) > 0.38) else 0
 
-	# площадки под ядра: ровно, а на 3-м кольце гарантированная руда
+	# обычные руды — пятнами по шуму (у каждой свой шум, побеждает самый сильный)
+	var common := [D.I_COAL_ORE, D.I_COPPER_ORE, D.I_IRON_ORE, D.I_QUARTZ]
+	var noises: Array = []
+	for k in common.size():
+		var nz := FastNoiseLite.new()
+		nz.seed = seed_val + 101 + k * 17
+		nz.frequency = 0.09
+		nz.fractal_type = FastNoiseLite.FRACTAL_NONE
+		noises.append(nz)
+	var ice_n := FastNoiseLite.new()
+	ice_n.seed = seed_val + 555
+	ice_n.frequency = 0.08
+	for i in cnt:
+		if level[i] >= D.MAX_LEVEL:
+			continue
+		var p := dirs[i] * D.PLANET_R
+		# лёд: полярные шапки и редкие озёра в низинах
+		var icy := ice_n.get_noise_3dv(p)
+		if (absf(dirs[i].y) > 0.8 and icy > -0.1) or (level[i] == 0 and icy > 0.45):
+			ore[i] = D.I_ICE
+			continue
+		var best := -1
+		var bv := 0.55
+		for k in common.size():
+			var v: float = noises[k].get_noise_3dv(p)
+			if v > bv:
+				bv = v
+				best = k
+		if best >= 0:
+			ore[i] = common[best]
+
+	# редкие руды — немного маленьких кластеров вдали от баз
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val + 999
+	var rare := [[D.I_LEAD_ORE, 8], [D.I_URANIUM_ORE, 5], [D.I_HELIUM_ORE, 5]]
+	for pair in rare:
+		var placed := 0
+		var tries := 0
+		while placed < int(pair[1]) and tries < 500:
+			tries += 1
+			var c := rng.randi_range(0, cnt - 1)
+			if level[c] >= D.MAX_LEVEL:
+				continue
+			var far := true
+			for d in D.CORE_DIRS:
+				if dirs[c].angle_to(d) * D.PLANET_R < 60.0:
+					far = false
+			if not far:
+				continue
+			var r := rings(c, 1)
+			for x in r:
+				if level[x] < D.MAX_LEVEL and (x == c or rng.randf() < 0.6):
+					ore[x] = pair[0]
+			placed += 1
+
+	# площадки под ядра: ровно, на 3-м кольце гарантированно медь/железо/уголь/кварц,
+	# на 4-м — немного льда
+	var starter := [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ]
 	for team in 2:
 		var cc := nearest_cell(D.CORE_DIRS[team])
 		core_center[team] = cc
-		var r := rings(cc, 3)
+		var r := rings(cc, 4)
 		var spawn_set := false
+		var k := 0
 		for c in r:
 			var dist: int = r[c]
 			if dist <= 2:
 				level[c] = 1
-				ore[c] = 0
+				ore[c] = D.I_NONE
 				if dist == 2 and not spawn_set:
 					spawn_cell[team] = c
 					spawn_set = true
+			elif dist == 3:
+				level[c] = mini(level[c], 2)
+				ore[c] = starter[(k / 2) % starter.size()]
+				k += 1
 			else:
 				level[c] = mini(level[c], 2)
-				ore[c] = 1 if c % 2 == 0 else 0
+				if c % 6 == 0:
+					ore[c] = D.I_ICE
 
 
 # ---------------------------------------------------------------------
@@ -238,7 +297,9 @@ func build_mesh() -> Array:
 		var cs: PackedVector3Array = corners[c]
 		var nb: PackedInt32Array = nbrs[c]
 		var k := cs.size()
-		var fill: Color = Color(0.80, 0.50, 0.20) if ore[c] == 1 else LEVEL_COLORS[level[c]]
+		var fill: Color = LEVEL_COLORS[level[c]]
+		if ore[c] != D.I_NONE:
+			fill = D.ITEM_COLORS[ore[c]]
 		var edge := fill.darkened(0.35)
 		var wall := fill.darkened(0.5)
 		for i in k:
