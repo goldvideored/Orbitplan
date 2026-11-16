@@ -13,6 +13,19 @@ const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const NO_CELL := -1
 const CORE_H := 1.1   # высота основания ядра
 
+# состояние постройки -> цвет огонька-индикатора
+const ST_IDLE := 0    # ждёт (нет сырья, темно)
+const ST_OK := 1      # работает
+const ST_SLOW := 2    # работает медленно (мало энергии)
+const ST_STOP := 3    # стоит (некуда отдавать, нет энергии, нет воды)
+const STATE_COLORS := [Color(0.55, 0.55, 0.6), Color(0.2, 1.0, 0.3), Color(1.0, 0.8, 0.15), Color(1.0, 0.15, 0.1)]
+# высота огонька над постройкой (в локальных координатах декора)
+const IND_H := {
+	D.CORE: 2.4, D.DRILL: 1.75, D.DRILL2: 2.3, D.DRILL3: 2.6, D.SOLAR: 0.95,
+	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
+	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
+}
+
 var my_team := 0
 var is_server := false
 var headless := false
@@ -53,6 +66,8 @@ var radial: RadialMenu
 var inspect_cell := NO_CELL
 var inspect_text := ""
 var inspect_acc := 0.0
+var help_panel: Control
+var state_acc := 0
 var sel_type := D.CONVEYOR
 var sel_rot := 0
 var mm_items: MultiMesh
@@ -248,7 +263,7 @@ func _add_building(d: Dictionary) -> void:
 		"store": 0, "timer": 0, "rr": 0,
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
-		"pr": 0.0, "pout": 0.0,
+		"pr": 0.0, "pout": 0.0, "out_blocked": false,
 	}
 	var cells := _footprint(b.type, b.cell, b.dir)
 	b["cells"] = cells
@@ -505,53 +520,96 @@ func inspect_reply(cell: int, text: String) -> void:
 	inspect_text = text
 
 
-## Состояние постройки текстом (считает сервер — только у него есть внутренности машин).
+## Одна строка о постройке под прицелом (считает сервер — у него внутренности машин).
 func _inspect_text(cell: int) -> String:
 	if not grid.has(cell):
 		return ""
 	var b: Dictionary = buildings[grid[cell]]
+	var st: Array = _status(b)
+	var txt := "%s — %s" % [D.NAMES[b.type], st[1]]
+	if b.hp < D.HP[b.type]:
+		txt += "   (прочность %d%%)" % int(100.0 * b.hp / D.HP[b.type])
+	return txt
+
+
+## [состояние ST_*, короткий текст]
+func _status(b: Dictionary) -> Array:
 	var t: int = b.type
-	var L := PackedStringArray()
-	L.append("%s  [%s]   прочность %d/%d" % [D.NAMES[t], D.TEAM_NAMES[b.team], b.hp, D.HP[t]])
-	if t == D.CORE:
-		L.append("Принимает только переработанное (сырую руду — нет)")
-	elif _is_drill(t):
-		L.append("Добывает: %s  (рудных клеток %d из %d)" % [D.ITEM_NAMES[b.ore], b.ore_n, b.cells.size()])
-		if t == D.DRILL3:
-			L.append("Вода: %d" % b.water)
+	if D.POWER_USE.has(t) and not power_has_gen.has(power_root.get(b.id, b.id)):
+		return [ST_STOP, "нет энергии: рядом нет генератора"]
+	if t == D.CORE or t == D.TURRET:
+		return [ST_OK, "в строю"]
+	if t == D.CONVEYOR or t == D.PIPE:
+		return [ST_OK, "везёт: " + D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"]
+	if _is_drill(t):
 		if b.blocked:
-			L.append("СТОИТ: некуда отдавать руду")
-		elif t == D.DRILL3 and b.water <= 0:
-			L.append("СТОИТ: нет воды (подведи трубу)")
-	elif t == D.CONVEYOR or t == D.PIPE:
-		L.append("Везёт: " + (D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"))
-	elif D.RECIPES.has(t):
-		L.append("Внутри: " + _buf_text(b.buf))
-		if b.cur != -1:
-			var rec: Dictionary = D.RECIPES[t][b.cur]
-			L.append("Делает: %s  %d%%" % [D.ITEM_NAMES[rec["out"]], int(100.0 * b.prog / float(rec["t"]))])
-		elif b.out_n > 0:
-			L.append("СТОИТ: готово %d × %s, некуда отдать" % [b.out_n, D.ITEM_NAMES[b.out_item]])
-		else:
-			L.append("Ждёт сырьё")
-	elif t == D.SOLAR:
-		L.append("Выработка: %d  (свет %d/16)" % [int(b.pout), SkyCalc.level_at(planet.dirs[b.cell], SkyCalc.state(world_time))])
-	elif t == D.COAL_PLANT:
-		L.append("Уголь: %d   выработка: %d" % [int(b.buf.get(D.I_COAL, 0)), int(b.pout)])
-	elif t == D.NUCLEAR:
-		L.append("Уран: %d   вода: %d   выработка: %d" % [int(b.buf.get(D.I_URANIUM, 0)),
-			int(b.buf.get(D.I_WATER, 0)), int(b.pout)])
+			return [ST_STOP, "некуда отдавать руду"]
+		if t == D.DRILL3 and b.water <= 0:
+			return [ST_STOP, "нет воды"]
+		return _power_state(b, "добывает: " + D.ITEM_NAMES[b.ore])
+	if D.RECIPES.has(t):
+		if b.out_blocked:
+			return [ST_STOP, "некуда отдать продукт"]
+		if b.cur == -1:
+			return [ST_IDLE, "ждёт сырьё"]
+		var rec: Dictionary = D.RECIPES[t][b.cur]
+		return _power_state(b, "%s %d%%" % [D.ITEM_NAMES[rec["out"]], int(100.0 * b.prog / float(rec["t"]))])
+	if t == D.SOLAR:
+		if b.pout <= 0.0:
+			return [ST_IDLE, "темно, выработки нет"]
+		if b.pout < D.SOLAR_POWER - 0.1:
+			return [ST_SLOW, "%d энергии (мало света)" % int(b.pout)]
+		return [ST_OK, "%d энергии" % int(b.pout)]
+	if t == D.COAL_PLANT:
+		if b.pout > 0.0:
+			return [ST_OK, "%d энергии, угля %d" % [int(b.pout), int(b.buf.get(D.I_COAL, 0))]]
+		return [ST_IDLE, "нет угля"]
+	if t == D.NUCLEAR:
 		if not b.cool:
-			L.append("СТОИТ: нет воды для охлаждения")
-	elif t == D.ASSEMBLER:
-		L.append("Железо: %d" % b.store)
-	if D.POWER_USE.has(t):
-		var root: int = power_root.get(b.id, b.id)
-		if not power_has_gen.has(root):
-			L.append("Энергия: НЕТ — рядом нет генератора (зона %d колец)" % D.POWER_RING)
-		else:
-			L.append("Энергия: %d%% (нужно %d)" % [int(b.pr * 100.0), int(D.POWER_USE[t])])
-	return "\n".join(L)
+			return [ST_STOP, "нет воды для охлаждения"]
+		if b.pout > 0.0:
+			return [ST_OK, "%d энергии, урана %d" % [int(b.pout), int(b.buf.get(D.I_URANIUM, 0))]]
+		return [ST_IDLE, "нет урана"]
+	if t == D.ASSEMBLER:
+		return [ST_OK, "собирает юнита"] if b.timer > 0 else [ST_IDLE, "ждёт железо"]
+	return [ST_OK, ""]
+
+
+func _power_state(b: Dictionary, txt: String) -> Array:
+	if b.pr <= 0.001:
+		return [ST_STOP, "нет энергии"]
+	if b.pr < 0.99:
+		return [ST_SLOW, "%s (энергия %d%%)" % [txt, int(b.pr * 100.0)]]
+	return [ST_OK, txt]
+
+
+## Раз в полсекунды рассылаем цвета индикаторов всех построек.
+func _send_states() -> void:
+	var ids := PackedInt32Array()
+	var sts := PackedByteArray()
+	for b in buildings.values():
+		if b.type == D.CONVEYOR or b.type == D.PIPE:
+			continue
+		ids.append(b.id)
+		sts.append(int(_status(b)[0]))
+	for p in Net.ready_peers:
+		states.rpc_id(p, ids, sts)
+	if not headless:
+		_apply_states(ids, sts)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
+	_apply_states(ids, sts)
+
+
+func _apply_states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
+	for i in ids.size():
+		var root = bnodes.get(ids[i])
+		if root == null or not root.has_meta("ind"):
+			continue
+		var ind: MeshInstance3D = root.get_meta("ind")
+		ind.material_override = _mat(STATE_COLORS[clampi(sts[i], 0, 3)], true)
 
 
 func _buf_text(buf: Dictionary) -> String:
@@ -707,6 +765,10 @@ func _sim_tick() -> void:
 			_turret_tick(b)
 	_players_tick()
 	_units_tick()
+	state_acc += 1
+	if state_acc >= 5:
+		state_acc = 0
+		_send_states()
 
 
 func _buf_take(b: Dictionary, item: int, n: int) -> bool:
@@ -766,9 +828,12 @@ func _belt_tick(b: Dictionary) -> void:
 
 func _factory_tick(b: Dictionary, r: float) -> void:
 	var recs: Array = D.RECIPES[b.type]
+	b.out_blocked = false
 	if b.out_n > 0:
 		if _output(b, b.out_item):
 			b.out_n -= 1
+		else:
+			b.out_blocked = true
 		if b.out_n > 0:
 			return   # ждём, пока выгрузим готовое
 	if b.cur == -1:
@@ -1208,7 +1273,7 @@ func _build_scene() -> void:
 	hud = Label.new()
 	hud.position = Vector2(16, 12)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hud.add_theme_font_size_override("font_size", 17)
+	hud.add_theme_font_size_override("font_size", 15)
 	hud.add_theme_constant_override("outline_size", 5)
 	hud.add_theme_color_override("font_outline_color", Color.BLACK)
 	layer.add_child(hud)
@@ -1222,6 +1287,23 @@ func _build_scene() -> void:
 	big_msg.add_theme_constant_override("outline_size", 10)
 	big_msg.add_theme_color_override("font_outline_color", Color.BLACK)
 	layer.add_child(big_msg)
+
+	var hint := Label.new()
+	hint.text = "H — управление"
+	hint.anchor_top = 1.0
+	hint.anchor_bottom = 1.0
+	hint.offset_left = 16
+	hint.offset_top = -34
+	hint.offset_right = 400
+	hint.offset_bottom = -10
+	hint.modulate = Color(1, 1, 1, 0.55)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint.add_theme_font_size_override("font_size", 14)
+	hint.add_theme_constant_override("outline_size", 4)
+	hint.add_theme_color_override("font_outline_color", Color.BLACK)
+	layer.add_child(hint)
+	help_panel = _build_help()
+	layer.add_child(help_panel)
 
 	radial = RadialMenu.new()
 	radial.info_func = _type_info
@@ -1332,6 +1414,18 @@ func _vis_add(b: Dictionary) -> void:
 		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, 1.3, 0), col, true)
 	else:
 		_vis_shape(n, t, col)
+	if IND_H.has(t):
+		var ind := MeshInstance3D.new()
+		var im := SphereMesh.new()
+		im.radius = 0.13
+		im.height = 0.26
+		im.radial_segments = 8
+		im.rings = 4
+		ind.mesh = im
+		ind.position = Vector3(0, IND_H[t], 0)
+		ind.material_override = _mat(STATE_COLORS[ST_IDLE], true)
+		n.add_child(ind)
+		root.set_meta("ind", ind)
 	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим)
 	if not multi and t != D.CONVEYOR and t != D.PIPE:
 		var body := StaticBody3D.new()
@@ -1759,61 +1853,72 @@ func _tracer(a: Vector3, b: Vector3) -> void:
 func _update_hud() -> void:
 	if my_team < 0:
 		return
-	var enemy := 1 - my_team
 	var lines := PackedStringArray()
 	var lvl := light_level_at(player.global_position) if player else 0
-	var day := fmod(world_time / D.DAY_LENGTH, 1.0)
+	var pw: Array = power_stats[my_team]
 	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
-	lines.append("Команда: %s     Здоровье: %d     Свет: %d/16     Фонарик: %s     Сутки: %d%%%s" % [
-		D.TEAM_NAMES[my_team], my_hp, lvl, "вкл" if flash_on else "выкл", int(day * 100.0),
-		"   ЗАТМЕНИЕ" if eclipse else ""])
-	lines.append("Ядро: %d   |   Ядро врага: %d" % [core_hp[my_team], core_hp[enemy]])
+	var top := "Здоровье %d    Свет %d/16    Энергия %d / %d" % [my_hp, lvl, int(pw[0]), int(pw[1])]
+	if core_hp[my_team] < D.HP[D.CORE]:
+		top += "    Ядро %d%%" % int(100.0 * core_hp[my_team] / D.HP[D.CORE])
+	if eclipse:
+		top += "    ЗАТМЕНИЕ"
+	lines.append(top)
 
-	# склад ядра
+	# склад: только то, что есть
 	var st: Dictionary = storage[my_team]
 	var parts := PackedStringArray()
 	for it in D.CORE_ACCEPT:
-		parts.append("%s %d" % [D.ITEM_NAMES[it], int(st.get(it, 0))])
-	lines.append("Склад: " + "   ".join(parts))
+		var n := int(st.get(it, 0))
+		if n > 0:
+			parts.append("%s %d" % [D.ITEM_NAMES[it], n])
+	lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
 
-	# энергия
-	var pw: Array = power_stats[my_team]
-	var prod: float = pw[0]
-	var dem: float = pw[1]
-	var pct := 100 if dem <= 0.0 else int(minf(1.0, prod / dem) * 100.0)
-	lines.append("Энергия: выработка %d / потребление %d  (машины работают на %d%%)" % [int(prod), int(dem), pct])
-	lines.append("")
+	lines.append("В руках: " + ("Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])))
 
-	# выбор постройки
-	lines.append("Z (держать) — меню построек: мышь — группа, колесо — подтип")
-	if sel_type == D.WEAPON:
-		lines.append("В руках: Бластер  (ЛКМ — огонь)")
-	else:
-		lines.append("В руках: %s (%d кл.)   цена: %s" % [D.NAMES[sel_type], _size_of(sel_type), _cost_text(sel_type)])
+	# под прицелом — одна строка
 	if hover_cell != NO_CELL:
-		var lv: int = planet.level[hover_cell]
-		var dep: int = planet.ore[hover_cell]
-		var txt := "Клетка: высота %d" % lv
-		if dep != D.I_NONE:
-			txt += ", залежь: " + D.ITEM_NAMES[dep]
-			if D.RARE_ORES.has(dep):
-				txt += " (редкая, нужен Бур II+)"
-		if lv >= D.MAX_LEVEL:
-			txt += ", скалы — строить нельзя"
-		lines.append(txt)
-		# состояние постройки под прицелом
-		if grid.has(hover_cell) and inspect_cell != NO_CELL and inspect_text != "" \
-				and int(grid.get(inspect_cell, -1)) == int(grid[hover_cell]):
-			lines.append("")
-			lines.append(inspect_text)
-
-	if fps_mode:
-		lines.append("WASD — ходить   Space — прыжок   Shift — бег   ЛКМ/ПКМ — строить/снести   R — повернуть   F — фонарик")
-		lines.append("Tab — орбитальная камера   Esc — отпустить курсор")
-	else:
-		lines.append("ЛКМ — строить (можно тянуть)   ПКМ — снести   WASD — крутить планету   колесо — зум")
-		lines.append("Tab — от первого лица")
+		if grid.has(hover_cell):
+			if inspect_text != "" and int(grid.get(inspect_cell, -1)) == int(grid[hover_cell]):
+				lines.append(inspect_text)
+		else:
+			var dep: int = planet.ore[hover_cell]
+			if planet.level[hover_cell] >= D.MAX_LEVEL:
+				lines.append("Скалы — строить нельзя")
+			elif dep != D.I_NONE:
+				lines.append("Залежь: " + D.ITEM_NAMES[dep] + ("  (нужен Бур II+)" if D.RARE_ORES.has(dep) else ""))
 	hud.text = "\n".join(lines)
+
+
+func _build_help() -> Control:
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.75)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bg.visible = false
+	var lbl := Label.new()
+	lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.add_theme_font_size_override("font_size", 18)
+	lbl.text = """УПРАВЛЕНИЕ
+
+Ходьба                      WASD
+Прыжок / бег                Space / Shift
+Фонарик                     F
+Меню построек               держать Z: мышь — группа, колесо — подтип
+Быстрый выбор группы        1–5,  бластер — 6
+Повернуть постройку         R
+Строить / снести            ЛКМ (можно тянуть) / ПКМ
+Орбитальная камера          Tab  (WASD — крутить планету, колесо — зум)
+Отпустить курсор            Esc
+
+ОГОНЁК НА ПОСТРОЙКЕ
+зелёный — работает     жёлтый — мало энергии
+красный — стоит        серый — ждёт сырьё / темно
+
+H — закрыть"""
+	bg.add_child(lbl)
+	return bg
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1891,6 +1996,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				_set_fps(not fps_mode)
 			KEY_ESCAPE:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			KEY_H:
+				help_panel.visible = not help_panel.visible
 
 
 ## Строки для кругового меню: название, описание, цена, размер, энергия.
