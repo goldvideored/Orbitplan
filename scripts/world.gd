@@ -10,6 +10,8 @@ const SkyCalc = preload("res://scripts/sky.gd")
 const RadialMenu = preload("res://scripts/radial_menu.gd")
 const Icons = preload("res://scripts/icons.gd")
 const Ship = preload("res://scripts/ship.gd")
+const Compass = preload("res://scripts/compass.gd")
+const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
 const IN_SHIP := -2   # «что в руке» = сидит в корабле (аватар прячем)
 const ICON_SHADER = preload("res://shaders/icon.gdshader")
 const SUIT_COLOR := Color(0.88, 0.88, 0.9)
@@ -42,7 +44,8 @@ var headless := false
 var planet: Planet
 
 # --- общее состояние (есть у всех) ---
-var grid := {}       # клетка -> id постройки
+var grid := {}       # ключ _k(pn, клетка) -> id постройки (у каждой луны своя сетка)
+var my_pn := D.HOME_PLANET   # на какой луне сейчас этот клиент
 var buildings := {}  # id -> Dictionary
 var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate()]   # предмет -> количество
 var power_stats := [[0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
@@ -108,6 +111,22 @@ var ship_nodes := {}           # id корабля -> модель (чужие �
 var piloting: Ship = null      # свой корабль, которым управляем
 var piloting_id := -1
 var ship_send_acc := 0.0
+
+# --- поверхность и космос ---
+var local_root: Node3D         # всё, что на поверхности текущей луны (и её небо)
+var space_root: Node3D         # вид звёздной системы: гигант, луны, орбиты (в космосе и на карте)
+var sky_moons: Array = []      # соседние луны в небе над текущей
+var space_moons: Array = []    # луны в виде системы
+var map_mode := 0              # 0 — нет карты, 1 — орбита вокруг луны, 2 — вся система
+var map_cam: Camera3D
+var map_zoom := 1.0
+var local_traj: MeshInstance3D
+var sys_traj: MeshInstance3D
+var map_ship_label: Label3D
+var sys_ship_label: Label3D
+var compass: Compass
+var pred := {}                 # прогноз траектории корабля
+var pred_acc := 0.0
 var mm_units: MultiMesh
 var hud: Label
 var big_msg: Label
@@ -155,12 +174,25 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 		_build_scene()
 	if is_server:
 		for t in 2:
-			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0})
+			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0,
+				"pn": D.HOME_PLANET})
 
 
 # =====================================================================
 # Помощники
 # =====================================================================
+
+## Ключ клетки с учётом луны: все 5 лун — клоны одной сетки, поэтому номер клетки один и тот же.
+func _k(pn: int, cell: int) -> int:
+	return pn * 1048576 + cell
+
+
+## На какой луне игрок (по последнему отчёту клиента).
+func _peer_pn(peer: int) -> int:
+	if players.has(peer):
+		return int(players[peer].get("pn", D.HOME_PLANET))
+	return D.HOME_PLANET
+
 
 func _new_id() -> int:
 	var i := next_id
@@ -269,7 +301,7 @@ func _cost_text(type: int) -> String:
 	return ", ".join(parts)
 
 
-func _can_place(team: int, type: int, cell: int, dir: int) -> bool:
+func _can_place(team: int, type: int, cell: int, dir: int, pn: int) -> bool:
 	if team < 0 or finished or cell < 0 or cell >= planet.count():
 		return false
 	if not D.COST.has(type):
@@ -278,9 +310,9 @@ func _can_place(team: int, type: int, cell: int, dir: int) -> bool:
 	if foot.size() != _size_of(type):
 		return false
 	for c in foot:
-		if grid.has(c) or planet.level[c] >= D.MAX_LEVEL:
+		if grid.has(_k(pn, c)) or planet.level[c] >= D.MAX_LEVEL:
 			return false
-		if _arc(c, planet.core_center[1 - team]) < D.ENEMY_ZONE:
+		if pn == D.HOME_PLANET and _arc(c, planet.core_center[1 - team]) < D.ENEMY_ZONE:
 			return false
 	if _is_drill(type):
 		var dep: int = _drill_ore(foot)[0]
@@ -298,7 +330,7 @@ func _can_place(team: int, type: int, cell: int, dir: int) -> bool:
 func _add_building(d: Dictionary) -> void:
 	var b := {
 		"id": int(d.id), "type": int(d.type), "team": int(d.team),
-		"cell": int(d.cell), "dir": int(d.dir),
+		"cell": int(d.cell), "dir": int(d.dir), "pn": int(d.get("pn", D.HOME_PLANET)),
 		"hp": D.HP[int(d.type)], "item": D.I_NONE, "prog": 0.0,
 		"store": 0, "timer": 0, "rr": 0,
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
@@ -321,12 +353,12 @@ func _add_building(d: Dictionary) -> void:
 		b["ore_n"] = info[1]
 	buildings[b.id] = b
 	for c in cells:
-		grid[c] = b.id
+		grid[_k(b.pn, c)] = b.id
 	power_dirty = true
 	if is_server and b.type == D.LOADER:
 		_spawn_rover(b)
 	next_id = maxi(next_id, b.id + 1)
-	if not headless:
+	if not headless and b.pn == my_pn:
 		_vis_add(b)
 
 
@@ -335,7 +367,7 @@ func _remove_building(id: int) -> void:
 		return
 	var b: Dictionary = buildings[id]
 	for c in b.cells:
-		grid.erase(c)
+		grid.erase(_k(b.pn, c))
 	buildings.erase(id)
 	power_dirty = true
 	if is_server:
@@ -348,19 +380,20 @@ func _remove_building(id: int) -> void:
 
 
 func _bdata(b: Dictionary) -> Dictionary:
-	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter}
+	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
+		"pn": b.pn}
 
 
 # =====================================================================
 # Сервер: команды игроков
 # =====================================================================
 
-func server_place(team: int, type: int, cell: int, dir: int) -> void:
+func server_place(team: int, type: int, cell: int, dir: int, pn: int) -> void:
 	if not D.COST.has(type) or type == D.CORE:
 		return
 	var nb0: PackedInt32Array = planet.nbrs[cell]
 	dir = posmod(dir, nb0.size())
-	if not _can_place(team, type, cell, dir):
+	if not _can_place(team, type, cell, dir, pn):
 		return
 	if not creative:
 		var st: Dictionary = storage[team]
@@ -368,16 +401,16 @@ func server_place(team: int, type: int, cell: int, dir: int) -> void:
 		for it in cost:
 			st[it] = int(st.get(it, 0)) - int(cost[it])
 	var nb: PackedInt32Array = planet.nbrs[cell]
-	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size())}
+	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size()), "pn": pn}
 	_add_building(d)
 	for peer in Net.ready_peers:
 		ev_add.rpc_id(peer, d)
 
 
-func server_remove(team: int, cell: int) -> void:
-	if finished or not grid.has(cell):
+func server_remove(team: int, cell: int, pn: int) -> void:
+	if finished or not grid.has(_k(pn, cell)):
 		return
-	var b: Dictionary = buildings[grid[cell]]
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	if b.team != team or b.type == D.CORE:
 		return
 	var st: Dictionary = storage[team]
@@ -402,15 +435,16 @@ func send_full_sync(peer: int) -> void:
 		ev_over.rpc_id(peer, 0 if core_hp[0] > 0 else 1)
 
 
-func server_player_state(peer: int, pos: Vector3, fwd: Vector3, held: int) -> void:
+func server_player_state(peer: int, pos: Vector3, fwd: Vector3, held: int, pn: int) -> void:
 	var team: int = Net.team_of(peer)
 	if team < 0:
 		return
 	if not players.has(peer):
 		players[peer] = {"team": team, "pos": pos, "fwd": fwd, "hp": D.PLAYER_HP, "dead_t": 0,
-			"last_shot": 0, "held": held}
+			"last_shot": 0, "held": held, "pn": pn}
 	var pl: Dictionary = players[peer]
 	pl.held = held
+	pl["pn"] = clampi(pn, 0, D.PLANETS.size() - 1)
 	if pl.hp <= 0:
 		return
 	pl.pos = pos
@@ -438,12 +472,13 @@ func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
 		return
 	pl.last_shot = now
 	dir = dir.normalized()
+	var spn: int = pl.get("pn", D.HOME_PLANET)
 
 	var best_t: float = D.GUN_RANGE
 	var hit_unit = null
 	var hit_peer := -1
 	for u in units:
-		if u.team == pl.team or u.hp <= 0:
+		if u.team == pl.team or u.hp <= 0 or u.pn != spn:
 			continue
 		var t := _ray_sphere(from, dir, _upos(u), 0.5)
 		if t > 0.0 and t < best_t:
@@ -452,7 +487,7 @@ func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
 			hit_peer = -1
 	for pid in players:
 		var o: Dictionary = players[pid]
-		if o.team == pl.team or o.hp <= 0:
+		if o.team == pl.team or o.hp <= 0 or int(o.get("pn", D.HOME_PLANET)) != spn:
 			continue
 		var p: Vector3 = o.pos
 		var up := p.normalized()
@@ -471,8 +506,8 @@ func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
 	var end := from + dir * best_t
 	for p in Net.ready_peers:
 		if p != peer:
-			fx_shot.rpc_id(p, from, end)
-	if not headless and peer != 1:
+			fx_shot.rpc_id(p, from, end, spn)
+	if not headless and peer != 1 and spn == my_pn:
 		_tracer(from, end)
 
 
@@ -495,21 +530,21 @@ func _damage_player(pid: int, dmg: int) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func req_place(type: int, cell: int, dir: int) -> void:
 	if multiplayer.is_server():
-		var team: int = Net.team_of(multiplayer.get_remote_sender_id())
-		server_place(team, type, cell, dir)
+		var peer := multiplayer.get_remote_sender_id()
+		server_place(Net.team_of(peer), type, cell, dir, _peer_pn(peer))
 
 
 @rpc("any_peer", "call_remote", "reliable")
 func req_remove(cell: int) -> void:
 	if multiplayer.is_server():
-		var team: int = Net.team_of(multiplayer.get_remote_sender_id())
-		server_remove(team, cell)
+		var peer := multiplayer.get_remote_sender_id()
+		server_remove(Net.team_of(peer), cell, _peer_pn(peer))
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func req_player_state(pos: Vector3, fwd: Vector3, held: int) -> void:
+func req_player_state(pos: Vector3, fwd: Vector3, held: int, pn: int) -> void:
 	if multiplayer.is_server():
-		server_player_state(multiplayer.get_remote_sender_id(), pos, fwd, held)
+		server_player_state(multiplayer.get_remote_sender_id(), pos, fwd, held, pn)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -536,6 +571,7 @@ func ev_over(winner: int) -> void:
 @rpc("authority", "call_remote", "reliable")
 func ev_respawn(pos: Vector3) -> void:
 	if player:
+		_switch_planet(D.HOME_PLANET)
 		player.teleport(pos)
 
 
@@ -560,7 +596,8 @@ func snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArra
 @rpc("any_peer", "call_remote", "reliable")
 func req_pad_action(cell: int) -> void:
 	if multiplayer.is_server():
-		server_pad_action(Net.team_of(multiplayer.get_remote_sender_id()), cell)
+		var peer := multiplayer.get_remote_sender_id()
+		server_pad_action(Net.team_of(peer), cell, _peer_pn(peer))
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -570,20 +607,20 @@ func req_board(id: int) -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func ev_board(id: int, pos: Vector3, quat: Quaternion, fuel: float) -> void:
-	_start_piloting(id, pos, quat, fuel)
+func ev_board(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int) -> void:
+	_start_piloting(id, pos, quat, fuel, pn)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func req_ship_state(id: int, pos: Vector3, quat: Quaternion, fuel: float, thrust: bool) -> void:
+func req_ship_state(id: int, pos: Vector3, quat: Quaternion, fuel: float, thrust: bool, pn: int) -> void:
 	if multiplayer.is_server():
-		server_ship_state(multiplayer.get_remote_sender_id(), id, pos, quat, fuel, thrust)
+		server_ship_state(multiplayer.get_remote_sender_id(), id, pos, quat, fuel, thrust, pn)
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func req_ship_exit(id: int, pos: Vector3, quat: Quaternion) -> void:
+func req_ship_exit(id: int, pos: Vector3, quat: Quaternion, pn: int) -> void:
 	if multiplayer.is_server():
-		server_ship_exit(multiplayer.get_remote_sender_id(), id, pos, quat)
+		server_ship_exit(multiplayer.get_remote_sender_id(), id, pos, quat, pn)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -595,13 +632,14 @@ func req_ship_crash(id: int) -> void:
 @rpc("any_peer", "call_remote", "reliable")
 func req_set_filter(cell: int, item: int) -> void:
 	if multiplayer.is_server():
-		server_set_filter(Net.team_of(multiplayer.get_remote_sender_id()), cell, item)
+		var peer := multiplayer.get_remote_sender_id()
+		server_set_filter(Net.team_of(peer), cell, item, _peer_pn(peer))
 
 
-func server_set_filter(team: int, cell: int, item: int) -> void:
-	if not grid.has(cell) or not D.ITEM_NAMES.has(item):
+func server_set_filter(team: int, cell: int, item: int, pn: int) -> void:
+	if not grid.has(_k(pn, cell)) or not D.ITEM_NAMES.has(item):
 		return
-	var b: Dictionary = buildings[grid[cell]]
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	if b.type != D.UNLOADER or b.team != team:
 		return
 	b.filter = item
@@ -634,7 +672,8 @@ func _apply_filter(id: int, item: int) -> void:
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func req_inspect(cell: int) -> void:
 	if multiplayer.is_server():
-		inspect_reply.rpc_id(multiplayer.get_remote_sender_id(), cell, _inspect_text(cell))
+		var peer := multiplayer.get_remote_sender_id()
+		inspect_reply.rpc_id(peer, cell, _inspect_text(cell, _peer_pn(peer)))
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -644,10 +683,10 @@ func inspect_reply(cell: int, text: String) -> void:
 
 
 ## Одна строка о постройке под прицелом (считает сервер — у него внутренности машин).
-func _inspect_text(cell: int) -> String:
-	if not grid.has(cell):
+func _inspect_text(cell: int, pn: int) -> String:
+	if not grid.has(_k(pn, cell)):
 		return ""
-	var b: Dictionary = buildings[grid[cell]]
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	var st: Array = _status(b)
 	var txt := "%s — %s" % [D.NAMES[b.type], st[1]]
 	if b.hp < D.HP[b.type]:
@@ -794,8 +833,9 @@ func _buf_text(buf: Dictionary) -> String:
 
 
 @rpc("authority", "call_remote", "unreliable")
-func fx_shot(from: Vector3, to: Vector3) -> void:
-	_tracer(from, to)
+func fx_shot(from: Vector3, to: Vector3, pn: int) -> void:
+	if pn == my_pn:
+		_tracer(from, to)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -826,13 +866,16 @@ func _apply_proj(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteA
 
 
 @rpc("authority", "call_remote", "unreliable")
-func fx_beam(from: Vector3, to: Vector3, kind: int) -> void:
+func fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
+	if pn != my_pn:
+		return
 	_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
 
 
 @rpc("authority", "call_remote", "unreliable")
-func fx_boom(at: Vector3, r: float, uranium: bool) -> void:
-	_boom(at, r, uranium)
+func fx_boom(at: Vector3, r: float, uranium: bool, pn: int) -> void:
+	if pn == my_pn:
+		_boom(at, r, uranium)
 
 
 # =====================================================================
@@ -870,8 +913,8 @@ func _rebuild_power() -> void:
 			for x in r:
 				covered[x] = true
 		for x in covered:
-			if grid.has(x):
-				var oid: int = grid[x]
+			if grid.has(_k(b.pn, x)):
+				var oid: int = grid[_k(b.pn, x)]
 				if parent.has(oid) and buildings[oid].team == b.team:
 					_uf_union(parent, b.id, oid)
 	power_root.clear()
@@ -900,7 +943,7 @@ func _uf_union(parent: Dictionary, a: int, b: int) -> void:
 func _sim_tick() -> void:
 	if power_dirty:
 		_rebuild_power()
-	var sky := SkyCalc.state(world_time)
+	var skies := {}   # небо каждой луны считаем один раз за тик
 	var prod := [0.0, 0.0]
 	var demand := [0.0, 0.0]
 	var gprod := {}   # корень сети -> выработка
@@ -913,7 +956,9 @@ func _sim_tick() -> void:
 		var team: int = b.team
 		var out := 0.0
 		if t == D.SOLAR:
-			var lvl := SkyCalc.level_at(planet.dirs[b.cell], sky)
+			if not skies.has(b.pn):
+				skies[b.pn] = SkyCalc.state(world_time, b.pn)
+			var lvl := SkyCalc.level_at(planet.dirs[b.cell], skies[b.pn])
 			out = D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
 		elif t == D.COAL_PLANT:
 			if b.burn <= 0 and _buf_take(b, D.I_COAL, 1):
@@ -967,7 +1012,7 @@ func _sim_tick() -> void:
 			if b.timer > 0:
 				b.timer -= 1
 				if b.timer == 0:
-					_spawn_unit(b.team, b.cell)
+					_spawn_unit(b.team, b.cell, b.pn)
 			elif b.store >= D.UNIT_COST:
 				b.store -= D.UNIT_COST
 				b.timer = D.UNIT_BUILD_TICKS
@@ -1030,7 +1075,7 @@ func _pad_tick(b: Dictionary) -> void:
 			var spot := _pad_spot(b)
 			var id := next_ship_id
 			next_ship_id += 1
-			ships[id] = {"id": id, "team": b.team, "pad": b.id, "pos": spot,
+			ships[id] = {"id": id, "team": b.team, "pad": b.id, "pos": spot, "pn": b.pn,
 				"quat": Quaternion(_up_basis(spot.normalized())), "state": 0, "pilot": -1,
 				"fuel": float(D.SCOUT_TANK) if creative else 0.0, "thrust": false}
 		return
@@ -1048,10 +1093,10 @@ func _pad_tick(b: Dictionary) -> void:
 			sh.fuel = minf(float(D.SCOUT_TANK), float(sh.fuel) + 1.0)
 
 
-func server_pad_action(team: int, cell: int) -> void:
-	if not grid.has(cell):
+func server_pad_action(team: int, cell: int, pn: int) -> void:
+	if not grid.has(_k(pn, cell)):
 		return
-	var b: Dictionary = buildings[grid[cell]]
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	if b.type != D.LAUNCH_PAD or b.team != team or b.timer > 0 or _pad_ship(b) != null:
 		return
 	var st: Dictionary = storage[team]
@@ -1071,20 +1116,21 @@ func server_board(peer: int, id: int) -> void:
 	var pl: Dictionary = players[peer]
 	if sh.pilot != -1 or sh.team != pl.team or pl.hp <= 0:
 		return
-	if Vector3(pl.pos).distance_to(sh.pos) > 7.0:
+	if int(pl.get("pn", D.HOME_PLANET)) != sh.pn or Vector3(pl.pos).distance_to(sh.pos) > 7.0:
 		return
 	sh.pilot = peer
 	sh.state = 1
 	if peer == 1 and not headless:
-		_start_piloting(id, sh.pos, sh.quat, sh.fuel)
+		_start_piloting(id, sh.pos, sh.quat, sh.fuel, sh.pn)
 	else:
-		ev_board.rpc_id(peer, id, sh.pos, sh.quat, sh.fuel)
+		ev_board.rpc_id(peer, id, sh.pos, sh.quat, sh.fuel, sh.pn)
 
 
-func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel: float, thrust: bool) -> void:
+func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel: float, thrust: bool, pn: int) -> void:
 	if not ships.has(id) or ships[id].pilot != peer:
 		return
 	var sh: Dictionary = ships[id]
+	sh.pn = clampi(pn, -1, D.PLANETS.size() - 1)
 	sh.pos = pos
 	sh.quat = quat
 	sh.fuel = clampf(fuel, 0.0, float(sh.fuel))   # заправиться в полёте нельзя
@@ -1092,10 +1138,11 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 	sh.pad = -1
 
 
-func server_ship_exit(peer: int, id: int, pos: Vector3, quat: Quaternion) -> void:
+func server_ship_exit(peer: int, id: int, pos: Vector3, quat: Quaternion, pn: int) -> void:
 	if not ships.has(id) or ships[id].pilot != peer:
 		return
 	var sh: Dictionary = ships[id]
+	sh.pn = clampi(pn, 0, D.PLANETS.size() - 1)
 	sh.pos = pos
 	sh.quat = quat
 	sh.pilot = -1
@@ -1104,7 +1151,7 @@ func server_ship_exit(peer: int, id: int, pos: Vector3, quat: Quaternion) -> voi
 	# сел на свою свободную площадку — встаёт на неё и снова заправляется
 	sh.pad = -1
 	for b in buildings.values():
-		if b.type == D.LAUNCH_PAD and b.team == sh.team and _pad_ship(b) == null \
+		if b.type == D.LAUNCH_PAD and b.team == sh.team and b.pn == sh.pn and _pad_ship(b) == null \
 				and _pad_spot(b).distance_to(pos) < 6.0:
 			sh.pad = b.id
 			sh.pos = _pad_spot(b)
@@ -1114,11 +1161,12 @@ func server_ship_exit(peer: int, id: int, pos: Vector3, quat: Quaternion) -> voi
 func server_ship_crash(peer: int, id: int) -> void:
 	if ships.has(id) and ships[id].pilot == peer:
 		var at: Vector3 = ships[id].pos
+		var cpn: int = ships[id].pn
 		ships.erase(id)
 		_damage_player(peer, 40)
 		for p in Net.ready_peers:
-			fx_boom.rpc_id(p, at, 6.0, false)
-		if not headless:
+			fx_boom.rpc_id(p, at, 6.0, false, cpn)
+		if not headless and cpn == my_pn:
 			_boom(at, 6.0, false)
 
 
@@ -1135,7 +1183,7 @@ func _unloader_tick(b: Dictionary) -> void:
 
 func _spawn_rover(home: Dictionary) -> void:
 	var d: Vector3 = planet.dirs[home.cell]
-	rovers.append({"id": next_rover_id, "team": home.team, "home": home.id, "dir": d,
+	rovers.append({"id": next_rover_id, "team": home.team, "home": home.id, "dir": d, "pn": home.pn,
 		"cell": home.cell, "fwd": _up_basis(d).x, "state": 0,
 		"cargo_item": D.I_NONE, "cargo_n": 0, "target": -1})
 	next_rover_id += 1
@@ -1147,11 +1195,11 @@ func _rpos(r: Dictionary) -> Vector3:
 
 
 ## Ближайшая своя точка выгрузки, которая принимает item и где есть место. -1 — нет такой.
-func _find_unloader(team: int, item: int, from: Vector3) -> int:
+func _find_unloader(team: int, item: int, from: Vector3, pn: int) -> int:
 	var best := -1
 	var bd := INF
 	for b in buildings.values():
-		if b.type != D.UNLOADER or b.team != team or b.filter != item:
+		if b.type != D.UNLOADER or b.team != team or b.filter != item or b.pn != pn:
 			continue
 		if int(b.buf.get(item, 0)) >= D.UNLOADER_CAP:
 			continue
@@ -1193,7 +1241,7 @@ func _rovers_tick() -> void:
 			var best_n := 0
 			for it in buf:
 				var n := int(buf[it])
-				if n > best_n and _find_unloader(r.team, it, _rpos(r)) != -1:
+				if n > best_n and _find_unloader(r.team, it, _rpos(r), r.pn) != -1:
 					best_n = n
 					best_item = it
 			if best_item != D.I_NONE:
@@ -1201,12 +1249,12 @@ func _rovers_tick() -> void:
 				buf[best_item] = best_n - take
 				r.cargo_item = best_item
 				r.cargo_n = take
-				r.target = _find_unloader(r.team, best_item, _rpos(r))
+				r.target = _find_unloader(r.team, best_item, _rpos(r), r.pn)
 				r.state = 1
 		elif r.state == 1:
 			# везём
 			if not buildings.has(r.target) or buildings[r.target].filter != r.cargo_item:
-				r.target = _find_unloader(r.team, r.cargo_item, _rpos(r))
+				r.target = _find_unloader(r.team, r.cargo_item, _rpos(r), r.pn)
 				if r.target == -1:
 					continue   # некуда — ждём на месте
 			var tgt: Dictionary = buildings[r.target]
@@ -1220,7 +1268,7 @@ func _rovers_tick() -> void:
 					r.cargo_item = D.I_NONE
 					r.state = 2
 				else:
-					r.target = _find_unloader(r.team, r.cargo_item, _rpos(r))   # эта полна — ищем другую
+					r.target = _find_unloader(r.team, r.cargo_item, _rpos(r), r.pn)   # эта полна — ищем другую
 		elif r.state == 2:
 			# домой
 			if _rover_move(r, _bpos(home)):
@@ -1277,7 +1325,7 @@ func _belt_tick(b: Dictionary) -> void:
 		return
 	var speed: float = D.PIPE_SPEED if b.type == D.PIPE else D.CONVEYOR_SPEED
 	b.prog = minf(b.prog + speed, 1.0)
-	if b.prog >= 1.0 and _push(_out_cell(b), b.id, b.team, b.item):
+	if b.prog >= 1.0 and _push(_out_cell(b), b.id, b.team, b.item, b.pn):
 		b.item = D.I_NONE
 		b.prog = 0.0
 
@@ -1326,7 +1374,7 @@ func _output(b: Dictionary, item: int) -> bool:
 	var k := outs.size()
 	for i in k:
 		var idx: int = (b.rr + i) % k
-		if _push(outs[idx], b.id, b.team, item):
+		if _push(outs[idx], b.id, b.team, item, b.pn):
 			b.rr = (idx + 1) % k
 			return true
 	return false
@@ -1372,10 +1420,10 @@ func _accepts(o: Dictionary, item: int) -> bool:
 
 
 ## Положить предмет в клетку cell от постройки src_id. true — если взяли.
-func _push(cell: int, src_id: int, team: int, item: int) -> bool:
-	if not grid.has(cell):
+func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
+	if not grid.has(_k(pn, cell)):
 		return false
-	var o: Dictionary = buildings[grid[cell]]
+	var o: Dictionary = buildings[grid[_k(pn, cell)]]
 	if o.team != team:
 		return false
 	var t: int = o.type
@@ -1384,7 +1432,7 @@ func _push(cell: int, src_id: int, team: int, item: int) -> bool:
 		if (item == D.I_WATER) != (t == D.PIPE):
 			return false
 		# лента, которая смотрит в источник, у него ничего не берёт
-		if o.item != D.I_NONE or int(grid.get(_out_cell(o), -1)) == src_id:
+		if o.item != D.I_NONE or int(grid.get(_k(pn, _out_cell(o)), -1)) == src_id:
 			return false
 		o.item = item
 		o.prog = 0.0
@@ -1412,11 +1460,11 @@ func _push(cell: int, src_id: int, team: int, item: int) -> bool:
 
 ## Ближайшая вражеская цель в радиусе: юнит, игрок или (для артиллерии) постройка.
 ## Возвращает {pos, unit, pid, bld} или пустой словарь.
-func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool) -> Dictionary:
+func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool, pn: int) -> Dictionary:
 	var best := {}
 	var bd := rng
 	for u in units:
-		if u.team == team or u.hp <= 0:
+		if u.team == team or u.hp <= 0 or u.pn != pn:
 			continue
 		var p := _upos(u)
 		var d := from.distance_to(p)
@@ -1425,7 +1473,7 @@ func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool) ->
 			best = {"pos": p, "unit": u, "pid": -1, "bld": null}
 	for pid in players:
 		var o: Dictionary = players[pid]
-		if o.team == team or o.hp <= 0:
+		if o.team == team or o.hp <= 0 or int(o.get("pn", D.HOME_PLANET)) != pn:
 			continue
 		var pp: Vector3 = o.pos
 		var p := pp + pp.normalized() * 0.9
@@ -1435,7 +1483,7 @@ func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool) ->
 			best = {"pos": p, "unit": null, "pid": pid, "bld": null}
 	if with_buildings:
 		for b in buildings.values():
-			if b.team == team:
+			if b.team == team or b.pn != pn:
 				continue
 			var p := _bpos(b)
 			var d := from.distance_to(p)
@@ -1466,13 +1514,13 @@ func _turret_tick(b: Dictionary) -> void:
 		b.timer -= 1
 		return
 	var from := _muzzle(b, 0.8)
-	var tgt := _find_target(b.team, from, D.TURRET_RANGE, false)
+	var tgt := _find_target(b.team, from, D.TURRET_RANGE, false, b.pn)
 	if tgt.is_empty():
 		return
 	_hit_target(tgt, D.TURRET_DMG)
 	b.timer = D.TURRET_CD
 	b["aim"] = (Vector3(tgt.pos) - from).normalized()
-	_fx_beam(from, tgt.pos, 1)
+	_fx_beam(from, tgt.pos, 1, b.pn)
 
 
 ## II — пулемёт: пули с баллистикой, 1 свинец = несколько пуль.
@@ -1485,14 +1533,14 @@ func _turret2_tick(b: Dictionary) -> void:
 			return
 		b["ammo"] = D.T2_SHOTS_PER_COPPER
 	var from := _muzzle(b, 1.3)
-	var tgt := _find_target(b.team, from, D.T2_RANGE, false)
+	var tgt := _find_target(b.team, from, D.T2_RANGE, false, b.pn)
 	if tgt.is_empty():
 		return
 	var vel := _aim(from, tgt.pos, D.T2_SPEED, 1.0)
 	if vel == Vector3.ZERO:
 		return
 	b["aim"] = vel.normalized()
-	_spawn_proj(from, vel, b.team, 0, D.T2_DMG, 1.2, b.cell)
+	_spawn_proj(from, vel, b.team, 0, D.T2_DMG, 1.2, b.cell, b.pn)
 	if not creative:
 		b["ammo"] = int(b.ammo) - 1
 	b.timer = D.T2_CD
@@ -1508,7 +1556,7 @@ func _turret3_tick(b: Dictionary) -> void:
 	if not creative and not has_u and not has_pb:
 		return
 	var from := _muzzle(b, 2.5)
-	var tgt := _find_target(b.team, from, D.T3_RANGE, true)
+	var tgt := _find_target(b.team, from, D.T3_RANGE, true, b.pn)
 	if tgt.is_empty():
 		return
 	var vel := _aim(from, tgt.pos, D.T3_SPEED, 6.0, true)
@@ -1518,7 +1566,7 @@ func _turret3_tick(b: Dictionary) -> void:
 	if not creative:
 		_buf_take(b, D.I_URANIUM if has_u else D.I_LEAD, 1)
 	b["aim"] = vel.normalized()
-	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell)
+	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell, b.pn)
 	b.timer = D.T3_CD
 
 
@@ -1610,9 +1658,9 @@ func _miss(from: Vector3, h: Vector3, up: Vector3, th: float, speed: float, targ
 	return best
 
 
-func _spawn_proj(from: Vector3, vel: Vector3, team: int, kind: int, dmg: int, ttl: float, cell: int) -> void:
+func _spawn_proj(from: Vector3, vel: Vector3, team: int, kind: int, dmg: int, ttl: float, cell: int, pn: int) -> void:
 	projectiles.append({"pos": from, "vel": vel, "team": team, "kind": kind, "dmg": dmg,
-		"ttl": ttl, "cell": planet.walk(cell, from.normalized())})
+		"ttl": ttl, "cell": planet.walk(cell, from.normalized()), "pn": pn})
 
 
 ## Полёт снарядов: несколько шагов физики за тик, пули бьют при касании, снаряды взрываются о землю.
@@ -1634,12 +1682,12 @@ func _proj_tick() -> void:
 			pr.cell = planet.walk(pr.cell, b.normalized())
 			if b.length() < planet.top_r(pr.cell):
 				if pr.kind != 0:
-					_explode(b, pr.team, pr.kind == 2)
+					_explode(b, pr.team, pr.kind == 2, pr.pn)
 				alive = false
 				break
 		if alive and pr.ttl <= 0.0:
 			if pr.kind != 0:
-				_explode(pr.pos, pr.team, pr.kind == 2)
+				_explode(pr.pos, pr.team, pr.kind == 2, pr.pn)
 			alive = false
 		pr["dead"] = not alive
 	projectiles = projectiles.filter(func(x): return not x.dead)
@@ -1648,14 +1696,14 @@ func _proj_tick() -> void:
 ## Пуля задела врага на отрезке a→b?
 func _bullet_hit(pr: Dictionary, a: Vector3, b: Vector3) -> bool:
 	for u in units:
-		if u.team == pr.team or u.hp <= 0:
+		if u.team == pr.team or u.hp <= 0 or u.pn != pr.pn:
 			continue
 		if _seg_dist(a, b, _upos(u)) < 0.5:
 			u.hp -= pr.dmg
 			return true
 	for pid in players:
 		var o: Dictionary = players[pid]
-		if o.team == pr.team or o.hp <= 0:
+		if o.team == pr.team or o.hp <= 0 or int(o.get("pn", D.HOME_PLANET)) != pr.pn:
 			continue
 		var pp: Vector3 = o.pos
 		var c := pp + pp.normalized() * 0.9
@@ -1672,10 +1720,10 @@ func _seg_dist(a: Vector3, b: Vector3, c: Vector3) -> float:
 
 
 ## Взрыв: урон врагам в радиусе (в центре 100%, к краю 20%). Уран — облучение на 2 с.
-func _explode(at: Vector3, team: int, uranium: bool) -> void:
+func _explode(at: Vector3, team: int, uranium: bool, pn: int) -> void:
 	var r: float = D.T3_SPLASH
 	for u in units:
-		if u.team == team or u.hp <= 0:
+		if u.team == team or u.hp <= 0 or u.pn != pn:
 			continue
 		var d := at.distance_to(_upos(u))
 		if d < r:
@@ -1684,7 +1732,7 @@ func _explode(at: Vector3, team: int, uranium: bool) -> void:
 				u.poison = D.POISON_TICKS
 	for pid in players:
 		var o: Dictionary = players[pid]
-		if o.team == team or o.hp <= 0:
+		if o.team == team or o.hp <= 0 or int(o.get("pn", D.HOME_PLANET)) != pn:
 			continue
 		var d := at.distance_to(o.pos)
 		if d < r:
@@ -1692,7 +1740,7 @@ func _explode(at: Vector3, team: int, uranium: bool) -> void:
 			if uranium:
 				o["poison"] = D.POISON_TICKS
 	for b in buildings.values():
-		if b.team == team or not buildings.has(b.id):
+		if b.team == team or b.pn != pn or not buildings.has(b.id):
 			continue
 		var d := at.distance_to(_bpos(b))
 		if d < r:
@@ -1700,24 +1748,24 @@ func _explode(at: Vector3, team: int, uranium: bool) -> void:
 			if finished:
 				break
 	for p in Net.ready_peers:
-		fx_boom.rpc_id(p, at, r, uranium)
-	if not headless:
+		fx_boom.rpc_id(p, at, r, uranium, pn)
+	if not headless and pn == my_pn:
 		_boom(at, r, uranium)
 
 
-func _fx_beam(from: Vector3, to: Vector3, kind: int) -> void:
+func _fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	for p in Net.ready_peers:
-		fx_beam.rpc_id(p, from, to, kind)
-	if not headless:
+		fx_beam.rpc_id(p, from, to, kind, pn)
+	if not headless and pn == my_pn:
 		_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
 
 
-func _spawn_unit(team: int, cell: int) -> void:
+func _spawn_unit(team: int, cell: int, pn: int) -> void:
 	var d: Vector3 = planet.dirs[cell]
 	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.01
 	d = (d + jitter).normalized()
 	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": D.UNIT_HP, "cd": 0,
-		"poison": 0})
+		"poison": 0, "pn": pn})
 	next_unit_id += 1
 
 
@@ -1736,8 +1784,10 @@ func _players_tick() -> void:
 		if o.dead_t <= 0:
 			o.hp = D.PLAYER_HP
 			o.pos = _spawn_pos(o.team)
+			o["pn"] = D.HOME_PLANET
 			if pid == 1 and not headless:
 				if player:
+					_switch_planet(D.HOME_PLANET)
 					player.teleport(o.pos)
 			elif Net.ready_peers.has(pid):
 				ev_respawn.rpc_id(pid, o.pos)
@@ -1758,7 +1808,7 @@ func _units_tick() -> void:
 		var best: float = D.UNIT_AGGRO
 		var tpos := Vector3.ZERO
 		for o in units:
-			if o.hp <= 0 or o.id == u.id:
+			if o.hp <= 0 or o.id == u.id or o.pn != u.pn:
 				continue
 			var op := _upos(o)
 			var d: float = upos.distance_to(op)
@@ -1773,7 +1823,7 @@ func _units_tick() -> void:
 				u.dir = (u.dir + away.normalized() * 0.002).normalized()
 		for pid in players:
 			var pl: Dictionary = players[pid]
-			if pl.team == u.team or pl.hp <= 0:
+			if pl.team == u.team or pl.hp <= 0 or int(pl.get("pn", D.HOME_PLANET)) != u.pn:
 				continue
 			var pp: Vector3 = pl.pos
 			var d: float = upos.distance_to(pp)
@@ -1786,7 +1836,7 @@ func _units_tick() -> void:
 		var reach: float = D.UNIT_RANGE
 		var target_b = null
 		if target_player == -1 and target_unit == null:
-			target_b = _nearest_enemy_building(upos, u.team)
+			target_b = _nearest_enemy_building(upos, u.team, u.pn)
 			if target_b == null:
 				continue
 			tpos = _bpos(target_b)
@@ -1814,11 +1864,11 @@ func _units_tick() -> void:
 	units = units.filter(func(x): return x.hp > 0)
 
 
-func _nearest_enemy_building(from: Vector3, team: int):
+func _nearest_enemy_building(from: Vector3, team: int, pn: int):
 	var best = null
 	var bd := INF
 	for b in buildings.values():
-		if b.team == team:
+		if b.team == team or b.pn != pn:
 			continue
 		var d: float = from.distance_squared_to(_bpos(b))
 		if d < bd:
@@ -1847,9 +1897,12 @@ func _damage_building(b: Dictionary, dmg: int) -> void:
 		_destroy(b.id)
 
 
-func _send_snapshot() -> void:
+## Данные одной луны для снапшота (кэшируются: игроки на одной луне получают одно и то же).
+func _snap_data(pn: int) -> Dictionary:
 	var u := PackedFloat32Array()
 	for x in units:
+		if x.pn != pn:
+			continue
 		var p := _upos(x)
 		u.append(p.x)
 		u.append(p.y)
@@ -1858,47 +1911,63 @@ func _send_snapshot() -> void:
 		u.append(float(x.hp) / D.UNIT_HP)
 	var it := PackedVector3Array()
 	var itt := PackedByteArray()
+	var aim_ids := PackedInt32Array()
+	var aim_dirs := PackedVector3Array()
 	for b in buildings.values():
+		if b.pn != pn:
+			continue
 		if (b.type == D.CONVEYOR or b.type == D.PIPE) and b.item != D.I_NONE:
 			var a := _bpos(b)
 			var nxt := planet.top_pos(_out_cell(b))
 			var up: Vector3 = planet.dirs[b.cell]
 			it.append(a + (nxt - a) * (float(b.prog) - 0.5) + up * 0.3)
 			itt.append(b.item)
-	var pl: Array = []
-	for pid in players:
-		var o: Dictionary = players[pid]
-		pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
-	var aim_ids := PackedInt32Array()
-	var aim_dirs := PackedVector3Array()
-	for b in buildings.values():
 		if b.has("aim"):
 			aim_ids.append(b.id)
 			aim_dirs.append(b.aim)
+	var pl: Array = []
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if int(o.get("pn", D.HOME_PLANET)) == pn:
+			pl.append([pid, o.pos, o.fwd, o.team, o.hp, o.held])
 	var pp := PackedVector3Array()
 	var pv := PackedVector3Array()
 	var pk := PackedByteArray()
 	for pr in projectiles:
-		pp.append(pr.pos)
-		pv.append(pr.vel)
-		pk.append(pr.kind)
+		if pr.pn == pn:
+			pp.append(pr.pos)
+			pv.append(pr.vel)
+			pk.append(pr.kind)
 	var rv: Array = []
 	for r in rovers:
-		rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
+		if r.pn == pn:
+			rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
+	return {"u": u, "it": it, "itt": itt, "pl": pl, "rv": rv, "pp": pp, "pv": pv, "pk": pk,
+		"aim_ids": aim_ids, "aim_dirs": aim_dirs}
+
+
+func _send_snapshot() -> void:
+	# корабли — все (с номером луны; -1 — в открытом космосе), клиент рисует только свои
 	var sv: Array = []
 	for sh in ships.values():
-		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state])
+		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn])
+	var cache := {}
 	for p in Net.ready_peers:
-		snapshot.rpc_id(p, u, it, itt, pl, storage, core_hp, power_stats, rv, world_time)
-		proj_snap.rpc_id(p, pp, pv, pk)
+		var pn := _peer_pn(p)
+		if not cache.has(pn):
+			cache[pn] = _snap_data(pn)
+		var sd: Dictionary = cache[pn]
+		snapshot.rpc_id(p, sd.u, sd.it, sd.itt, sd.pl, storage, core_hp, power_stats, sd.rv, world_time)
+		proj_snap.rpc_id(p, sd.pp, sd.pv, sd.pk)
 		ships_snap.rpc_id(p, sv)
-		if not aim_ids.is_empty():
-			turret_aims.rpc_id(p, aim_ids, aim_dirs)
+		if not sd.aim_ids.is_empty():
+			turret_aims.rpc_id(p, sd.aim_ids, sd.aim_dirs)
 	if not headless:
-		_apply_snapshot(u, it, itt, pl, storage, core_hp, power_stats, rv)
-		_apply_proj(pp, pv, pk)
+		var sd: Dictionary = cache[my_pn] if cache.has(my_pn) else _snap_data(my_pn)
+		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, core_hp, power_stats, sd.rv)
+		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
-		_apply_aims(aim_ids, aim_dirs)
+		_apply_aims(sd.aim_ids, sd.aim_dirs)
 
 
 # =====================================================================
@@ -1906,6 +1975,11 @@ func _send_snapshot() -> void:
 # =====================================================================
 
 func _build_scene() -> void:
+	local_root = Node3D.new()
+	add_child(local_root)
+	space_root = Node3D.new()
+	space_root.visible = false
+	add_child(space_root)
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
 	env.background_color = Color(0, 0, 0)
@@ -1923,7 +1997,7 @@ func _build_scene() -> void:
 	var tmat := ShaderMaterial.new()
 	tmat.shader = TERRAIN_SHADER
 	terrain.material_override = tmat
-	add_child(terrain)
+	local_root.add_child(terrain)
 	terrain_body = StaticBody3D.new()
 	var tcol := CollisionShape3D.new()
 	var tshape := ConcavePolygonShape3D.new()
@@ -1931,7 +2005,7 @@ func _build_scene() -> void:
 	tshape.set_faces(built[1])
 	tcol.shape = tshape
 	terrain_body.add_child(tcol)
-	add_child(terrain_body)
+	local_root.add_child(terrain_body)
 
 	# газовый гигант, вокруг которого мы крутимся, и звёзды
 	giant_node = MeshInstance3D.new()
@@ -1944,7 +2018,7 @@ func _build_scene() -> void:
 	var gmat := ShaderMaterial.new()
 	gmat.shader = GIANT_SHADER
 	giant_node.material_override = gmat
-	add_child(giant_node)
+	local_root.add_child(giant_node)
 	# кольца: плоский квадрат с шейдером, наклонён относительно экватора гиганта
 	var rings := MeshInstance3D.new()
 	var rq := QuadMesh.new()
@@ -1970,6 +2044,8 @@ func _build_scene() -> void:
 	sun_mat.emission_energy_multiplier = 8.0
 	sun_node.material_override = sun_mat
 	add_child(sun_node)
+
+	_build_space()
 
 	# звёздное небо — огромная сфера изнутри
 	var sky_mesh := SphereMesh.new()
@@ -2004,7 +2080,7 @@ func _build_scene() -> void:
 	mm_items.mesh = iq
 	var items_mmi := MultiMeshInstance3D.new()
 	items_mmi.multimesh = mm_items
-	add_child(items_mmi)
+	local_root.add_child(items_mmi)
 
 	# юниты
 	# снаряды: светящиеся шарики, между снапшотами летят сами по баллистике
@@ -2025,7 +2101,7 @@ func _build_scene() -> void:
 	mm_proj.mesh = psph
 	var proj_mmi := MultiMeshInstance3D.new()
 	proj_mmi.multimesh = mm_proj
-	add_child(proj_mmi)
+	local_root.add_child(proj_mmi)
 
 	mm_units = MultiMesh.new()
 	mm_units.transform_format = MultiMesh.TRANSFORM_3D
@@ -2038,7 +2114,7 @@ func _build_scene() -> void:
 	mm_units.mesh = ubox
 	var units_mmi := MultiMeshInstance3D.new()
 	units_mmi.multimesh = mm_units
-	add_child(units_mmi)
+	local_root.add_child(units_mmi)
 
 	# орбитальная камера
 	orbit_cam = Camera3D.new()
@@ -2078,7 +2154,7 @@ func _build_scene() -> void:
 	cover_mat.albedo_color = Color(1.0, 0.9, 0.2, 0.18)
 	ghost_cover.material_override = cover_mat
 	ghost.add_child(ghost_cover)
-	add_child(ghost)
+	local_root.add_child(ghost)
 
 	# интерфейс
 	var layer := CanvasLayer.new()
@@ -2137,6 +2213,8 @@ func _build_scene() -> void:
 	crosshair.add_theme_constant_override("outline_size", 4)
 	crosshair.add_theme_color_override("font_outline_color", Color.BLACK)
 	layer.add_child(crosshair)
+	compass.visible = false
+	layer.add_child(compass)
 
 	# персонаж
 	if my_team >= 0:
@@ -2150,6 +2228,104 @@ func _build_scene() -> void:
 
 
 ## Обычные поверхности — шейдер с 16 уровнями света. Светящиеся (glow) — сами светятся в темноте.
+## Луны в небе, вид звёздной системы (гигант, луны, орбиты, сферы влияния), карта.
+func _build_space() -> void:
+	var moon_mat := ShaderMaterial.new()
+	moon_mat.shader = MOON_SHADER
+	for j in D.PLANETS.size():
+		# луна в небе над текущей
+		var sm := MeshInstance3D.new()
+		var sp := SphereMesh.new()
+		sp.radius = D.PLANET_R
+		sp.height = D.PLANET_R * 2.0
+		sp.radial_segments = 32
+		sp.rings = 16
+		sm.mesh = sp
+		sm.material_override = moon_mat
+		local_root.add_child(sm)
+		sky_moons.append(sm)
+		# луна в виде системы: шар, подпись, круг сферы влияния
+		var node := Node3D.new()
+		var ball := MeshInstance3D.new()
+		ball.mesh = sp
+		ball.material_override = moon_mat
+		node.add_child(ball)
+		var lbl := Label3D.new()
+		lbl.text = D.PLANETS[j].name
+		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		lbl.fixed_size = true
+		lbl.pixel_size = 0.0012
+		lbl.font_size = 22
+		lbl.outline_size = 6
+		lbl.no_depth_test = true
+		lbl.position = Vector3(0, D.PLANET_R * 1.6, 0)
+		node.add_child(lbl)
+		node.add_child(_circle_mesh(SkyCalc.soi(j), Color(0.5, 0.7, 1.0, 0.5)))
+		space_root.add_child(node)
+		space_moons.append(node)
+		# орбита луны
+		space_root.add_child(_circle_mesh(float(D.PLANETS[j].a), Color(0.6, 0.6, 0.7, 0.6)))
+	# гигант в центре системы
+	var giant := MeshInstance3D.new()
+	var gs := SphereMesh.new()
+	gs.radius = D.GIANT_R
+	gs.height = D.GIANT_R * 2.0
+	gs.radial_segments = 64
+	gs.rings = 32
+	giant.mesh = gs
+	var gmat := ShaderMaterial.new()
+	gmat.shader = GIANT_SHADER
+	giant.material_override = gmat
+	space_root.add_child(giant)
+	# траектории и метки корабля
+	local_traj = MeshInstance3D.new()
+	local_traj.mesh = ImmediateMesh.new()
+	local_root.add_child(local_traj)
+	sys_traj = MeshInstance3D.new()
+	sys_traj.mesh = ImmediateMesh.new()
+	space_root.add_child(sys_traj)
+	map_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
+	local_root.add_child(map_ship_label)
+	sys_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
+	space_root.add_child(sys_ship_label)
+	map_cam = Camera3D.new()
+	map_cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+	map_cam.far = 30000
+	add_child(map_cam)
+	compass = Compass.new()
+
+
+func _marker_label(txt: String, col: Color) -> Label3D:
+	var l := Label3D.new()
+	l.text = txt
+	l.modulate = col
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.fixed_size = true
+	l.pixel_size = 0.0015
+	l.font_size = 22
+	l.outline_size = 6
+	l.no_depth_test = true
+	l.visible = false
+	return l
+
+
+## Окружность в плоскости XZ (орбиты, сферы влияния).
+func _circle_mesh(r: float, col: Color) -> MeshInstance3D:
+	var im := ImmediateMesh.new()
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = col
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, m)
+	for i in 129:
+		var a := TAU * i / 128.0
+		im.surface_add_vertex(Vector3(cos(a), 0, sin(a)) * r)
+	im.surface_end()
+	var mi := MeshInstance3D.new()
+	mi.mesh = im
+	return mi
+
+
 func _mat(color: Color, glow := false) -> Material:
 	var key := "%s|%s" % [color, glow]
 	if mats.has(key):
@@ -2285,7 +2461,7 @@ func _vis_add(b: Dictionary) -> void:
 		shape_node.position.y = 0.65
 		body.add_child(shape_node)
 		n.add_child(body)
-	add_child(root)
+	local_root.add_child(root)
 
 	var nb: PackedInt32Array = planet.nbrs[b.cell]
 	var toward: int = nb[int(b.dir) % nb.size()]
@@ -2507,18 +2683,25 @@ func _update_client(delta: float) -> void:
 				ppos = piloting.global_position
 				held = IN_SHIP
 			if is_server:
-				server_player_state(1, ppos, fwd, held)
+				server_player_state(1, ppos, fwd, held, my_pn)
 			else:
-				req_player_state.rpc_id(1, ppos, fwd, held)
+				req_player_state.rpc_id(1, ppos, fwd, held, my_pn)
 	if piloting:
 		ship_send_acc += delta
 		if ship_send_acc >= 0.05:
 			ship_send_acc = 0.0
 			var q := piloting.global_transform.basis.get_rotation_quaternion()
 			if is_server:
-				server_ship_state(1, piloting_id, piloting.global_position, q, piloting.fuel, piloting.thrusting)
+				server_ship_state(1, piloting_id, piloting.global_position, q, piloting.fuel, piloting.thrusting, piloting.pn)
 			else:
-				req_ship_state.rpc_id(1, piloting_id, piloting.global_position, q, piloting.fuel, piloting.thrusting)
+				req_ship_state.rpc_id(1, piloting_id, piloting.global_position, q, piloting.fuel, piloting.thrusting, piloting.pn)
+		pred_acc += delta
+		if pred_acc >= 0.25:
+			pred_acc = 0.0
+			pred = _predict()
+			_draw_trajectories()
+		_update_map_view()
+		_update_compass()
 
 	_update_sky()
 	_update_flashlight()
@@ -2547,16 +2730,16 @@ func _update_client(delta: float) -> void:
 			and piloting == null
 	if ghost.visible:
 		_update_ghost()
-		var ok := _can_place(my_team, sel_type, hover_cell, hover_dir)
+		var ok := _can_place(my_team, sel_type, hover_cell, hover_dir, my_pn)
 		ghost_mat.albedo_color = Color(0.3, 1.0, 0.4, 0.45) if ok else Color(1.0, 0.25, 0.2, 0.45)
 
 	# осмотр постройки под прицелом (данные присылает сервер)
 	inspect_acc += delta
-	if hover_cell != NO_CELL and grid.has(hover_cell) and inspect_acc >= 0.25:
+	if hover_cell != NO_CELL and grid.has(_k(my_pn, hover_cell)) and inspect_acc >= 0.25:
 		inspect_acc = 0.0
 		if is_server:
 			inspect_cell = hover_cell
-			inspect_text = _inspect_text(hover_cell)
+			inspect_text = _inspect_text(hover_cell, my_pn)
 		else:
 			req_inspect.rpc_id(1, hover_cell)
 	if drag_mode != 0 and hover_cell != NO_CELL and hover_cell != drag_last and alive:
@@ -2572,8 +2755,28 @@ func _update_client(delta: float) -> void:
 ## Небесная механика. Система отсчёта привязана к планете (как в KSP):
 ## планета вращается вокруг наклонённой оси и летит по орбите вокруг гиганта,
 ## поэтому для нас движутся солнце, гигант и звёзды.
+## Видим ли мы систему целиком (в открытом космосе или на карте системы).
+func _system_view() -> bool:
+	return map_mode == 2 or (piloting != null and piloting.pn < 0)
+
+
 func _update_sky() -> void:
-	var st := SkyCalc.state(world_time)
+	var sysv := _system_view()
+	local_root.visible = not sysv
+	space_root.visible = sysv
+	if sysv:
+		# система гиганта: неподвижные оси, солнце в направлении SUN_DIR
+		var sun_i: Vector3 = D.SUN_DIR.normalized()
+		RenderingServer.global_shader_parameter_set("sun_dir", sun_i)
+		RenderingServer.global_shader_parameter_set("sun_level", 1.0)
+		RenderingServer.global_shader_parameter_set("giant_level", 0.0)
+		sun_node.position = sun_i * D.SUN_VIS_DIST
+		sun_node.visible = true
+		stars_node.transform = Transform3D.IDENTITY
+		for j in space_moons.size():
+			space_moons[j].position = SkyCalc.planet_pos(j, world_time)
+		return
+	var st := SkyCalc.state(world_time, my_pn)
 	sky_state = st
 	var sun: Vector3 = st.sun
 	var gdir: Vector3 = st.gdir
@@ -2587,6 +2790,13 @@ func _update_sky() -> void:
 	sun_node.position = sun * D.SUN_VIS_DIST
 	sun_node.visible = float(st.sun_level) > 0.02
 	stars_node.transform = Transform3D(frame, Vector3.ZERO)
+	# соседние луны в небе
+	for j in sky_moons.size():
+		sky_moons[j].visible = false
+	for o in st.others:
+		var m: MeshInstance3D = sky_moons[int(o[0])]
+		m.visible = true
+		m.position = o[1]
 
 
 func _update_flashlight() -> void:
@@ -2767,13 +2977,13 @@ func _update_turrets(delta: float) -> void:
 
 
 ## Сел в корабль: прячем персонажа, включаем камеру корабля.
-func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float) -> void:
+func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int) -> void:
 	if player == null or piloting != null:
 		return
 	var sh := Ship.new()
 	add_child(sh)
 	sh.global_transform = Transform3D(Basis(quat), pos)
-	sh.setup(self, id, _make_ship(my_team), fuel)
+	sh.setup(self, id, _make_ship(my_team), fuel, pn)
 	piloting = sh
 	piloting_id = id
 	player.visible = false
@@ -2781,6 +2991,7 @@ func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float) -> vo
 	player.set_physics_process(false)
 	sh.cam.current = true
 	crosshair.visible = false
+	compass.visible = true
 	if ship_nodes.has(id):
 		ship_nodes[id].queue_free()
 		ship_nodes.erase(id)
@@ -2792,6 +3003,10 @@ func _stop_piloting(out_pos: Vector3) -> void:
 	piloting.queue_free()
 	piloting = null
 	piloting_id = -1
+	map_mode = 0
+	compass.visible = false
+	local_traj.visible = false
+	map_ship_label.visible = false
 	player.visible = true
 	player.set_physics_process(true)
 	player.teleport(out_pos)
@@ -2807,10 +3022,199 @@ func _exit_ship() -> void:
 	var up := pos.normalized()
 	var side := _up_basis(up).x
 	if is_server:
-		server_ship_exit(1, piloting_id, pos, q)
+		server_ship_exit(1, piloting_id, pos, q, piloting.pn)
 	else:
-		req_ship_exit.rpc_id(1, piloting_id, pos, q)
+		req_ship_exit.rpc_id(1, piloting_id, pos, q, piloting.pn)
 	_stop_piloting(pos + side * 3.0 + up * 1.0)
+
+
+# ---------------------------------------------------------------------
+# Карта, прогноз траектории, компас
+# ---------------------------------------------------------------------
+
+## Прогноз полёта: внутри сферы луны — притяжение луны, снаружи — гиганта.
+## local — точки в системе текущей луны, inertial — в системе гиганта (для карты системы).
+func _predict() -> Dictionary:
+	var res := {"local": PackedVector3Array(), "inertial": PackedVector3Array(), "enc": -1,
+		"enc_t": 0.0, "enc_idx": -1, "exit_t": -1.0, "impact": false}
+	if piloting == null or piloting.landed:
+		return res
+	var loc := PackedVector3Array()
+	var ine := PackedVector3Array()
+	var start_pn: int = piloting.pn
+	var cur := start_pn
+	var r: Vector3 = piloting.global_position
+	var v: Vector3 = piloting.vel
+	var t := world_time
+	var after_enc := 0
+	for step in 900:
+		if cur >= 0:
+			var rl := r.length()
+			if rl < D.PLANET_R:
+				res.impact = true
+				break
+			if rl > SkyCalc.soi(cur):
+				var ft := SkyCalc.frame(cur, t).transposed()
+				r = SkyCalc.planet_pos(cur, t) + ft * r
+				v = SkyCalc.planet_vel(cur, t) + ft * v
+				if cur == start_pn and float(res.exit_t) < 0.0:
+					res.exit_t = t - world_time
+				cur = -1
+				continue
+			var dt := 0.25
+			v -= r.normalized() * (D.SHIP_MU / (rl * rl)) * dt
+			r += v * dt
+			t += dt
+			if cur == start_pn and int(res.enc) == -1:
+				loc.append(r)
+			ine.append(SkyCalc.to_inertial(cur, t, r))
+		else:
+			var rl := r.length()
+			if rl < D.GIANT_R:
+				res.impact = true
+				break
+			var dt := 1.0
+			v -= r.normalized() * (D.GIANT_MU / (rl * rl)) * dt
+			r += v * dt
+			t += dt
+			ine.append(r)
+			for j in D.PLANETS.size():
+				var d := r - SkyCalc.planet_pos(j, t)
+				if d.length() < SkyCalc.soi(j):
+					if int(res.enc) == -1 and (j != start_pn or t - world_time > 30.0):
+						res.enc = j
+						res.enc_t = t - world_time
+						res.enc_idx = ine.size()
+					var f := SkyCalc.frame(j, t)
+					r = f * d
+					v = f * (v - SkyCalc.planet_vel(j, t))
+					cur = j
+					break
+		if int(res.enc) != -1:
+			after_enc += 1
+			if after_enc > 160:
+				break
+	res.local = loc
+	res.inertial = ine
+	return res
+
+
+func _draw_trajectories() -> void:
+	_strip(local_traj, pred.get("local", PackedVector3Array()), -1, Color(1.0, 0.85, 0.3), Color.WHITE)
+	_strip(sys_traj, pred.get("inertial", PackedVector3Array()), int(pred.get("enc_idx", -1)),
+		Color(0.35, 0.8, 1.0), Color(0.35, 1.0, 0.45))
+
+
+## Линия по точкам; после split — другим цветом (участок у луны, к которой летим).
+func _strip(mi: MeshInstance3D, pts: PackedVector3Array, split: int, c1: Color, c2: Color) -> void:
+	var im: ImmediateMesh = mi.mesh
+	im.clear_surfaces()
+	if pts.size() < 2:
+		return
+	var n1 := pts.size() if split <= 1 else mini(split, pts.size())
+	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _mat(c1, true))
+	for i in n1:
+		im.surface_add_vertex(pts[i])
+	im.surface_end()
+	if split > 1 and split < pts.size() - 1:
+		im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _mat(c2, true))
+		for i in range(split - 1, pts.size()):
+			im.surface_add_vertex(pts[i])
+		im.surface_end()
+
+
+## Камера карты: 1 — вид сверху на орбиту вокруг луны, 2 — вся система сверху.
+func _update_map_view() -> void:
+	var sysv := _system_view()
+	sys_traj.visible = sysv
+	local_traj.visible = map_mode == 1
+	var ship_i: Vector3 = piloting.global_position
+	if piloting.pn >= 0:
+		ship_i = SkyCalc.to_inertial(piloting.pn, world_time, piloting.global_position)
+	sys_ship_label.visible = sysv
+	sys_ship_label.position = ship_i
+	map_ship_label.visible = map_mode == 1
+	map_ship_label.position = piloting.global_position
+	# на карте системы корабль внутри сферы луны рисуем меткой (его модель в координатах луны)
+	piloting.visible = not (map_mode == 2 and piloting.pn >= 0)
+	if map_mode == 0:
+		if not piloting.cam.current:
+			piloting.cam.current = true
+		return
+	if not map_cam.current:
+		map_cam.current = true
+	if map_mode == 1:
+		var r := piloting.global_position
+		var nrm := r.cross(piloting.vel)
+		if nrm.length() < 0.01:
+			nrm = _up_basis(r.normalized()).z
+		nrm = nrm.normalized()
+		map_cam.size = map_zoom * maxf(r.length() * 3.0, 400.0)
+		map_cam.global_position = nrm * 5000.0
+		map_cam.look_at(Vector3.ZERO, _up_basis(nrm).z)
+	else:
+		map_cam.size = map_zoom * 12500.0
+		map_cam.global_position = Vector3(0, 12000, 0)
+		map_cam.look_at(Vector3.ZERO, Vector3.FORWARD)
+
+
+## Компас: «север» — ось вращения луны (в космосе — ось орбит), курс носа и направление полёта.
+func _update_compass() -> void:
+	var up := piloting.global_position.normalized()
+	var north := Vector3.UP - up * up.y
+	if north.length() < 0.05:
+		north = Vector3.FORWARD - up * up.dot(Vector3.FORWARD)
+	north = north.normalized()
+	var east := north.cross(up)
+	var b := piloting.global_transform.basis
+	var nose := b.y.normalized()
+	var h := nose - up * nose.dot(up)
+	if h.length() < 0.05:
+		h = -b.z - up * (-b.z).dot(up)   # нос вертикально — курс по «спине» корабля
+	var heading := rad_to_deg(atan2(h.dot(east), h.dot(north)))
+	var pitch := rad_to_deg(asin(clampf(nose.dot(up), -1.0, 1.0)))
+	var v := piloting.vel
+	var show_pro := v.length() > 0.5
+	var vh := v - up * v.dot(up)
+	var pro_h := rad_to_deg(atan2(vh.dot(east), vh.dot(north)))
+	var pro_p := rad_to_deg(asin(clampf(v.normalized().dot(up), -1.0, 1.0))) if show_pro else 0.0
+	compass.set_data(heading, pitch, pro_h, pro_p, show_pro)
+
+
+## Перешли на другую луну: перерисовываем постройки, сбрасываем то, что видели на старой.
+func _switch_planet(pn: int) -> void:
+	if pn == my_pn or pn < 0:
+		return
+	my_pn = pn
+	for id in bnodes.keys():
+		bnodes[id].queue_free()
+	bnodes.clear()
+	turret_nodes.clear()
+	turret_aim.clear()
+	for dict in [others, rover_nodes, ship_nodes]:
+		for id in dict.keys():
+			dict[id].queue_free()
+		dict.clear()
+	cur_units = PackedFloat32Array()
+	prev_units = PackedFloat32Array()
+	cur_items = PackedVector3Array()
+	cur_item_types = PackedByteArray()
+	cur_players = []
+	cur_rovers = []
+	proj_pos = PackedVector3Array()
+	ghost_key = ""
+	hover_seed = NO_CELL
+	inspect_cell = NO_CELL
+	inspect_text = ""
+	for b in buildings.values():
+		if b.pn == pn:
+			_vis_add(b)
+
+
+## Корабль вошёл в сферу влияния луны (или вылетел в открытый космос, pn = -1).
+func on_ship_soi(pn: int) -> void:
+	if pn >= 0:
+		_switch_planet(pn)
 
 
 ## Вызывает корабль при жёсткой посадке.
@@ -2820,6 +3224,7 @@ func on_ship_crash(_sh: Node3D) -> void:
 		server_ship_crash(1, id)
 	else:
 		req_ship_crash.rpc_id(1, id)
+	_switch_planet(D.HOME_PLANET)
 	_stop_piloting(_spawn_pos(my_team))
 	big_msg.text = "КОРАБЛЬ РАЗБИТ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
 	get_tree().create_timer(3.0).timeout.connect(_clear_msg)
@@ -2836,12 +3241,12 @@ func _update_ships(delta: float) -> void:
 	var k := minf(1.0, delta * 12.0)
 	for e in cur_ships:
 		var id: int = e[0]
-		if id == piloting_id:
+		if id == piloting_id or int(e[7]) != my_pn:
 			continue
 		seen[id] = true
 		if not ship_nodes.has(id):
 			var nn := _make_ship(int(e[1]))
-			add_child(nn)
+			local_root.add_child(nn)
 			nn.global_transform = Transform3D(Basis(Quaternion(e[3])), e[2])
 			ship_nodes[id] = nn
 		var node: Node3D = ship_nodes[id]
@@ -2862,7 +3267,7 @@ func _near_ship() -> int:
 	var best := -1
 	var bd := 6.0
 	for e in cur_ships:
-		if int(e[1]) != my_team or int(e[5]) != -1:
+		if int(e[1]) != my_team or int(e[5]) != -1 or int(e[7]) != my_pn:
 			continue
 		var d := player.global_position.distance_to(Vector3(e[2]))
 		if d < bd:
@@ -2988,7 +3393,7 @@ func _make_rover(team: int) -> Node3D:
 	var crate := _part(n, "box", Vector3(0.85, 0.45, 0.8), Vector3(0, 0.88, 0.35), _pmat(Color(0.6, 0.45, 0.25), 1))
 	crate.visible = false
 	n.set_meta("crate", crate)
-	add_child(n)
+	local_root.add_child(n)
 	return n
 
 
@@ -3028,7 +3433,7 @@ func _make_avatar(team: int) -> Node3D:
 	n.set_meta("hand", hand)
 	n.set_meta("held", -999)
 	n.set_meta("team", team)
-	add_child(n)
+	local_root.add_child(n)
 	return n
 
 
@@ -3146,7 +3551,7 @@ func _boom(at: Vector3, r: float, uranium: bool) -> void:
 	mi.material_override = m
 	mi.position = at
 	mi.scale = Vector3.ONE * 0.5
-	add_child(mi)
+	local_root.add_child(mi)
 	var tw := create_tween()
 	tw.set_parallel(true)
 	tw.tween_property(mi, "scale", Vector3.ONE * r * 0.6, 0.35)
@@ -3164,7 +3569,7 @@ func _tracer(a: Vector3, b: Vector3, col := Color(1.0, 0.85, 0.3)) -> void:
 	im.surface_end()
 	var mi := MeshInstance3D.new()
 	mi.mesh = im
-	add_child(mi)
+	local_root.add_child(mi)
 	get_tree().create_timer(0.08).timeout.connect(mi.queue_free)
 
 
@@ -3176,26 +3581,43 @@ func _update_hud() -> void:
 		var sh := piloting
 		var up := sh.global_position.normalized()
 		var orb := sh.orbit()
+		lines.append("")
+		lines.append("")
+		lines.append("")
+		lines.append("")
 		lines.append("РАЗВЕДЧИК    Δv %d м/с    топливо %.1f / %d" % [int(sh.dv()), sh.fuel, D.SCOUT_TANK])
+		if sh.pn >= 0:
+			var soi_txt := "Сфера влияния: %s (граница %d м)" % [D.PLANETS[sh.pn].name, int(SkyCalc.soi(sh.pn))]
+			if float(pred.get("exit_t", -1.0)) >= 0.0:
+				soi_txt += ", выход через %d с" % int(pred.exit_t)
+			lines.append(soi_txt)
+		else:
+			lines.append("Открытый космос: орбита вокруг гиганта")
+		if int(pred.get("enc", -1)) != -1:
+			lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
+		elif bool(pred.get("impact", false)):
+			lines.append("Траектория пересекает поверхность")
 		lines.append("Высота %d м    скорость %d м/с    вертикальная %+d м/с" % [
 			int(sh.altitude()), int(sh.vel.length()), int(sh.vel.dot(up))])
 		if sh.landed:
 			lines.append("На поверхности")
 		elif orb.is_empty():
-			lines.append("Траектория: уход от планеты")
+			lines.append("Траектория: уход от " + ("луны" if sh.pn >= 0 else "гиганта"))
 		elif float(orb[1]) > 5.0:
 			lines.append("ОРБИТА: апоцентр %d м, перицентр %d м" % [int(orb[0]), int(orb[1])])
 		else:
 			lines.append("Суборбитальный полёт: апоцентр %d м (для орбиты подними перицентр выше 5 м)" % int(orb[0]))
 		lines.append("Нужно Δv: взлёт ~%d, перелёт к соседней луне ~%d, посадка ~%d м/с" % [
 			D.DV_LAUNCH, D.DV_TRANSFER, D.DV_LAND])
-		lines.append("Space — тяга   W/S, A/D, Q/E — повороты   мышь — камера   колесо — отдалить   G — выйти (после посадки)")
+		lines.append("Space — тяга   W/S, A/D, Q/E — повороты   мышь — камера   M — карта   G — выйти (после посадки)")
+		if map_mode != 0:
+			lines.append("КАРТА: %s   (M — дальше, колесо — масштаб)" % ["", "орбита вокруг луны", "звёздная система"][map_mode])
 		hud.text = "\n".join(lines)
 		return
 	var lvl := light_level_at(player.global_position) if player else 0
 	var pw: Array = power_stats[my_team]
 	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
-	var top := "Здоровье %d    Свет %d/16    Энергия %d / %d" % [my_hp, lvl, int(pw[0]), int(pw[1])]
+	var top := "%s    Здоровье %d    Свет %d/16    Энергия %d / %d" % [D.PLANETS[my_pn].name, my_hp, lvl, int(pw[0]), int(pw[1])]
 	if core_hp[my_team] < D.HP[D.CORE]:
 		top += "    Ядро %d%%" % int(100.0 * core_hp[my_team] / D.HP[D.CORE])
 	if eclipse:
@@ -3220,8 +3642,8 @@ func _update_hud() -> void:
 
 	# под прицелом — одна строка
 	if hover_cell != NO_CELL:
-		if grid.has(hover_cell):
-			if inspect_text != "" and int(grid.get(inspect_cell, -1)) == int(grid[hover_cell]):
+		if grid.has(_k(my_pn, hover_cell)):
+			if inspect_text != "" and int(grid.get(_k(my_pn, inspect_cell), -1)) == int(grid[_k(my_pn, hover_cell)]):
 				lines.append(inspect_text)
 			if _hover_own(D.UNLOADER):
 				lines.append("E (держать) — выбрать груз")
@@ -3258,6 +3680,7 @@ func _build_help() -> Control:
 Быстрый выбор группы        1–7,  бластер — 8
 Корабль                     E на площадке — собрать, E рядом — сесть, G — выйти
 В полёте                    Space — тяга, W/S A/D Q/E — повороты, мышь — камера
+Карта в корабле             M (орбита -> система), колесо — масштаб
 Груз точки выгрузки         навестись и держать E
 Повернуть постройку         R
 Строить / снести            ЛКМ (можно тянуть) / ПКМ
@@ -3282,11 +3705,23 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kp and kp.pressed and not kp.echo:
 			if kp.keycode == KEY_G:
 				_exit_ship()
+			elif kp.keycode == KEY_M:
+				# в сфере луны: нет -> орбита -> система; в космосе: нет -> система
+				if piloting.pn >= 0:
+					map_mode = (map_mode + 1) % 3
+				else:
+					map_mode = 2 if map_mode == 0 else 0
+				map_zoom = 1.0
 			elif kp.keycode == KEY_ESCAPE:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			elif kp.keycode == KEY_H:
 				help_panel.visible = not help_panel.visible
 		var mbp := event as InputEventMouseButton
+		if mbp and mbp.pressed and map_mode != 0:
+			if mbp.button_index == MOUSE_BUTTON_WHEEL_UP:
+				map_zoom = maxf(0.02, map_zoom / 1.2)
+			elif mbp.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				map_zoom = minf(3.0, map_zoom * 1.2)
 		if mbp and mbp.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		return
@@ -3317,7 +3752,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if _hover_own(D.LAUNCH_PAD):
 			if is_server:
-				server_pad_action(my_team, hover_cell)
+				server_pad_action(my_team, hover_cell, my_pn)
 			else:
 				req_pad_action.rpc_id(1, hover_cell)
 			return
@@ -3325,7 +3760,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if kz and kz.keycode == KEY_E and not kz.echo:
 		if kz.pressed and not item_radial.is_open and not radial.is_open and _hover_own(D.UNLOADER):
 			filter_cell = hover_cell
-			var cur: Dictionary = buildings[grid[hover_cell]]
+			var cur: Dictionary = buildings[grid[_k(my_pn, hover_cell)]]
 			item_radial.open(cur.filter)
 			drag_mode = 0
 			if player:
@@ -3334,7 +3769,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			var res = item_radial.close()
 			if res != null and filter_cell != NO_CELL:
 				if is_server:
-					server_set_filter(my_team, filter_cell, res)
+					server_set_filter(my_team, filter_cell, res, my_pn)
 				else:
 					req_set_filter.rpc_id(1, filter_cell, res)
 			filter_cell = NO_CELL
@@ -3430,9 +3865,9 @@ func _type_info(t: int) -> Array:
 
 
 func _hover_own(type: int) -> bool:
-	if hover_cell == NO_CELL or not grid.has(hover_cell):
+	if hover_cell == NO_CELL or not grid.has(_k(my_pn, hover_cell)):
 		return false
-	var b: Dictionary = buildings[grid[hover_cell]]
+	var b: Dictionary = buildings[grid[_k(my_pn, hover_cell)]]
 	return b.type == type and b.team == my_team
 
 
@@ -3448,19 +3883,19 @@ func _select_category(ci: int) -> void:
 
 
 func _request_place(cell: int, dir: int) -> void:
-	if not _can_place(my_team, sel_type, cell, dir):
+	if not _can_place(my_team, sel_type, cell, dir, my_pn):
 		return
 	if is_server:
-		server_place(my_team, sel_type, cell, dir)
+		server_place(my_team, sel_type, cell, dir, my_pn)
 	else:
 		req_place.rpc_id(1, sel_type, cell, dir)
 
 
 func _request_remove(cell: int) -> void:
-	if my_team < 0 or not grid.has(cell):
+	if my_team < 0 or not grid.has(_k(my_pn, cell)):
 		return
 	if is_server:
-		server_remove(my_team, cell)
+		server_remove(my_team, cell, my_pn)
 	else:
 		req_remove.rpc_id(1, cell)
 
