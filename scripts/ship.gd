@@ -26,12 +26,14 @@ var throttle := 0.0          # дроссель 0..1 (Shift/Ctrl, Z — полн
 var sas_mode := 0            # автопилот ориентации: 0 выкл, 1 по движению, 2 против, 3 нормаль,
                              # 4 антинормаль, 5 радиально наружу, 6 радиально внутрь
 var power := 0.0             # тяга сейчас, 0..1
+var kind := 0                # тип корабля (D.SHIP_KINDS): 0 разведчик, 1 транспорт
 var beam: Node3D             # видимый луч посадочного фонаря
 var auto_retro_done := false # автопилот «против движения» уже включён на этом снижении
 
 
-func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int) -> void:
+func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int, ship_kind := 0) -> void:
 	world = w
+	kind = ship_kind
 	pn = planet_n
 	ship_id = id
 	fuel = fuel_units
@@ -47,12 +49,12 @@ func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int) -> void:
 
 
 func mass() -> float:
-	return D.SCOUT_DRY + fuel * D.FUEL_UNIT_MASS
+	return float(D.SHIP_KINDS[kind].dry) + fuel * D.FUEL_UNIT_MASS
 
 
 ## Сколько ещё можно разогнаться (формула Циолковского).
 func dv() -> float:
-	return D.SCOUT_VE * log(mass() / D.SCOUT_DRY)
+	return D.SCOUT_VE * log(mass() / float(D.SHIP_KINDS[kind].dry))
 
 
 ## Гравитационный параметр и радиус тела, вокруг которого летим сейчас.
@@ -188,7 +190,7 @@ func _physics_process(dt: float) -> void:
 	power = 1.0 if Input.is_key_pressed(KEY_SPACE) else throttle
 	thrusting = power > 0.001 and fuel > 0.0
 	if thrusting:
-		var f: float = D.SCOUT_THRUST * power
+		var f: float = float(D.SHIP_KINDS[kind].thrust) * power
 		vel += global_transform.basis.y.normalized() * (f / mass()) * dt
 		# расход массы: тяга / скорость истечения
 		fuel = maxf(0.0, fuel - f / D.SCOUT_VE * dt / D.FUEL_UNIT_MASS)

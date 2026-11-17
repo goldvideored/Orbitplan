@@ -241,18 +241,33 @@ const ENEMY_ZONE := 40.0       # нельзя строить ближе этог
 # ---------------------------------------------------------------------
 # Юниты и оборона (вражеские волны пока выключены)
 # ---------------------------------------------------------------------
-const UNIT_COST := 8           # железа на одного юнита
-const UNIT_BUILD_TICKS := 25
-const UNIT_HP := 60
-const UNIT_SPEED := 0.4        # м за тик
-const UNIT_RANGE := 2.2
-const UNIT_AGGRO := 7.0
-const UNIT_DMG := 6
-const UNIT_CD := 6
+# ---------------------------------------------------------------------
+# Боевые юниты: собираются в сборщике, лимит — на каждое ядро команды
+# ---------------------------------------------------------------------
+const U_TANK := 0
+const U_DRONE := 1
+const U_MECH := 2
+const UNIT_NAMES := ["Мини-танк", "Дрон-камикадзе", "Боевой мех"]
+# hp — прочность, speed — м за тик, range — дальность атаки, dmg/cd — урон и тиков между выстрелами,
+# aggro — с какого расстояния замечает врага, build — тиков сборки, slots — мест в транспорте
+const UNIT_STATS := [
+	{"hp": 120, "speed": 0.3, "range": 9.0, "dmg": 5, "cd": 5, "aggro": 14.0, "build": 30, "slots": 1},
+	{"hp": 30, "speed": 1.2, "range": 1.4, "dmg": 0, "cd": 0, "aggro": 30.0, "build": 25, "slots": 1},
+	{"hp": 1500, "speed": 0.18, "range": 19.0, "dmg": 9, "cd": 2, "aggro": 24.0, "build": 120, "slots": 4},
+]
+const UNIT_RECIPES := [
+	{I_IRON: 8, I_COPPER: 4},
+	{I_COPPER: 6, I_SILICON: 4, I_CHIP: 1},
+	{I_IRON: 60, I_LEAD: 20, I_CHIP: 10},
+]
+const UNIT_LIMIT := [20, 10, 3]     # на одно ядро команды: захватил базу — лимит вырос
+const KAMIKAZE_FRAC := 0.5          # дрон снимает половину максимальной прочности цели
+const GUARD_RADIUS := 15.0          # охрана: бьёт врагов в этом радиусе от точки охраны
+const MODE_AGGRO := 0
+const MODE_GUARD := 1
+const MODE_HOLD := 2
+const MODE_NAMES := ["агрессия", "охрана", "стоять"]
 
-const CELL_M := 1.9            # примерная ширина клетки, м (для дальностей «в клетках»)
-
-# I — лазер: мгновенный луч
 const TURRET_RANGE := 6 * CELL_M
 const TURRET_DMG := 7
 const TURRET_CD := 5           # тиков между выстрелами
@@ -308,6 +323,7 @@ const GIANT_MAX_LEVEL := 4     # гигант даёт максимум 4 уро
 # Полный бак разведчика (24 ед.) даёт ~185 м/с: хватает долететь, сесть, взлететь и вернуться.
 # ---------------------------------------------------------------------
 const SCOUT_COST := {I_IRON: 60, I_COPPER: 30, I_SILICON: 20, I_CHIP: 20}
+const TRANSPORT_COST := {I_IRON: 150, I_COPPER: 60, I_SILICON: 40, I_CHIP: 40, I_LEAD: 20}
 const SCOUT_BUILD_TICKS := 150     # сборка 15 с
 const SCOUT_DRY := 2.0             # сухая масса, т
 const FUEL_UNIT_MASS := 0.15       # т на 1 единицу топлива
@@ -339,3 +355,12 @@ const PLANETS := [
 	{"name": "Луна V", "a": 6000.0, "phase": 1.9},
 ]
 const SOI_FRAC := 0.138            # сфера влияния = орбита * (μ луны / μ гиганта)^0.4
+
+# Типы кораблей (собираются на стартовой площадке). Тяга подобрана так, чтобы на полном баке
+# ускорение было ~7.4 м/с² при g = 6. cargo — мест для юнитов.
+const SHIP_KINDS := [
+	{"name": "Разведчик", "dry": 2.0, "tank": 24, "thrust": 41.0, "build": 150, "cargo": 0},
+	{"name": "Транспорт", "dry": 5.0, "tank": 48, "thrust": 90.0, "build": 300, "cargo": 12},
+]
+const SHIP_COSTS := [SCOUT_COST, TRANSPORT_COST]
+const LOAD_RADIUS := 12.0          # с какого расстояния транспорт забирает юнитов

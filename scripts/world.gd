@@ -54,7 +54,8 @@ var buildings := {}  # id -> Dictionary
 var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate(), {}]   # предмет -> количество (нейтралам не нужен)
 var power_stats := [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
 var base_count := [1, 1, D.PLANETS.size()]   # сколько ядер у каждой команды
-var cur_caps: Array = []      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
+var cur_caps: Array = []
+var unit_stat: Array = []     # [[танки, дроны, мехи, лимит×3] по командам]      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
 var finished := false
 
 # --- только сервер ---
@@ -101,6 +102,17 @@ var held_type := -999       # какой предмет сейчас в руке
 var vm_time := 0.0
 var icon_atlas: ImageTexture
 var item_radial: RadialMenu    # меню выбора груза для точки выгрузки (держать E)
+var unit_radial: RadialMenu    # меню выбора юнита для сборщика (держать E)
+var ship_radial: RadialMenu    # меню выбора корабля для площадки (держать E)
+var e_menu: RadialMenu = null  # какое меню сейчас открыто по E
+var mm_drones: MultiMesh
+var mm_mechs: MultiMesh
+var mm_sel: MultiMesh          # кольца под выделенными юнитами
+var selected := {}             # id выделенных юнитов -> true
+var unit_pos := {}             # id своего юнита -> где он сейчас (для выделения)
+var sel_box: Control
+var sel_start := Vector2.ZERO
+var selecting := false
 var filter_cell := NO_CELL
 var cur_rovers: Array = []
 var rover_nodes := {}          # id ровера -> Node3D
@@ -388,6 +400,7 @@ func _add_building(d: Dictionary) -> void:
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
+		"ukind": int(d.get("ukind", D.U_TANK)),
 	}
 	var cells := _footprint(b.type, b.cell, b.dir)
 	b["cells"] = cells
@@ -433,7 +446,7 @@ func _remove_building(id: int) -> void:
 
 func _bdata(b: Dictionary) -> Dictionary:
 	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
-		"pn": b.pn, "main": b.main}
+		"pn": b.pn, "main": b.main, "ukind": b.ukind}
 
 
 # =====================================================================
@@ -635,9 +648,10 @@ func _apply_team(ids: PackedInt32Array, team: int) -> void:
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func caps_snap(caps: Array, counts: Array) -> void:
+func caps_snap(caps: Array, counts: Array, ustat: Array) -> void:
 	cur_caps = caps
 	base_count = counts
+	unit_stat = ustat
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -671,10 +685,51 @@ func snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedByteArra
 
 
 @rpc("any_peer", "call_remote", "reliable")
-func req_pad_action(cell: int) -> void:
+func req_command(ids: PackedInt32Array, mode: int, point: Vector3, has_point: bool) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
-		server_pad_action(Net.team_of(peer), cell, _peer_pn(peer))
+		server_command(Net.team_of(peer), _peer_pn(peer), ids, mode, point, has_point)
+
+
+## Приказ выделенным юнитам: поведение (mode, -1 — не менять) и/или точка охраны.
+func server_command(team: int, pn: int, ids: PackedInt32Array, mode: int, point: Vector3, has_point: bool) -> void:
+	var want := {}
+	for id in ids:
+		want[id] = true
+	for u in units:
+		if u.team != team or u.pn != pn or not want.has(int(u.id)):
+			continue
+		if mode >= 0:
+			u.mode = clampi(mode, 0, 2)
+			if mode == D.MODE_GUARD and not has_point:
+				u.guard = _upos(u)
+		if has_point:
+			u.guard = point
+			u.mode = D.MODE_GUARD
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_set_unit(cell: int, kind: int) -> void:
+	if multiplayer.is_server():
+		var peer := multiplayer.get_remote_sender_id()
+		server_set_unit(Net.team_of(peer), cell, kind, _peer_pn(peer))
+
+
+func server_set_unit(team: int, cell: int, kind: int, pn: int) -> void:
+	if not grid.has(_k(pn, cell)):
+		return
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
+	if b.type != D.ASSEMBLER or b.team != team or b.timer > 0:
+		return
+	b.ukind = clampi(kind, 0, 2)
+	b.buf = {}
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_pad_action(cell: int, kind: int) -> void:
+	if multiplayer.is_server():
+		var peer := multiplayer.get_remote_sender_id()
+		server_pad_action(Net.team_of(peer), cell, _peer_pn(peer), kind)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -684,8 +739,20 @@ func req_board(id: int) -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func ev_board(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int) -> void:
-	_start_piloting(id, pos, quat, fuel, pn)
+func ev_board(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int, kind: int) -> void:
+	_start_piloting(id, pos, quat, fuel, pn, kind)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_ship_load(id: int) -> void:
+	if multiplayer.is_server():
+		server_ship_load(multiplayer.get_remote_sender_id(), id)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_ship_unload(id: int) -> void:
+	if multiplayer.is_server():
+		server_ship_unload(multiplayer.get_remote_sender_id(), id)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -794,15 +861,17 @@ func _status(b: Dictionary) -> Array:
 		return [ST_OK, "в строю, лазер %d клеток" % int(round(D.TURRET_RANGE / D.CELL_M))]
 	if t == D.LAUNCH_PAD:
 		var fuel_in := int(b.buf.get(D.I_FUEL, 0))
+		var bk: int = b.get("ship_kind", 0)
 		if b.timer > 0:
-			return [ST_OK, "сборка разведчика %d%%" % int(100.0 * (1.0 - float(b.timer) / D.SCOUT_BUILD_TICKS))]
+			return [ST_OK, "сборка: %s %d%%" % [D.SHIP_KINDS[bk].name,
+				int(100.0 * (1.0 - float(b.timer) / float(D.SHIP_KINDS[bk].build)))]]
 		var sh = _pad_ship(b)
 		if sh == null:
-			return [ST_IDLE, "корабля нет — E: собрать разведчика (%s)" % _cost_dict_text(D.SCOUT_COST)]
-		var dv := _ship_dv(float(sh.fuel))
+			return [ST_IDLE, "корабля нет — держи E: собрать разведчика или транспорт"]
+		var dv := _ship_dv(float(sh.fuel), int(sh.kind))
 		var st_txt := "в полёте" if sh.state == 1 else "на площадке"
-		return [ST_OK, "разведчик %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
-			st_txt, int(sh.fuel), D.SCOUT_TANK, int(dv), fuel_in]]
+		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
+			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
 	if t == D.TURRET2:
 		var cu := int(b.buf.get(D.I_COPPER, 0))
 		if not creative and cu <= 0 and int(b.get("ammo", 0)) <= 0:
@@ -846,7 +915,13 @@ func _status(b: Dictionary) -> Array:
 			return [ST_OK, "%d энергии, урана %d" % [int(b.pout), int(b.buf.get(D.I_URANIUM, 0))]]
 		return [ST_IDLE, "нет урана"]
 	if t == D.ASSEMBLER:
-		return [ST_OK, "собирает юнита"] if b.timer > 0 else [ST_IDLE, "ждёт железо"]
+		var k: int = b.ukind
+		var nm: String = D.UNIT_NAMES[k]
+		if b.timer > 0:
+			return [ST_OK, "собирает: %s %d%%" % [nm, int(100.0 * (1.0 - float(b.timer) / D.UNIT_STATS[k].build))]]
+		if _unit_count(b.team, k) >= _unit_limit(b.team, k):
+			return [ST_SLOW, "лимит: %s %d/%d (захвати базы — лимит вырастет)" % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
+		return [ST_IDLE, "%s: ждёт %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
 	if t == D.LOADER:
 		var total := 0
 		for it in b.buf:
@@ -951,7 +1026,7 @@ func _apply_proj(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteA
 func fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	if pn != my_pn:
 		return
-	_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
+	_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0)][clampi(kind, 0, 2)])
 
 
 @rpc("authority", "call_remote", "unreliable")
@@ -1091,13 +1166,7 @@ func _sim_tick() -> void:
 		elif D.RECIPES.has(t):
 			_factory_tick(b, r)
 		elif t == D.ASSEMBLER:
-			if b.timer > 0:
-				b.timer -= 1
-				if b.timer == 0:
-					_spawn_unit(b.team, b.cell, b.pn)
-			elif b.store >= D.UNIT_COST:
-				b.store -= D.UNIT_COST
-				b.timer = D.UNIT_BUILD_TICKS
+			_assembler_tick(b)
 		elif t == D.TURRET:
 			_turret_tick(b)
 		elif t == D.TURRET2:
@@ -1127,8 +1196,20 @@ func _sim_tick() -> void:
 # Корабли: сборка на площадке, заправка, посадка/высадка пилота
 # ---------------------------------------------------------------------
 
-func _ship_dv(fuel: float) -> float:
-	return D.SCOUT_VE * log((D.SCOUT_DRY + fuel * D.FUEL_UNIT_MASS) / D.SCOUT_DRY)
+func _ship_dv(fuel: float, kind := 0) -> float:
+	var dry: float = D.SHIP_KINDS[kind].dry
+	return D.SCOUT_VE * log((dry + fuel * D.FUEL_UNIT_MASS) / dry)
+
+
+func _ship_tank(sh) -> float:
+	return float(D.SHIP_KINDS[int(sh.kind)].tank)
+
+
+func _cargo_used(sh) -> int:
+	var n := 0
+	for c in sh.cargo:
+		n += int(D.UNIT_STATS[int(c[0])].slots)
+	return n
 
 
 func _cost_dict_text(cost: Dictionary) -> String:
@@ -1158,38 +1239,81 @@ func _pad_tick(b: Dictionary) -> void:
 			var spot := _pad_spot(b)
 			var id := next_ship_id
 			next_ship_id += 1
-			ships[id] = {"id": id, "team": b.team, "pad": b.id, "pos": spot, "pn": b.pn,
-				"quat": Quaternion(_up_basis(spot.normalized())), "state": 0, "pilot": -1,
-				"fuel": float(D.SCOUT_TANK) if creative else 0.0, "thrust": false}
+			var kind: int = b.get("ship_kind", 0)
+			ships[id] = {"id": id, "team": b.team, "pad": b.id, "pos": spot, "pn": b.pn, "kind": kind,
+				"quat": Quaternion(_up_basis(spot.normalized())), "state": 0, "pilot": -1, "cargo": [],
+				"fuel": float(D.SHIP_KINDS[kind].tank) if creative else 0.0, "thrust": false}
 		return
 	# заправка стоящего на площадке корабля: 1 единица за 0.3 с
 	var sh = _pad_ship(b)
-	if sh == null or sh.state == 1 or float(sh.fuel) >= D.SCOUT_TANK - 0.001:
+	if sh == null or sh.state == 1 or float(sh.fuel) >= _ship_tank(sh) - 0.001:
 		return
 	if creative:
-		sh.fuel = float(D.SCOUT_TANK)
+		sh.fuel = _ship_tank(sh)
 		return
 	b.wt += 1
 	if b.wt >= 3:
 		b.wt = 0
 		if _buf_take(b, D.I_FUEL, 1):
-			sh.fuel = minf(float(D.SCOUT_TANK), float(sh.fuel) + 1.0)
+			sh.fuel = minf(_ship_tank(sh), float(sh.fuel) + 1.0)
 
 
-func server_pad_action(team: int, cell: int, pn: int) -> void:
+func server_pad_action(team: int, cell: int, pn: int, kind := 0) -> void:
 	if not grid.has(_k(pn, cell)):
 		return
 	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	if b.type != D.LAUNCH_PAD or b.team != team or b.timer > 0 or _pad_ship(b) != null:
 		return
+	kind = clampi(kind, 0, D.SHIP_KINDS.size() - 1)
+	var cost: Dictionary = D.SHIP_COSTS[kind]
 	var st: Dictionary = storage[team]
 	if not creative:
-		for it in D.SCOUT_COST:
-			if int(st.get(it, 0)) < int(D.SCOUT_COST[it]):
+		for it in cost:
+			if int(st.get(it, 0)) < int(cost[it]):
 				return
-		for it in D.SCOUT_COST:
-			st[it] = int(st[it]) - int(D.SCOUT_COST[it])
-	b.timer = D.SCOUT_BUILD_TICKS
+		for it in cost:
+			st[it] = int(st[it]) - int(cost[it])
+	b["ship_kind"] = kind
+	b.timer = int(D.SHIP_KINDS[kind].build)
+
+
+## Транспорт забирает своих юнитов рядом (сколько влезет мест).
+func server_ship_load(peer: int, id: int) -> void:
+	if not ships.has(id) or ships[id].pilot != peer:
+		return
+	var sh: Dictionary = ships[id]
+	var cap: int = D.SHIP_KINDS[int(sh.kind)].cargo
+	var used := _cargo_used(sh)
+	for u in units:
+		if u.team != sh.team or u.pn != sh.pn or u.hp <= 0:
+			continue
+		var slots: int = D.UNIT_STATS[u.kind].slots
+		if used + slots > cap or _upos(u).distance_to(sh.pos) > D.LOAD_RADIUS:
+			continue
+		sh.cargo.append([u.kind, u.hp])
+		used += slots
+		u.hp = 0
+	units = units.filter(func(x): return x.hp > 0)
+
+
+## Транспорт выгружает юнитов вокруг себя; они охраняют точку высадки.
+func server_ship_unload(peer: int, id: int) -> void:
+	if not ships.has(id) or ships[id].pilot != peer or int(ships[id].pn) < 0:
+		return
+	var sh: Dictionary = ships[id]
+	if sh.cargo.is_empty():
+		return
+	var c0 := planet.nearest_cell(Vector3(sh.pos).normalized())
+	var around: Array = []
+	var r := planet.rings(c0, 3)
+	for x in r:
+		if int(r[x]) >= 2:
+			around.append(x)
+	var i := 0
+	for c in sh.cargo:
+		_spawn_unit(sh.team, around[i % around.size()], sh.pn, int(c[0]), int(c[1]))
+		i += 1
+	sh.cargo = []
 
 
 func server_board(peer: int, id: int) -> void:
@@ -1204,9 +1328,9 @@ func server_board(peer: int, id: int) -> void:
 	sh.pilot = peer
 	sh.state = 1
 	if peer == 1 and not headless:
-		_start_piloting(id, sh.pos, sh.quat, sh.fuel, sh.pn)
+		_start_piloting(id, sh.pos, sh.quat, sh.fuel, sh.pn, int(sh.kind))
 	else:
-		ev_board.rpc_id(peer, id, sh.pos, sh.quat, sh.fuel, sh.pn)
+		ev_board.rpc_id(peer, id, sh.pos, sh.quat, sh.fuel, sh.pn, int(sh.kind))
 
 
 func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel: float, thrust: bool, pn: int) -> void:
@@ -1483,7 +1607,8 @@ func _accepts(o: Dictionary, item: int) -> bool:
 	if t == D.DRILL3:
 		return item == D.I_WATER and o.water < D.BUFFER_CAP
 	if t == D.ASSEMBLER:
-		return item == D.I_IRON and o.store < D.UNIT_COST * 3
+		var need: Dictionary = D.UNIT_RECIPES[o.ukind]
+		return need.has(item) and int(buf.get(item, 0)) < int(need[item]) * 2
 	if t == D.LAUNCH_PAD:
 		return item == D.I_FUEL and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
 	if t == D.TURRET2:
@@ -1533,8 +1658,7 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 		return false
 	if t == D.DRILL3:
 		o.water += 1
-	elif t == D.ASSEMBLER:
-		o.store += 1
+
 	else:
 		var buf: Dictionary = o.buf
 		buf[item] = int(buf.get(item, 0)) + 1
@@ -1840,15 +1964,53 @@ func _fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	for p in Net.ready_peers:
 		fx_beam.rpc_id(p, from, to, kind, pn)
 	if not headless and pn == my_pn:
-		_tracer(from, to, Color(1.0, 0.25, 0.2) if kind == 1 else Color(1.0, 0.85, 0.3))
+		_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0)][clampi(kind, 0, 2)])
 
 
-func _spawn_unit(team: int, cell: int, pn: int) -> void:
+func _unit_count(team: int, kind: int) -> int:
+	var n := 0
+	for u in units:
+		if u.team == team and u.kind == kind and u.hp > 0:
+			n += 1
+	return n
+
+
+## Лимит юнитов типа kind = лимит на ядро × сколько ядер у команды.
+func _unit_limit(team: int, kind: int) -> int:
+	var cores := 0
+	for b in buildings.values():
+		if b.type == D.CORE and b.team == team:
+			cores += 1
+	return int(D.UNIT_LIMIT[kind]) * maxi(cores, 1)
+
+
+## Сборщик: копит рецепт выбранного юнита, собирает, если команда не упёрлась в лимит.
+func _assembler_tick(b: Dictionary) -> void:
+	var k: int = b.ukind
+	if b.timer > 0:
+		b.timer -= 1
+		if b.timer == 0:
+			_spawn_unit(b.team, b.cell, b.pn, k)
+		return
+	if _unit_count(b.team, k) >= _unit_limit(b.team, k):
+		return
+	var need: Dictionary = D.UNIT_RECIPES[k]
+	if not creative:
+		if not _has_inputs(b, need):
+			return
+		for it in need:
+			b.buf[it] = int(b.buf[it]) - int(need[it])
+	b.timer = int(D.UNIT_STATS[k].build)
+
+
+func _spawn_unit(team: int, cell: int, pn: int, kind := 0, hp := -1) -> void:
 	var d: Vector3 = planet.dirs[cell]
 	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.01
 	d = (d + jitter).normalized()
-	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": D.UNIT_HP, "cd": 0,
-		"poison": 0, "pn": pn})
+	var full: int = D.UNIT_STATS[kind].hp
+	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": hp if hp > 0 else full,
+		"cd": 0, "poison": 0, "pn": pn, "kind": kind, "mode": D.MODE_GUARD,
+		"guard": d * planet.top_r(cell)})
 	next_unit_id += 1
 
 
@@ -1876,6 +2038,9 @@ func _players_tick() -> void:
 				ev_respawn.rpc_id(pid, o.pos, int(o.pn))
 
 
+## Юниты. Поведение: агрессия — ищет врагов по всей луне; охрана — бьёт врагов возле точки охраны
+## и возвращается к ней; стоять — не двигается, стреляет в радиусе оружия.
+## Дрон-камикадзе таранит цель и снимает половину её максимальной прочности.
 func _units_tick() -> void:
 	for u in units:
 		if int(u.get("poison", 0)) > 0:
@@ -1885,10 +2050,17 @@ func _units_tick() -> void:
 			continue
 		if u.cd > 0:
 			u.cd -= 1
+		var st: Dictionary = D.UNIT_STATS[u.kind]
+		var mode: int = u.mode
 		var upos := _upos(u)
+		var guard: Vector3 = u.guard
+		# радиус, в котором юнит ищет врагов
+		var look: float = st.aggro
+		if mode == D.MODE_HOLD:
+			look = st.range if u.kind != D.U_DRONE else st.aggro * 0.5
 		var target_unit = null
 		var target_player := -1
-		var best: float = D.UNIT_AGGRO
+		var best: float = look
 		var tpos := Vector3.ZERO
 		for o in units:
 			if o.hp <= 0 or o.id == u.id or o.pn != u.pn:
@@ -1896,7 +2068,7 @@ func _units_tick() -> void:
 			var op := _upos(o)
 			var d: float = upos.distance_to(op)
 			if o.team != u.team:
-				if d < best:
+				if d < best and (mode != D.MODE_GUARD or op.distance_to(guard) < D.GUARD_RADIUS + st.range):
 					best = d
 					target_unit = o
 					tpos = op
@@ -1910,41 +2082,76 @@ func _units_tick() -> void:
 				continue
 			var pp: Vector3 = pl.pos
 			var d: float = upos.distance_to(pp)
-			if d < best:
+			if d < best and (mode != D.MODE_GUARD or pp.distance_to(guard) < D.GUARD_RADIUS + st.range):
 				best = d
 				target_unit = null
 				target_player = pid
 				tpos = pp
 
-		var reach: float = D.UNIT_RANGE
+		var reach: float = st.range
 		var target_b = null
 		if target_player == -1 and target_unit == null:
-			target_b = _nearest_enemy_building(upos, u.team, u.pn)
+			if mode == D.MODE_AGGRO:
+				target_b = _nearest_enemy_building(upos, u.team, u.pn)
+			else:
+				var nb = _nearest_enemy_building(upos, u.team, u.pn)
+				var lim: float = D.GUARD_RADIUS if mode == D.MODE_GUARD else st.range
+				var anchor := guard if mode == D.MODE_GUARD else upos
+				if nb != null and _bpos(nb).distance_to(anchor) < lim + 2.0:
+					target_b = nb
 			if target_b == null:
+				# врагов рядом нет: охрана возвращается к точке, остальные стоят
+				if mode == D.MODE_GUARD and upos.distance_to(guard) > 2.0:
+					_unit_step(u, guard, st.speed, 1.5)
 				continue
 			tpos = _bpos(target_b)
-			reach = D.UNIT_RANGE + (2.2 if target_b.type == D.CORE else 0.6)
+			reach = st.range + (2.2 if target_b.type == D.CORE else 0.6)
 
 		var dist: float = upos.distance_to(tpos)
 		if dist > reach:
-			var ud: Vector3 = u.dir
-			var tdir := tpos.normalized()
-			var tangent := tdir - ud * ud.dot(tdir)
-			if tangent.length() > 0.00001:
-				var step: float = minf(D.UNIT_SPEED, dist - reach + 0.01)
-				u.dir = (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
-				u.cell = planet.walk(u.cell, u.dir)
-		elif u.cd == 0:
-			u.cd = D.UNIT_CD
+			if mode != D.MODE_HOLD:
+				_unit_step(u, tpos, st.speed, reach)
+		elif u.kind == D.U_DRONE:
+			# таран: половина максимальной прочности цели, дрон погибает
 			if target_player != -1:
-				_damage_player(target_player, D.UNIT_DMG)
+				_damage_player(target_player, int(D.PLAYER_HP * D.KAMIKAZE_FRAC))
 			elif target_unit != null:
-				target_unit.hp -= D.UNIT_DMG
+				target_unit.hp -= int(float(D.UNIT_STATS[target_unit.kind].hp) * D.KAMIKAZE_FRAC)
 			else:
-				_damage_building(target_b, D.UNIT_DMG)
-				if finished:
-					return
+				_damage_building(target_b, int(float(D.HP[target_b.type]) * D.KAMIKAZE_FRAC))
+			u.hp = 0
+			for p in Net.ready_peers:
+				fx_boom.rpc_id(p, upos, 3.0, false, u.pn)
+			if not headless and u.pn == my_pn:
+				_boom(upos, 3.0, false)
+			if finished:
+				return
+		elif u.cd == 0:
+			u.cd = st.cd
+			var dmg: int = st.dmg
+			if target_player != -1:
+				_damage_player(target_player, dmg)
+			elif target_unit != null:
+				target_unit.hp -= dmg
+			else:
+				_damage_building(target_b, dmg)
+			_fx_beam(upos, tpos, 2, u.pn)
+			if finished:
+				return
 	units = units.filter(func(x): return x.hp > 0)
+
+
+## Шаг юнита по поверхности к точке (останавливается на расстоянии reach).
+func _unit_step(u: Dictionary, tpos: Vector3, speed: float, reach: float) -> void:
+	var ud: Vector3 = u.dir
+	var dist := _upos(u).distance_to(tpos)
+	var tdir := tpos.normalized()
+	var tangent := tdir - ud * ud.dot(tdir)
+	if tangent.length() > 0.00001:
+		var step: float = minf(speed, dist - reach + 0.01)
+		if step > 0.0:
+			u.dir = (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
+			u.cell = planet.walk(u.cell, u.dir)
 
 
 func _nearest_enemy_building(from: Vector3, team: int, pn: int):
@@ -2062,7 +2269,9 @@ func _snap_data(pn: int) -> Dictionary:
 		u.append(p.y)
 		u.append(p.z)
 		u.append(float(x.team))
-		u.append(float(x.hp) / D.UNIT_HP)
+		u.append(float(x.hp) / float(D.UNIT_STATS[x.kind].hp))
+		u.append(float(x.id))
+		u.append(float(x.kind))
 	var it := PackedVector3Array()
 	var itt := PackedByteArray()
 	var aim_ids := PackedInt32Array()
@@ -2108,7 +2317,16 @@ func _send_snapshot() -> void:
 	# корабли — все (с номером луны; -1 — в открытом космосе), клиент рисует только свои
 	var sv: Array = []
 	for sh in ships.values():
-		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn])
+		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn, sh.kind, _cargo_used(sh)])
+	# сколько юнитов каждого типа у команд и какой лимит: [[кол-во×3, лимит×3], ...]
+	var ustat: Array = []
+	for t in 2:
+		var row: Array = []
+		for k in 3:
+			row.append(_unit_count(t, k))
+		for k in 3:
+			row.append(_unit_limit(t, k))
+		ustat.append(row)
 	var cache := {}
 	for p in Net.ready_peers:
 		var pn := _peer_pn(p)
@@ -2116,7 +2334,7 @@ func _send_snapshot() -> void:
 			cache[pn] = _snap_data(pn)
 		var sd: Dictionary = cache[pn]
 		snapshot.rpc_id(p, sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv, world_time)
-		caps_snap.rpc_id(p, sd.caps, base_count)
+		caps_snap.rpc_id(p, sd.caps, base_count, ustat)
 		proj_snap.rpc_id(p, sd.pp, sd.pv, sd.pk)
 		ships_snap.rpc_id(p, sv)
 		if not sd.aim_ids.is_empty():
@@ -2125,6 +2343,7 @@ func _send_snapshot() -> void:
 		var sd: Dictionary = cache[my_pn] if cache.has(my_pn) else _snap_data(my_pn)
 		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv)
 		cur_caps = sd.caps
+		unit_stat = ustat
 		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
 		_apply_aims(sd.aim_ids, sd.aim_dirs)
@@ -2275,6 +2494,23 @@ func _build_scene() -> void:
 	var units_mmi := MultiMeshInstance3D.new()
 	units_mmi.multimesh = mm_units
 	local_root.add_child(units_mmi)
+	# дроны — пирамидки, мехи — большие коробки, кольца выделения
+	var pm := PrismMesh.new()
+	pm.size = Vector3(0.7, 0.35, 0.7)
+	pm.material = _vc_mat()
+	mm_drones = _make_mm(pm, 2048, true)
+	var mb := BoxMesh.new()
+	mb.size = Vector3(1.8, 2.6, 1.8)
+	mb.material = _vc_mat()
+	mm_mechs = _make_mm(mb, 512, true)
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.8
+	ring.outer_radius = 1.0
+	var sel_mat := StandardMaterial3D.new()
+	sel_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sel_mat.albedo_color = Color(0.4, 1.0, 0.5)
+	ring.material = sel_mat
+	mm_sel = _make_mm(ring, 2048, false)
 
 	# орбитальная камера
 	orbit_cam = Camera3D.new()
@@ -2362,6 +2598,21 @@ func _build_scene() -> void:
 	item_radial.configure(D.FILTER_GROUPS, item_name, "колесо — сырьё / продукт")
 	item_radial.info_func = func(it): return [D.ITEM_NAMES[it], "Точка выгрузки будет принимать этот груз"]
 	layer.add_child(item_radial)
+	unit_radial = RadialMenu.new()
+	var unit_name := func(k): return D.UNIT_NAMES[k]
+	unit_radial.configure([["Мини-танк", [0]], ["Дрон", [1]], ["Мех", [2]]], unit_name, "отпусти E — выбрать")
+	unit_radial.info_func = _unit_info
+	layer.add_child(unit_radial)
+	ship_radial = RadialMenu.new()
+	var ship_name := func(k): return D.SHIP_KINDS[k].name
+	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]]], ship_name, "отпусти E — собрать")
+	ship_radial.info_func = _ship_info
+	layer.add_child(ship_radial)
+	sel_box = Control.new()
+	sel_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sel_box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	sel_box.draw.connect(_draw_sel_box)
+	layer.add_child(sel_box)
 
 	crosshair = Label.new()
 	crosshair.text = "+"
@@ -2522,6 +2773,19 @@ func _circle_mesh(r: float, col: Color) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.mesh = im
 	return mi
+
+
+func _make_mm(mesh: Mesh, count: int, colors: bool) -> MultiMesh:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = colors
+	mm.instance_count = count
+	mm.visible_instance_count = 0
+	mm.mesh = mesh
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	local_root.add_child(mmi)
+	return mm
 
 
 func _mat(color: Color, glow := false) -> Material:
@@ -3046,22 +3310,95 @@ func _update_ghost() -> void:
 		ghost_cover.mesh = cp[0]
 
 
+## Юниты: 7 чисел на юнита — x, y, z, команда, прочность 0..1, id, тип.
 func _update_units() -> void:
 	var a := clampf(snap_time / D.TICK, 0.0, 1.0)
 	snap_time += get_process_delta_time()
-	var n := mini(cur_units.size() / 5, mm_units.instance_count)
+	var stride := 7
+	var n := cur_units.size() / stride
 	var can_lerp := prev_units.size() == cur_units.size()
+	var counts := [0, 0, 0]
+	var mms := [mm_units, mm_drones, mm_mechs]
+	var lifts := [0.25, 2.5, 1.3]   # дроны летают, мехи высокие
+	var ns := 0
+	unit_pos.clear()
 	for i in n:
-		var j := i * 5
+		var j := i * stride
 		var p := Vector3(cur_units[j], cur_units[j + 1], cur_units[j + 2])
 		if can_lerp:
 			p = Vector3(prev_units[j], prev_units[j + 1], prev_units[j + 2]).lerp(p, a)
 		var team := int(cur_units[j + 3])
 		var hpf := cur_units[j + 4]
+		var id := int(cur_units[j + 5])
+		var kind := clampi(int(cur_units[j + 6]), 0, 2)
+		var up := p.normalized()
+		var mm: MultiMesh = mms[kind]
+		var c: int = counts[kind]
+		if c >= mm.instance_count:
+			continue
 		var col: Color = D.TEAM_COLORS[team]
-		mm_units.set_instance_transform(i, Transform3D(_up_basis(p.normalized()), p))
-		mm_units.set_instance_color(i, col.darkened(0.6 * (1.0 - hpf)))
-	mm_units.visible_instance_count = n
+		mm.set_instance_transform(c, Transform3D(_up_basis(up), p + up * (float(lifts[kind]) - 0.25)))
+		mm.set_instance_color(c, col.darkened(0.6 * (1.0 - hpf)))
+		counts[kind] = c + 1
+		if team == my_team:
+			unit_pos[id] = p
+			if selected.has(id) and ns < mm_sel.instance_count:
+				var sc := 2.0 if kind == D.U_MECH else 0.8
+				mm_sel.set_instance_transform(ns, Transform3D(_up_basis(up).scaled(Vector3.ONE * sc), p + up * 0.1))
+				ns += 1
+	for k in 3:
+		mms[k].visible_instance_count = counts[k]
+	mm_sel.visible_instance_count = ns
+	# выделенные, которых больше нет, — забываем
+	for id in selected.keys():
+		if not unit_pos.has(id):
+			selected.erase(id)
+
+
+## Выделение рамкой (или щелчком) в виде сверху: свои юниты на экране внутри прямоугольника.
+func _finish_selection(end: Vector2) -> void:
+	selecting = false
+	sel_box.queue_redraw()
+	var r := Rect2(sel_start, end - sel_start).abs()
+	selected.clear()
+	if r.size.length() < 6.0:
+		var best := -1
+		var bd := 25.0
+		for id in unit_pos:
+			var sp := orbit_cam.unproject_position(unit_pos[id])
+			if sp.distance_to(end) < bd and not orbit_cam.is_position_behind(unit_pos[id]):
+				bd = sp.distance_to(end)
+				best = id
+		if best != -1:
+			selected[best] = true
+		return
+	for id in unit_pos:
+		if orbit_cam.is_position_behind(unit_pos[id]):
+			continue
+		if r.has_point(orbit_cam.unproject_position(unit_pos[id])):
+			selected[id] = true
+
+
+## Приказ выделенным юнитам.
+func _command(mode: int, point := Vector3.ZERO, has_point := false) -> void:
+	if selected.is_empty():
+		return
+	var ids := PackedInt32Array(selected.keys())
+	if is_server:
+		server_command(my_team, my_pn, ids, mode, point, has_point)
+	else:
+		req_command.rpc_id(1, ids, mode, point, has_point)
+
+
+## Точка на поверхности под курсором (вид сверху).
+func _mouse_ground() -> Variant:
+	var mp := get_viewport().get_mouse_position()
+	var from := orbit_cam.project_ray_origin(mp)
+	var q := PhysicsRayQueryParameters3D.create(from, from + orbit_cam.project_ray_normal(mp) * 2000.0)
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return null
+	return hit.position
 
 
 func _update_items() -> void:
@@ -3187,13 +3524,13 @@ func _update_turrets(delta: float) -> void:
 
 
 ## Сел в корабль: прячем персонажа, включаем камеру корабля.
-func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int) -> void:
+func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: int, kind := 0) -> void:
 	if player == null or piloting != null:
 		return
 	var sh := Ship.new()
 	add_child(sh)
 	sh.global_transform = Transform3D(Basis(quat), pos)
-	sh.setup(self, id, _make_ship(my_team), fuel, pn)
+	sh.setup(self, id, _make_ship(my_team, kind), fuel, pn, kind)
 	piloting = sh
 	piloting_id = id
 	player.visible = false
@@ -3539,7 +3876,7 @@ func _update_ships(delta: float) -> void:
 			continue
 		seen[id] = true
 		if not ship_nodes.has(id):
-			var nn := _make_ship(int(e[1]))
+			var nn := _make_ship(int(e[1]), int(e[8]) if e.size() > 8 else 0)
 			local_root.add_child(nn)
 			nn.global_transform = Transform3D(Basis(Quaternion(e[3])), e[2])
 			ship_nodes[id] = nn
@@ -3572,7 +3909,7 @@ func _near_ship() -> int:
 
 ## Разведчик: корпус, обтекатель, иллюминатор, стабилизаторы, сопло, опоры, факел.
 ## Начало координат — низ опор, нос вдоль +Y.
-func _make_ship(team: int) -> Node3D:
+func _make_ship(team: int, kind := 0) -> Node3D:
 	var n := Node3D.new()
 	var col: Color = D.TEAM_COLORS[team]
 	var hull := _pmat(Color(0.86, 0.86, 0.88), 1)
@@ -3635,6 +3972,15 @@ func _make_ship(team: int) -> Node3D:
 	beam.visible = false
 	n.add_child(beam)
 	n.set_meta("beam", beam)
+	if kind == 1:
+		# транспорт: шире и выше, по бокам — грузовые отсеки
+		for sx in [-1.0, 1.0]:
+			_part(n, "box", Vector3(0.7, 2.0, 1.2), Vector3(sx * 1.1, 1.6, 0), _pmat(Color(0.7, 0.68, 0.6), 1))
+			_box(n, Vector3(0.05, 0.3, 0.8), Vector3(sx * 1.46, 1.6, 0), col, true)
+		for c in n.get_children():
+			if c != beam:
+				c.scale *= Vector3(1.4, 1.2, 1.4)
+				c.position *= Vector3(1.4, 1.2, 1.4)
 	return n
 
 
@@ -3898,7 +4244,15 @@ func _update_hud() -> void:
 		lines.append("")
 		lines.append("")
 		lines.append("")
-		lines.append("РАЗВЕДЧИК    Δv %d м/с    топливо %.1f / %d" % [int(sh.dv()), sh.fuel, D.SCOUT_TANK])
+		lines.append("%s    Δv %d м/с    топливо %.1f / %d" % [String(D.SHIP_KINDS[sh.kind].name).to_upper(),
+			int(sh.dv()), sh.fuel, int(D.SHIP_KINDS[sh.kind].tank)])
+		if sh.kind == 1:
+			var used := 0
+			for e in cur_ships:
+				if int(e[0]) == piloting_id and e.size() > 9:
+					used = int(e[9])
+			lines.append("Груз: %d / %d мест   (после посадки: L — забрать юнитов рядом, U — выгрузить)" % [
+				used, int(D.SHIP_KINDS[1].cargo)])
 		if sh.pn >= 0:
 			var soi_txt := "Сфера влияния: %s (граница %d м)" % [D.PLANETS[sh.pn].name, int(SkyCalc.soi(sh.pn))]
 			if float(pred.get("exit_t", -1.0)) >= 0.0:
@@ -3956,6 +4310,15 @@ func _update_hud() -> void:
 		lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
 
 	lines.append("В руках: " + ("Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])))
+	if unit_stat.size() > my_team:
+		var us: Array = unit_stat[my_team]
+		lines.append("Юниты: танки %d/%d   дроны %d/%d   мехи %d/%d" % [int(us[0]), int(us[3]), int(us[1]), int(us[4]),
+			int(us[2]), int(us[5])])
+	if not fps_mode:
+		if selected.is_empty():
+			lines.append("Ctrl + рамка — выделить юнитов")
+		else:
+			lines.append("Выбрано: %d   1 — агрессия   2 — охрана   3 — стоять   ПКМ — точка охраны" % selected.size())
 	if _near_ship() != -1:
 		lines.append("E — сесть в корабль")
 
@@ -3967,7 +4330,9 @@ func _update_hud() -> void:
 			if _hover_own(D.UNLOADER):
 				lines.append("E (держать) — выбрать груз")
 			if _hover_own(D.LAUNCH_PAD):
-				lines.append("E — собрать разведчика (%s)" % _cost_dict_text(D.SCOUT_COST))
+				lines.append("E (держать) — собрать корабль")
+			if _hover_own(D.ASSEMBLER):
+				lines.append("E (держать) — выбрать юнита")
 		else:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
@@ -4032,6 +4397,10 @@ func _build_help() -> Control:
 Орбитальная камера          Tab  (WASD — крутить планету, колесо — зум)
 Отпустить курсор            Esc
 
+ЮНИТЫ (вид сверху — Tab)
+Ctrl + рамка или щелчок — выделить, 1 агрессия, 2 охрана, 3 стоять, ПКМ — точка охраны
+сборщик: держать E — выбрать юнита; транспорт: L — забрать, U — выгрузить
+
 ЗАХВАТ БАЗ
 нейтральную — стоять у ядра 15 с, пока рядом нет врагов
 вражескую — разрушить ядро, оно станет нейтральным, потом захватить
@@ -4055,6 +4424,17 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kp and kp.pressed and not kp.echo:
 			if kp.keycode == KEY_G:
 				_exit_ship()
+			elif (kp.keycode == KEY_L or kp.keycode == KEY_U) and piloting.kind == 1 and piloting.landed:
+				var do_load := kp.keycode == KEY_L
+				if is_server:
+					if do_load:
+						server_ship_load(1, piloting_id)
+					else:
+						server_ship_unload(1, piloting_id)
+				elif do_load:
+					req_ship_load.rpc_id(1, piloting_id)
+				else:
+					req_ship_unload.rpc_id(1, piloting_id)
 			elif kp.keycode >= KEY_1 and kp.keycode <= KEY_7:
 				piloting.sas_mode = kp.keycode - KEY_1   # 1 — выкл, 2..7 — режимы автопилота
 			elif kp.keycode == KEY_BACKSPACE:
@@ -4110,28 +4490,45 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				req_board.rpc_id(1, sid)
 			return
-		if _hover_own(D.LAUNCH_PAD):
-			if is_server:
-				server_pad_action(my_team, hover_cell, my_pn)
-			else:
-				req_pad_action.rpc_id(1, hover_cell)
-			return
-	# --- выбор груза точки выгрузки: навёлся на свою точку и держишь E ---
+	# --- держать E на своей постройке: точка выгрузки — груз, сборщик — юнит, площадка — корабль ---
 	if kz and kz.keycode == KEY_E and not kz.echo:
-		if kz.pressed and not item_radial.is_open and not radial.is_open and _hover_own(D.UNLOADER):
-			filter_cell = hover_cell
-			var cur: Dictionary = buildings[grid[_k(my_pn, hover_cell)]]
-			item_radial.open(cur.filter)
-			drag_mode = 0
-			if player:
-				player.look_locked = true
-		elif not kz.pressed and item_radial.is_open:
-			var res = item_radial.close()
+		if kz.pressed and e_menu == null and not radial.is_open:
+			var menu: RadialMenu = null
+			var cur := 0
+			if _hover_own(D.UNLOADER):
+				menu = item_radial
+				cur = buildings[grid[_k(my_pn, hover_cell)]].filter
+			elif _hover_own(D.ASSEMBLER):
+				menu = unit_radial
+				cur = buildings[grid[_k(my_pn, hover_cell)]].ukind
+			elif _hover_own(D.LAUNCH_PAD):
+				menu = ship_radial
+			if menu:
+				e_menu = menu
+				filter_cell = hover_cell
+				menu.open(cur)
+				drag_mode = 0
+				if player:
+					player.look_locked = true
+		elif not kz.pressed and e_menu != null:
+			var res = e_menu.close()
 			if res != null and filter_cell != NO_CELL:
-				if is_server:
-					server_set_filter(my_team, filter_cell, res, my_pn)
-				else:
-					req_set_filter.rpc_id(1, filter_cell, res)
+				if e_menu == item_radial:
+					if is_server:
+						server_set_filter(my_team, filter_cell, res, my_pn)
+					else:
+						req_set_filter.rpc_id(1, filter_cell, res)
+				elif e_menu == unit_radial:
+					if is_server:
+						server_set_unit(my_team, filter_cell, res, my_pn)
+					else:
+						req_set_unit.rpc_id(1, filter_cell, res)
+				elif e_menu == ship_radial:
+					if is_server:
+						server_pad_action(my_team, filter_cell, my_pn, res)
+					else:
+						req_pad_action.rpc_id(1, filter_cell, res)
+			e_menu = null
 			filter_cell = NO_CELL
 			if player:
 				player.look_locked = false
@@ -4139,8 +4536,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	var open_menu: RadialMenu = null
 	if radial.is_open:
 		open_menu = radial
-	elif item_radial.is_open:
-		open_menu = item_radial
+	elif e_menu != null:
+		open_menu = e_menu
 	if open_menu:
 		var mmo := event as InputEventMouseMotion
 		if mmo:
@@ -4169,21 +4566,47 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				orbit_dist = minf(800.0, orbit_dist + (orbit_dist - D.PLANET_R) * 0.12 + 1.0)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			# вид сверху: Ctrl + рамка — выделить юнитов
+			if not fps_mode and mb.pressed and Input.is_key_pressed(KEY_CTRL):
+				selecting = true
+				sel_start = mb.position
+				return
+			if selecting and not mb.pressed:
+				_finish_selection(mb.position)
+				return
 			drag_mode = 1 if mb.pressed else 0
 			drag_last = NO_CELL
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
+			# вид сверху с выделением: ПКМ — точка охраны
+			if not fps_mode and not selected.is_empty():
+				if mb.pressed:
+					var gp = _mouse_ground()
+					if gp != null:
+						_command(-1, gp, true)
+				return
 			drag_mode = 2 if mb.pressed else 0
 			drag_last = NO_CELL
 		return
+	if selecting and event is InputEventMouseMotion:
+		sel_box.queue_redraw()
 	var k := event as InputEventKey
 	if k and k.pressed and not k.echo:
 		match k.keycode:
 			KEY_1:
-				_select_category(0)
+				if not fps_mode and not selected.is_empty():
+					_command(D.MODE_AGGRO)
+				else:
+					_select_category(0)
 			KEY_2:
-				_select_category(1)
+				if not fps_mode and not selected.is_empty():
+					_command(D.MODE_GUARD)
+				else:
+					_select_category(1)
 			KEY_3:
-				_select_category(2)
+				if not fps_mode and not selected.is_empty():
+					_command(D.MODE_HOLD)
+				else:
+					_select_category(2)
 			KEY_4:
 				_select_category(3)
 			KEY_5:
@@ -4204,6 +4627,35 @@ func _unhandled_input(event: InputEvent) -> void:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			KEY_H:
 				help_panel.visible = not help_panel.visible
+
+
+func _unit_info(k: int) -> Array:
+	var st: Dictionary = D.UNIT_STATS[k]
+	var lim := ""
+	if unit_stat.size() > my_team and my_team >= 0:
+		lim = "   |   Сейчас: %d / %d" % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + 3])]
+	var desc := ""
+	if k == D.U_DRONE:
+		desc = "очень быстрый, таранит цель: −50% её прочности, сам погибает"
+	else:
+		var dps := int(float(st.dmg) * 10.0 / maxf(float(st.cd), 1.0))
+		desc = "%d прочности, бьёт на %d клеток, %d урона/с" % [int(st.hp), int(float(st.range) / D.CELL_M), dps]
+	return [D.UNIT_NAMES[k], desc, "Цена: " + _cost_dict_text(D.UNIT_RECIPES[k]),
+		"Лимит: %d на каждое ядро%s" % [int(D.UNIT_LIMIT[k]), lim]]
+
+
+func _ship_info(k: int) -> Array:
+	var sk: Dictionary = D.SHIP_KINDS[k]
+	var dv := _ship_dv(float(sk.tank), k)
+	var extra := "мест для юнитов: %d (танк и дрон — 1, мех — 4)" % int(sk.cargo) if int(sk.cargo) > 0 else "1 игрок"
+	return [sk.name, "Δv полного бака %d м/с, %s" % [int(dv), extra], "Цена: " + _cost_dict_text(D.SHIP_COSTS[k])]
+
+
+func _draw_sel_box() -> void:
+	if selecting:
+		var r := Rect2(sel_start, sel_box.get_local_mouse_position() - sel_start).abs()
+		sel_box.draw_rect(r, Color(0.4, 1.0, 0.5, 0.15), true)
+		sel_box.draw_rect(r, Color(0.4, 1.0, 0.5, 0.9), false, 2.0)
 
 
 ## Строки для кругового меню: название, описание, цена, размер, энергия.
