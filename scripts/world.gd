@@ -40,7 +40,7 @@ const IND_H := {
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
-	D.LAUNCH_PAD: 0.4,
+	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25,
 }
 
 var my_team := 0
@@ -900,6 +900,16 @@ func _status(b: Dictionary) -> Array:
 		var st_txt := "в полёте" if sh.state == 1 else "на площадке"
 		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
 			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
+	if t == D.AA_GUN:
+		var ammo := int(b.get("ammo", 0))
+		for it in b.buf:
+			ammo += int(b.buf[it]) * D.AA_SHOTS_PER_ITEM
+		var boost := "  вода %d — стрельба ×2" % b.water if b.water > 0 else "  (подай воду — стрельба ×2)"
+		if creative or b.team == D.T_NEUTRAL:
+			return [ST_OK, "ПВО, боеприпасы бесконечны"]
+		if ammo <= 0:
+			return [ST_STOP, "нет снарядов: подай любой ресурс"]
+		return [ST_OK, "ПВО: снарядов %d%s" % [ammo, boost]]
 	if t == D.TURRET2:
 		var cu := int(b.buf.get(D.I_COPPER, 0))
 		if not creative and b.team != D.T_NEUTRAL and cu <= 0 and int(b.get("ammo", 0)) <= 0:
@@ -1201,6 +1211,8 @@ func _sim_tick() -> void:
 			_turret2_tick(b)
 		elif t == D.TURRET3:
 			_turret3_tick(b)
+		elif t == D.AA_GUN:
+			_aa_tick(b)
 		elif t == D.UNLOADER:
 			_unloader_tick(b)
 		elif t == D.LAUNCH_PAD:
@@ -1270,7 +1282,8 @@ func _pad_tick(b: Dictionary) -> void:
 			var kind: int = b.get("ship_kind", 0)
 			ships[id] = {"id": id, "team": b.team, "pad": b.id, "pos": spot, "pn": b.pn, "kind": kind,
 				"quat": Quaternion(_up_basis(spot.normalized())), "state": 0, "pilot": -1, "cargo": [],
-				"fuel": float(D.SHIP_KINDS[kind].tank) if creative else 0.0, "thrust": false}
+				"fuel": float(D.SHIP_KINDS[kind].tank) if creative else 0.0, "thrust": false,
+				"hp": int(D.SHIP_HP[kind])}
 		return
 	# заправка стоящего на площадке корабля: 1 единица за 0.3 с
 	var sh = _pad_ship(b)
@@ -1365,6 +1378,11 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 	if not ships.has(id) or ships[id].pilot != peer:
 		return
 	var sh: Dictionary = ships[id]
+	var now := Time.get_ticks_msec() / 1000.0
+	var dt_rep := now - float(sh.get("rep_t", now))
+	if dt_rep > 0.01 and int(sh.pn) == pn:
+		sh["vel"] = (pos - Vector3(sh.pos)) / dt_rep
+	sh["rep_t"] = now
 	sh.pn = clampi(pn, -1, D.PLANETS.size() - 1)
 	sh.pos = pos
 	sh.quat = quat
@@ -1639,6 +1657,13 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return need.has(item) and int(buf.get(item, 0)) < int(need[item]) * 2
 	if t == D.LAUNCH_PAD:
 		return item == D.I_FUEL and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
+	if t == D.AA_GUN:
+		if item == D.I_WATER:
+			return o.water < D.AA_WATER_CAP
+		var total := 0
+		for it in buf:
+			total += int(buf[it])
+		return total < D.AA_AMMO_CAP
 	if t == D.TURRET2:
 		return item == D.I_COPPER and int(buf.get(item, 0)) < D.T2_AMMO_CAP
 	if t == D.TURRET3:
@@ -1684,9 +1709,8 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 		return true
 	if not _accepts(o, item):
 		return false
-	if t == D.DRILL3:
+	if t == D.DRILL3 or (t == D.AA_GUN and item == D.I_WATER):
 		o.water += 1
-
 	else:
 		var buf: Dictionary = o.buf
 		buf[item] = int(buf.get(item, 0)) + 1
@@ -1805,6 +1829,142 @@ func _turret3_tick(b: Dictionary) -> void:
 	b.timer = D.T3_CD
 
 
+## Ближайшая вражеская летающая цель: дрон или корабль в полёте. {pos, vel} или пустой словарь.
+func _find_air_target(team: int, from: Vector3, rng: float, pn: int) -> Dictionary:
+	var best := {}
+	var bd := rng
+	for u in units:
+		if u.team == team or u.hp <= 0 or u.pn != pn or u.kind != D.U_DRONE:
+			continue
+		var p := _upos(u)
+		p += p.normalized() * D.DRONE_ALT
+		var d := from.distance_to(p)
+		if d < bd:
+			bd = d
+			best = {"pos": p, "vel": u.get("vel", Vector3.ZERO)}
+	for sh in ships.values():
+		if sh.team == team or int(sh.pn) != pn or int(sh.state) != 1:
+			continue
+		var d := from.distance_to(sh.pos)
+		if d < bd:
+			bd = d
+			best = {"pos": Vector3(sh.pos), "vel": sh.get("vel", Vector3.ZERO)}
+	return best
+
+
+## ПВО: стреляет с упреждением зенитными снарядами. Снаряды — любой ресурс, уран облучает.
+## Вода ускоряет стрельбу вдвое.
+func _aa_tick(b: Dictionary) -> void:
+	if b.timer > 0:
+		b.timer -= 1
+		return
+	var from := _muzzle(b, 1.6)
+	var tgt := _find_air_target(b.team, from, D.AA_RANGE, b.pn)
+	if tgt.is_empty():
+		return
+	var free_ammo := creative or b.team == D.T_NEUTRAL
+	if not free_ammo and int(b.get("ammo", 0)) <= 0:
+		# заряжаем: уран в приоритете, иначе что есть
+		var it := D.I_NONE
+		if int(b.buf.get(D.I_URANIUM, 0)) > 0:
+			it = D.I_URANIUM
+		else:
+			for k in b.buf:
+				if int(b.buf[k]) > 0:
+					it = k
+					break
+		if it == D.I_NONE:
+			return
+		_buf_take(b, it, 1)
+		b["ammo"] = D.AA_SHOTS_PER_ITEM
+		b["ammo_u"] = it == D.I_URANIUM
+	var uranium := bool(b.get("ammo_u", false)) if not free_ammo else int(b.buf.get(D.I_URANIUM, 0)) > 0
+	# упреждение: где будет цель, пока летит снаряд (два уточнения)
+	var p: Vector3 = tgt.pos
+	var v: Vector3 = tgt.vel
+	var aim_at := p
+	for i in 2:
+		aim_at = p + v * (from.distance_to(aim_at) / D.AA_SPEED)
+	var vel := _aim(from, aim_at, D.AA_SPEED, 2.0)
+	if vel == Vector3.ZERO:
+		return
+	b["aim"] = vel.normalized()
+	_spawn_proj(from, vel, b.team, 4 if uranium else 3, D.AA_DMG, 2.0, b.cell, b.pn)
+	if not free_ammo:
+		b["ammo"] = int(b.ammo) - 1
+	var cd: int = D.AA_CD
+	if b.water > 0:
+		cd = D.AA_CD_WATER
+		b.wuse += 1
+		if b.wuse >= D.AA_WATER_PER:
+			b.wuse = 0
+			b.water -= 1
+	b.timer = cd
+
+
+## Зенитный снаряд рядом с вражеской летающей целью?
+func _flak_near(pr: Dictionary, at: Vector3) -> bool:
+	for u in units:
+		if u.team == pr.team or u.hp <= 0 or u.pn != pr.pn or u.kind != D.U_DRONE:
+			continue
+		var p := _upos(u)
+		if at.distance_to(p + p.normalized() * D.DRONE_ALT) < D.AA_FUSE:
+			return true
+	for sh in ships.values():
+		if sh.team != pr.team and int(sh.pn) == pr.pn and int(sh.state) == 1 \
+				and at.distance_to(sh.pos) < D.AA_FUSE + 1.5:
+			return true
+	return false
+
+
+## Разрыв зенитного снаряда: осколки бьют только летающих (дроны, корабли).
+func _explode_flak(at: Vector3, team: int, uranium: bool, pn: int) -> void:
+	var r: float = D.AA_SPLASH
+	for u in units:
+		if u.team == team or u.hp <= 0 or u.pn != pn or u.kind != D.U_DRONE:
+			continue
+		var p := _upos(u)
+		var d := at.distance_to(p + p.normalized() * D.DRONE_ALT)
+		if d < r:
+			u.hp -= int(D.AA_DMG * lerpf(1.0, 0.3, d / r))
+			if uranium:
+				u.poison = D.POISON_TICKS
+	for sh in ships.values():
+		if sh.team == team or int(sh.pn) != pn or int(sh.state) != 1:
+			continue
+		var d := at.distance_to(sh.pos)
+		if d < r + 1.5:
+			_damage_ship(sh, int(D.AA_DMG * lerpf(1.0, 0.3, clampf(d / r, 0.0, 1.0))) + (5 if uranium else 0))
+	for p in Net.ready_peers:
+		fx_boom.rpc_id(p, at, r, uranium, pn)
+	if not headless and pn == my_pn:
+		_boom(at, r, uranium)
+
+
+## Урон кораблю. Сбит — для пилота это крушение.
+func _damage_ship(sh: Dictionary, dmg: int) -> void:
+	if bool(sh.get("down", false)):
+		return
+	sh.hp = int(sh.get("hp", 1)) - dmg
+	if sh.hp > 0:
+		return
+	sh["down"] = true
+	var pilot: int = sh.pilot
+	if pilot == 1 and not headless:
+		if piloting_id == int(sh.id):
+			on_ship_crash(piloting)
+	elif pilot != -1 and Net.ready_peers.has(pilot):
+		ev_ship_down.rpc_id(pilot, int(sh.id))
+	else:
+		ships.erase(sh.id)
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_ship_down(id: int) -> void:
+	if piloting_id == id and piloting:
+		on_ship_crash(piloting)
+
+
 ## Подбор угла возвышения: снаряд летит с гравитацией к центру планеты, планета круглая,
 ## поэтому прогоняем траекторию численно и ищем угол с наименьшим промахом.
 ## Возвращает вектор начальной скорости или Vector3.ZERO, если не достать.
@@ -1914,14 +2074,22 @@ func _proj_tick() -> void:
 			if pr.kind == 0 and _bullet_hit(pr, a, b):
 				alive = false
 				break
+			if pr.kind >= 3 and _flak_near(pr, b):
+				_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
+				alive = false
+				break
 			pr.cell = planet.walk(pr.cell, b.normalized())
 			if b.length() < planet.top_r(pr.cell):
-				if pr.kind != 0:
+				if pr.kind >= 3:
+					_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
+				elif pr.kind != 0:
 					_explode(b, pr.team, pr.kind == 2, pr.pn)
 				alive = false
 				break
 		if alive and pr.ttl <= 0.0:
-			if pr.kind != 0:
+			if pr.kind >= 3:
+				_explode_flak(pr.pos, pr.team, pr.kind == 4, pr.pn)
+			elif pr.kind != 0:
 				_explode(pr.pos, pr.team, pr.kind == 2, pr.pn)
 			alive = false
 		pr["dead"] = not alive
@@ -2081,6 +2249,8 @@ func _units_tick() -> void:
 		var st: Dictionary = D.UNIT_STATS[u.kind]
 		var mode: int = u.mode
 		var upos := _upos(u)
+		u["vel"] = (upos - u.get("last", upos)) / D.TICK   # для упреждения ПВО
+		u["last"] = upos
 		var guard: Vector3 = u.guard
 		# радиус, в котором юнит ищет врагов
 		var look: float = st.aggro
@@ -2357,7 +2527,8 @@ func _send_snapshot() -> void:
 	# корабли — все (с номером луны; -1 — в открытом космосе), клиент рисует только свои
 	var sv: Array = []
 	for sh in ships.values():
-		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn, sh.kind, _cargo_used(sh)])
+		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn, sh.kind, _cargo_used(sh),
+			float(sh.get("hp", 1)) / float(D.SHIP_HP[int(sh.kind)])])
 	# сколько юнитов каждого типа у команд и какой лимит: [[кол-во×3, лимит×3], ...]
 	var ustat: Array = []
 	for t in 2:
@@ -3089,6 +3260,15 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.9, 0.5, 0.22))   # короб с медными патронами
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
+	elif t == D.AA_GUN:
+		_box(n, Vector3(1.0, 0.45, 1.0), Vector3(0, 0.22, 0), col.darkened(0.35))
+		var pitch := _turret_head(n, Vector3(0, 0.62, 0), Vector3(0, 0.15, 0))
+		var head: Node3D = n.get_meta("head")
+		_cyl(head, 0.35, 0.3, Vector3.ZERO, Color(0.5, 0.52, 0.56))
+		for sz in [-0.14, 0.14]:
+			_box(pitch, Vector3(1.15, 0.07, 0.07), Vector3(0.55, 0, sz), Color(0.25, 0.25, 0.28))
+		_box(pitch, Vector3(0.3, 0.22, 0.42), Vector3(-0.05, 0, 0), Color(0.3, 0.5, 0.85))   # кожух водяного охлаждения
+		pitch.rotation_degrees = Vector3(0, 0, 35)
 	elif t == D.TURRET3:
 		_cyl(n, 0.65, 0.5, Vector3(0, 0.25, 0), col.darkened(0.35))
 		var pitch := _turret_head(n, Vector3(0, 0.75, 0), Vector3(0.15, 0.35, 0))
@@ -4039,6 +4219,10 @@ func _update_proj(delta: float) -> void:
 		var sc := 1.0 if k == 0 else 2.0
 		mm_proj.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * sc), p))
 		var col := Color(1.0, 0.9, 0.4)
+		if k == 3:
+			col = Color(0.85, 0.85, 0.9)
+		elif k == 4:
+			col = Color(0.5, 1.0, 0.35)
 		if k == 1:
 			col = Color(1.0, 0.55, 0.2)
 		elif k == 2:
@@ -4350,6 +4534,9 @@ func _update_hud() -> void:
 		lines.append("")
 		lines.append("%s    Δv %d м/с    топливо %.1f / %d" % [String(D.SHIP_KINDS[sh.kind].name).to_upper(),
 			int(sh.dv()), sh.fuel, int(D.SHIP_KINDS[sh.kind].tank)])
+		for e in cur_ships:
+			if int(e[0]) == piloting_id and e.size() > 10 and float(e[10]) < 0.999:
+				lines.append("КОРПУС ПОВРЕЖДЁН: %d%%" % int(float(e[10]) * 100.0))
 		if sh.kind == 1:
 			var used := 0
 			for e in cur_ships:

@@ -85,6 +85,7 @@ const CHIP_FACTORY := 18  # завод микросхем
 const TURRET2 := 19       # пулемётная турель (медь)
 const TURRET3 := 20       # артиллерия (свинец или уран, взрыв)
 const LAUNCH_PAD := 21    # стартовая площадка: собирает корабли и заправляет их
+const AA_GUN := 22        # ПВО: бьёт летающие цели (дроны, корабли)
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -94,7 +95,7 @@ const NAMES := {
 	SMELTER: "Плавильня", CRUSHER: "Дробилка", MELTER: "Растопитель",
 	CENTRIFUGE: "Центрифуга", FUEL_SYNTH: "Синтезатор топлива",
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
-	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка",
+	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
@@ -113,6 +114,7 @@ const DESC := {
 	FUEL_SYNTH: "2 гелиевого реголита + 2 воды -> топливо. 150 энергии",
 	TURRET: "лазер на 6 клеток, без энергии и боеприпасов",
 	LAUNCH_PAD: "собирает корабли (E) и заправляет их топливом He-3 с конвейера",
+	AA_GUN: "бьёт летающие цели на 90 м. Снаряды — любой ресурс (уран облучает), вода по трубе — стрельба вдвое чаще",
 	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "железо -> боевой юнит",
@@ -138,6 +140,7 @@ const COST := {
 	TURRET: {I_COPPER: 25, I_IRON: 15},
 	TURRET2: {I_IRON: 40, I_COPPER: 20, I_CHIP: 5},
 	LAUNCH_PAD: {I_IRON: 150, I_SILICON: 40, I_CHIP: 30, I_LEAD: 20},
+	AA_GUN: {I_IRON: 50, I_COPPER: 30, I_CHIP: 10},
 	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
@@ -148,12 +151,12 @@ const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500,
+	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
-	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9,
+	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9, AA_GUN: 3,
 }
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
 const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
@@ -165,7 +168,7 @@ const CATEGORIES := [
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER]],
-	["Оборона", [TURRET, TURRET2, TURRET3, ASSEMBLER]],
+	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, ASSEMBLER]],
 	["Космос", [LAUNCH_PAD]],
 ]
 
@@ -237,7 +240,7 @@ const BASE_RADIUS := 30.0           # постройки в этом радиу�
 const NEUTRALIZED_HP := 0.3         # с какой долей прочности ядро становится нейтральным
 const NEUTRAL_LASERS := 4           # оборона нейтральной базы: лазерные турели вокруг ядра
 const NEUTRAL_GUNS := 2             # и пулемётные на подступах (боеприпасы им не нужны)
-const DEFENSE_TYPES := [TURRET, TURRET2, TURRET3]   # что считается обороной (исчезает при захвате)
+const DEFENSE_TYPES := [TURRET, TURRET2, TURRET3, AA_GUN]   # что считается обороной (исчезает при захвате)
 const ENEMY_ZONE := 40.0       # нельзя строить ближе этого (по поверхности, м) к чужому ядру
 
 # ---------------------------------------------------------------------
@@ -289,6 +292,21 @@ const T3_DMG := 60             # в центре взрыва, к краю — 2
 const T3_CD := 40
 const T3_SPEED := 33.5         # м/с: на этой планете даёт ~104 м — с запасом на 50 клеток
 const T3_AMMO_CAP := 10
+
+# ПВО: зенитные снаряды рвутся рядом с летающей целью
+const AA_RANGE := 90.0
+const AA_CD := 6               # тиков между выстрелами
+const AA_CD_WATER := 3         # с водой — вдвое чаще
+const AA_WATER_PER := 4        # 1 вода на 4 выстрела
+const AA_SPEED := 60.0         # м/с
+const AA_DMG := 18             # в центре взрыва, к краю — 30%
+const AA_FUSE := 2.5           # взрыватель: рвётся ближе этого к цели
+const AA_SPLASH := 4.0         # радиус осколков
+const AA_SHOTS_PER_ITEM := 2   # 1 любой ресурс = 2 снаряда
+const AA_AMMO_CAP := 20
+const AA_WATER_CAP := 10
+const DRONE_ALT := 2.5         # на какой высоте летают дроны
+const SHIP_HP := [300, 800]    # прочность разведчика и транспорта
 
 const POISON_TICKS := 20       # облучение ураном: 2 с
 const POISON_DMG := 1          # урона за тик
