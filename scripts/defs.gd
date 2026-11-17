@@ -93,6 +93,7 @@ const POWER_POLE := 26    # энергостолб: расширяет зону 
 const REPAIR := 27        # ремонтная башня: чинит постройки рядом
 const UNIT_REPAIR := 28   # ремонтная станция: чинит юнитов рядом
 const WALL := 29          # забор: высокий, юниты упираются
+const LAMP := 30          # лампа: светит вокруг, выключается (маскировка)
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -104,7 +105,7 @@ const NAMES := {
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
 	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	SPLITTER: "Разветвитель", JUNCTION: "Перекрёсток", BRIDGE: "Мост", POWER_POLE: "Энергостолб",
-	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор",
+	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
@@ -130,6 +131,7 @@ const DESC := {
 	REPAIR: "чинит свои постройки в 10 м. 40 энергии",
 	UNIT_REPAIR: "чинит своих юнитов в 10 м. 60 энергии",
 	WALL: "высокий забор: не перепрыгнуть, наземные юниты упираются и ломают его",
+	LAMP: "светит на 16 м. E — вкл/выкл, Shift+E — все свои лампы на луне (маскировка)",
 	AA_GUN: "бьёт летающие цели на 90 м. Снаряды — любой ресурс (уран облучает), вода по трубе — стрельба вдвое чаще",
 	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
@@ -161,6 +163,7 @@ const COST := {
 	POWER_POLE: {I_COPPER: 4, I_IRON: 2},
 	REPAIR: {I_IRON: 30, I_SILICON: 10, I_CHIP: 5}, UNIT_REPAIR: {I_IRON: 40, I_CHIP: 8},
 	WALL: {I_IRON: 3},
+	LAMP: {I_COPPER: 3, I_SILICON: 1},
 	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
@@ -172,7 +175,7 @@ const HP := {
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
 	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
-	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800,
+	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
@@ -186,7 +189,7 @@ const POWER_RING := 4          # генератор питает клетки в
 const CATEGORIES := [
 	["Транспорт", [CONVEYOR, PIPE, SPLITTER, JUNCTION, BRIDGE]],
 	["Добыча", [DRILL, DRILL2, DRILL3]],
-	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, POWER_POLE]],
+	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, POWER_POLE, LAMP]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER]],
 	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
@@ -205,6 +208,9 @@ const DRILL3_WATER_PER := 4            # бур III тратит 1 воду на
 const POWER_USE := {DRILL2: 50.0, DRILL3: 150.0, SMELTER: 60.0, CRUSHER: 40.0,
 	MELTER: 30.0, CENTRIFUGE: 200.0, FUEL_SYNTH: 150.0, CHIP_FACTORY: 80.0, REPAIR: 40.0, UNIT_REPAIR: 60.0}
 const POLE_RING := 5               # энергостолб связывает всё в 5 кольцах вокруг себя
+const LAMP_RADIUS := 16.0          # радиус света лампы, м
+const GLOW_RADIUS := 4.0           # слабое свечение вокруг постройки, м
+const MAX_LIGHTS := 128            # сколько источников света передаём в шейдер
 const BRIDGE_RANGE := 4            # мост достаёт до следующего моста в 4 клетках
 const REPAIR_RADIUS := 10.0
 const REPAIR_RATE := 3             # прочности за тик каждой постройке рядом

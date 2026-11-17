@@ -68,3 +68,11 @@ land_dir={
 "type": "vec3",
 "value": Vector3(0, -1, 0)
 }
+lamp_tex={
+"type": "sampler2D",
+"value": ""
+}
+lamp_count={
+"type": "int",
+"value": 0
+}

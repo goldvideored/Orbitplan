@@ -125,6 +125,9 @@ var sel_box: Control
 var sel_start := Vector2.ZERO
 var selecting := false
 var unit_face := {}            # id юнита -> куда смотрит (по ходу движения)
+var lamp_img: Image            # источники света для шейдера (лампы и свечение построек)
+var lamp_tex_res: ImageTexture
+var lamp_acc := 0.0
 var filter_cell := NO_CELL
 var cur_rovers: Array = []
 var rover_nodes := {}          # id ровера -> Node3D
@@ -433,7 +436,7 @@ func _add_building(d: Dictionary) -> void:
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
-		"ukind": int(d.get("ukind", D.U_TANK)),
+		"ukind": int(d.get("ukind", D.U_TANK)), "lit": bool(d.get("lit", true)),
 	}
 	var cells := _footprint(b.type, b.cell, b.dir)
 	b["cells"] = cells
@@ -479,7 +482,7 @@ func _remove_building(id: int) -> void:
 
 func _bdata(b: Dictionary) -> Dictionary:
 	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
-		"pn": b.pn, "main": b.main, "ukind": b.ukind}
+		"pn": b.pn, "main": b.main, "ukind": b.ukind, "lit": b.lit}
 
 
 # =====================================================================
@@ -758,6 +761,48 @@ func server_command(team: int, pn: int, ids: PackedInt32Array, mode: int, point:
 
 
 @rpc("any_peer", "call_remote", "reliable")
+func req_lamp(cell: int, all_on_planet: bool) -> void:
+	if multiplayer.is_server():
+		var peer := multiplayer.get_remote_sender_id()
+		server_lamp(Net.team_of(peer), cell, _peer_pn(peer), all_on_planet)
+
+
+## Включить/выключить лампу (или все свои лампы на луне — режим маскировки).
+func server_lamp(team: int, cell: int, pn: int, all_on_planet: bool) -> void:
+	if not grid.has(_k(pn, cell)):
+		return
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
+	if b.type != D.LAMP or b.team != team:
+		return
+	var lit: bool = not b.lit
+	var ids := PackedInt32Array()
+	for o in buildings.values():
+		if o.type == D.LAMP and o.team == team and o.pn == pn and (all_on_planet or o.id == b.id):
+			o.lit = lit
+			ids.append(o.id)
+	for p in Net.ready_peers:
+		ev_lamp.rpc_id(p, ids, lit)
+	if not headless:
+		_apply_lamp(ids, lit)
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_lamp(ids: PackedInt32Array, lit: bool) -> void:
+	_apply_lamp(ids, lit)
+
+
+func _apply_lamp(ids: PackedInt32Array, lit: bool) -> void:
+	for id in ids:
+		if buildings.has(id):
+			buildings[id].lit = lit
+			var root = bnodes.get(id)
+			if root != null and root.has_meta("bulb"):
+				var bulb: MeshInstance3D = root.get_meta("bulb")
+				bulb.material_override = _mat(Color(1.0, 0.85, 0.55), true) if lit else _pmat(Color(0.25, 0.24, 0.22), 0)
+	lamp_acc = 1.0   # пересобрать свет сразу
+
+
+@rpc("any_peer", "call_remote", "reliable")
 func req_set_unit(cell: int, kind: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
@@ -938,6 +983,8 @@ func _status(b: Dictionary) -> Array:
 		return [ST_IDLE, "нет генератора в сети — поставь столбы цепочкой до генератора"]
 	if t == D.WALL:
 		return [ST_OK, "забор"]
+	if t == D.LAMP:
+		return [ST_OK, "горит"] if b.lit else [ST_IDLE, "выключена (маскировка)"]
 	if t == D.REPAIR or t == D.UNIT_REPAIR:
 		return _power_state(b, "чинит %s в %d м" % ["постройки" if t == D.REPAIR else "юнитов", int(D.REPAIR_RADIUS)])
 	if t == D.AA_GUN:
@@ -3408,6 +3455,11 @@ func _vis_add(b: Dictionary) -> void:
 		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, 1.3, 0), col, true)
 	else:
 		_vis_shape(n, t, col)
+	if n.has_meta("bulb"):
+		root.set_meta("bulb", n.get_meta("bulb"))
+		if not bool(b.get("lit", true)):
+			var bl: MeshInstance3D = n.get_meta("bulb")
+			bl.material_override = _pmat(Color(0.25, 0.24, 0.22), 0)
 	if IND_H.has(t):
 		var ind := MeshInstance3D.new()
 		var im := SphereMesh.new()
@@ -3597,6 +3649,11 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(n, Vector3(0.15, 1.2, 0.15), Vector3(0.6, 0.6, 0), Color(0.6, 0.62, 0.66))
 		_box(n, Vector3(0.6, 0.12, 0.12), Vector3(0.35, 1.2, 0), Color(0.6, 0.62, 0.66))
 		_box(n, Vector3(0.2, 0.2, 0.2), Vector3(0.05, 1.1, 0), Color(0.3, 1.0, 0.4), true)
+	elif t == D.LAMP:
+		_cyl(n, 0.07, 2.0, Vector3(0, 1.0, 0), Color(0.35, 0.35, 0.38))
+		_cyl(n, 0.28, 0.08, Vector3(0, 2.05, 0), Color(0.3, 0.3, 0.32))
+		var bulb := _box(n, Vector3(0.26, 0.2, 0.26), Vector3(0, 1.92, 0), Color(1.0, 0.85, 0.55), true)
+		n.set_meta("bulb", bulb)
 	elif t == D.WALL:
 		_cyl(n, 0.85, 2.4, Vector3(0, 1.2, 0), Color(0.45, 0.45, 0.48), 6)
 		_cyl(n, 0.9, 0.12, Vector3(0, 2.46, 0), col.darkened(0.3), 6)
@@ -3730,6 +3787,10 @@ func _update_client(delta: float) -> void:
 	_update_flashlight()
 	_update_viewmodel(delta)
 	_update_self_avatar()
+	lamp_acc += delta
+	if lamp_acc >= 0.25:
+		lamp_acc = 0.0
+		_update_lights()
 	_update_units()
 	_update_items()
 	_update_players(delta)
@@ -4411,6 +4472,7 @@ func _switch_planet(pn: int) -> void:
 	cur_rovers = []
 	proj_pos = PackedVector3Array()
 	ghost_key = ""
+	lamp_acc = 1.0
 	hover_seed = NO_CELL
 	inspect_cell = NO_CELL
 	inspect_text = ""
@@ -4732,6 +4794,48 @@ func _cam_dist(p: Vector3) -> float:
 	return c.global_position.distance_to(p) if c else 0.0
 
 
+## Источники света для шейдера: включённые лампы на моей луне и слабое свечение построек
+## поближе к камере (всего не больше MAX_LIGHTS).
+func _update_lights() -> void:
+	if lamp_img == null:
+		lamp_img = Image.create(D.MAX_LIGHTS, 1, false, Image.FORMAT_RGBAF)
+		lamp_tex_res = ImageTexture.create_from_image(lamp_img)
+		RenderingServer.global_shader_parameter_set("lamp_tex", lamp_tex_res)
+	var lamps: Array = []
+	var glows: Array = []
+	var cam_p := Vector3.ZERO
+	var cam_now := get_viewport().get_camera_3d()
+	if cam_now:
+		cam_p = cam_now.global_position
+	for b in buildings.values():
+		if b.pn != my_pn:
+			continue
+		var t: int = b.type
+		if t == D.LAMP:
+			if b.lit:
+				var up: Vector3 = planet.dirs[b.cell]
+				lamps.append(planet.top_pos(b.cell) + up * 2.2)
+		elif t != D.CONVEYOR and t != D.PIPE and t != D.WALL and t != D.POWER_POLE:
+			var c := _foot_center(b.cells)
+			glows.append([c.distance_squared_to(cam_p), c + c.normalized() * 1.0, b.cells.size()])
+	glows.sort_custom(func(x, y): return x[0] < y[0])
+	var n := 0
+	for p in lamps:
+		if n >= D.MAX_LIGHTS:
+			break
+		lamp_img.set_pixel(n, 0, Color(p.x, p.y, p.z, D.LAMP_RADIUS))
+		n += 1
+	for g in glows:
+		if n >= D.MAX_LIGHTS:
+			break
+		var pp: Vector3 = g[1]
+		var rad: float = D.GLOW_RADIUS * (1.0 if int(g[2]) == 1 else 1.6)
+		lamp_img.set_pixel(n, 0, Color(pp.x, pp.y, pp.z, -rad))
+		n += 1
+	lamp_tex_res.update(lamp_img)
+	RenderingServer.global_shader_parameter_set("lamp_count", n)
+
+
 ## Свой космонавт виден только со стороны (вид сверху), от первого лица — нет.
 func _update_self_avatar() -> void:
 	if self_avatar == null:
@@ -4989,6 +5093,8 @@ func _update_hud() -> void:
 				lines.append("E (держать) — собрать корабль")
 			if _hover_own(D.ASSEMBLER):
 				lines.append("E (держать) — выбрать юнита")
+			if _hover_own(D.LAMP):
+				lines.append("E — вкл/выкл лампу, Shift+E — все свои лампы на луне")
 		else:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
@@ -5159,6 +5265,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				req_board.rpc_id(1, sid)
 			return
+	# --- E на своей лампе: вкл/выкл; Shift+E — все свои лампы на луне (маскировка) ---
+	if kz and kz.keycode == KEY_E and kz.pressed and not kz.echo and e_menu == null and _hover_own(D.LAMP):
+		var all_l := Input.is_key_pressed(KEY_SHIFT)
+		if is_server:
+			server_lamp(my_team, hover_cell, my_pn, all_l)
+		else:
+			req_lamp.rpc_id(1, hover_cell, all_l)
+		return
 	# --- держать E на своей постройке: точка выгрузки — груз, сборщик — юнит, площадка — корабль ---
 	if kz and kz.keycode == KEY_E and not kz.echo:
 		if kz.pressed and e_menu == null and not radial.is_open:
