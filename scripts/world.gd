@@ -486,6 +486,16 @@ func _bdata(b: Dictionary) -> Dictionary:
 # Сервер: команды игроков
 # =====================================================================
 
+## Дотягивается ли игрок до клетки (строить и сносить можно только рядом с собой, не с карты).
+func _in_reach(peer: int, cell: int, pn: int) -> bool:
+	if not players.has(peer):
+		return false
+	var pl: Dictionary = players[peer]
+	if int(pl.get("pn", -1)) != pn or pl.hp <= 0:
+		return false
+	return Vector3(pl.pos).distance_to(planet.top_pos(cell)) <= D.BUILD_REACH + 4.0
+
+
 func server_place(team: int, type: int, cell: int, dir: int, pn: int) -> void:
 	if not D.COST.has(type) or type == D.CORE:
 		return
@@ -633,14 +643,16 @@ func _damage_player(pid: int, dmg: int) -> void:
 func req_place(type: int, cell: int, dir: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
-		server_place(Net.team_of(peer), type, cell, dir, _peer_pn(peer))
+		if _in_reach(peer, cell, _peer_pn(peer)):
+			server_place(Net.team_of(peer), type, cell, dir, _peer_pn(peer))
 
 
 @rpc("any_peer", "call_remote", "reliable")
 func req_remove(cell: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
-		server_remove(Net.team_of(peer), cell, _peer_pn(peer))
+		if _in_reach(peer, cell, _peer_pn(peer)):
+			server_remove(Net.team_of(peer), cell, _peer_pn(peer))
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -3739,7 +3751,7 @@ func _update_client(delta: float) -> void:
 	var alive := not (player != null and player.dead)
 	ghost.visible = hover_cell != NO_CELL and not finished and my_team >= 0 \
 			and sel_type != D.WEAPON and alive and not radial.is_open and not item_radial.is_open \
-			and piloting == null
+			and piloting == null and fps_mode
 	if ghost.visible:
 		_update_ghost()
 		var ok := _can_place(my_team, sel_type, hover_cell, hover_dir, my_pn)
@@ -4960,7 +4972,7 @@ func _update_hud() -> void:
 			int(us[2]), int(us[5])])
 	if not fps_mode:
 		if selected.is_empty():
-			lines.append("Ctrl + рамка — выделить юнитов")
+			lines.append("Ctrl + рамка — выделить юнитов   (строить с карты нельзя — Tab, вернуться к себе)")
 		else:
 			lines.append("Выбрано: %d   1 — агрессия   2 — охрана   3 — стоять   ПКМ — точка охраны" % selected.size())
 	if _near_ship() != -1:
@@ -5051,7 +5063,7 @@ func _build_help() -> Control:
 Груз точки выгрузки         навестись и держать E
 Повернуть постройку         R
 Строить / снести            ЛКМ (можно тянуть) / ПКМ
-Орбитальная камера          Tab  (WASD — крутить планету, колесо — зум)
+Вид сверху                  Tab  (WASD — крутить планету, колесо — зум; строить с карты нельзя)
 Отпустить курсор            Esc
 
 ЮНИТЫ (вид сверху — Tab)
@@ -5231,7 +5243,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if selecting and not mb.pressed:
 				_finish_selection(mb.position)
 				return
-			drag_mode = 1 if mb.pressed else 0
+			drag_mode = 1 if mb.pressed and fps_mode else 0   # строить — только руками, не с карты
 			drag_last = NO_CELL
 		elif mb.button_index == MOUSE_BUTTON_RIGHT:
 			# вид сверху с выделением: ПКМ — точка охраны
@@ -5241,7 +5253,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					if gp != null:
 						_command(-1, gp, true)
 				return
-			drag_mode = 2 if mb.pressed else 0
+			drag_mode = 2 if mb.pressed and fps_mode else 0
 			drag_last = NO_CELL
 		return
 	if selecting and event is InputEventMouseMotion:
@@ -5355,7 +5367,8 @@ func _request_place(cell: int, dir: int) -> void:
 	if not _can_place(my_team, sel_type, cell, dir, my_pn):
 		return
 	if is_server:
-		server_place(my_team, sel_type, cell, dir, my_pn)
+		if _in_reach(1, cell, my_pn):
+			server_place(my_team, sel_type, cell, dir, my_pn)
 	else:
 		req_place.rpc_id(1, sel_type, cell, dir)
 
@@ -5364,7 +5377,8 @@ func _request_remove(cell: int) -> void:
 	if my_team < 0 or not grid.has(_k(my_pn, cell)):
 		return
 	if is_server:
-		server_remove(my_team, cell, my_pn)
+		if _in_reach(1, cell, my_pn):
+			server_remove(my_team, cell, my_pn)
 	else:
 		req_remove.rpc_id(1, cell)
 
