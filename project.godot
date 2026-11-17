@@ -56,3 +56,15 @@ space_mode={
 "type": "float",
 "value": 0.0
 }
+land_on={
+"type": "float",
+"value": 0.0
+}
+land_pos={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}
+land_dir={
+"type": "vec3",
+"value": Vector3(0, -1, 0)
+}

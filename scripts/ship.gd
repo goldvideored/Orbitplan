@@ -26,6 +26,8 @@ var throttle := 0.0          # дроссель 0..1 (Shift/Ctrl, Z — полн
 var sas_mode := 0            # автопилот ориентации: 0 выкл, 1 по движению, 2 против, 3 нормаль,
                              # 4 антинормаль, 5 радиально наружу, 6 радиально внутрь
 var power := 0.0             # тяга сейчас, 0..1
+var beam: Node3D             # видимый луч посадочного фонаря
+var auto_retro_done := false # автопилот «против движения» уже включён на этом снижении
 
 
 func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int) -> void:
@@ -35,6 +37,7 @@ func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int) -> void:
 	fuel = fuel_units
 	add_child(model)
 	flame = model.get_meta("flame")
+	beam = model.get_meta("beam")
 	cam = Camera3D.new()
 	cam.fov = 75
 	cam.near = 0.1
@@ -215,6 +218,16 @@ func _physics_process(dt: float) -> void:
 				world.on_ship_crash(self)
 				return
 			landed = true
+			if sas_mode == 2:
+				sas_mode = 0   # сели — автопилот посадки больше не нужен
+		# снижаемся у поверхности — автопилот сам разворачивает «против движения»
+		var alt := altitude()
+		if alt < D.AUTO_RETRO_ALT and vel.dot(global_position.normalized()) < -1.0 and not auto_retro_done:
+			auto_retro_done = true
+			sas_mode = 2
+			world.on_auto_retro()
+		elif alt > D.AUTO_RETRO_ALT + 30.0:
+			auto_retro_done = false
 	flame.visible = thrusting
 
 

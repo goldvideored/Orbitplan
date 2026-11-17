@@ -10,8 +10,8 @@ var nbrs: Array = []               # [PackedInt32Array] соседи, по кр�
 var corners: Array = []            # [PackedVector3Array] углы (единичные), по кругу
 var level := PackedInt32Array()    # высота террасы
 var ore := PackedInt32Array()      # тип залежи (D.I_*) или D.I_NONE
-var core_center := [0, 0]
-var spawn_cell := [0, 0]
+var core_center := [0, 0, 0]   # центр площадки под базу (по D.CORE_DIRS)
+var spawn_cell := [0, 0, 0]
 
 # временные буферы для сборки меша
 var _mv := PackedVector3Array()
@@ -196,7 +196,7 @@ func _build_relief(seed_val: int) -> void:
 		level[i] = lv
 
 	# площадки под ядра: ровные, без руды
-	for team in 2:
+	for team in D.CORE_DIRS.size():
 		var cc := nearest_cell(D.CORE_DIRS[team])
 		core_center[team] = cc
 		var r := rings(cc, 4)
@@ -217,7 +217,7 @@ func _build_relief(seed_val: int) -> void:
 
 	# стартовые жилы у каждой базы: медь, железо, уголь, кварц уходят от ядра наружу
 	var starter := [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ]
-	for team in 2:
+	for team in D.CORE_DIRS.size():
 		var cc: int = core_center[team]
 		var nb: PackedInt32Array = nbrs[cc]
 		for i in starter.size():

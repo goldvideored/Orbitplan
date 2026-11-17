@@ -51,9 +51,10 @@ var planet: Planet
 var grid := {}       # ключ _k(pn, клетка) -> id постройки (у каждой луны своя сетка)
 var my_pn := D.HOME_PLANET   # на какой луне сейчас этот клиент
 var buildings := {}  # id -> Dictionary
-var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate()]   # предмет -> количество
-var power_stats := [[0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
-var core_hp := [D.HP[D.CORE], D.HP[D.CORE]]
+var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate(), {}]   # предмет -> количество (нейтралам не нужен)
+var power_stats := [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
+var base_count := [1, 1, D.PLANETS.size()]   # сколько ядер у каждой команды
+var cur_caps: Array = []      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
 var finished := false
 
 # --- только сервер ---
@@ -126,6 +127,7 @@ var map_cam: Camera3D
 var map_zoom := 1.0
 var local_traj: MeshInstance3D
 var sys_traj: MeshInstance3D
+var enc_label: Label3D        # «призрак» луны-цели в точке встречи
 var map_ship_label: Label3D
 var sys_ship_label: Label3D
 var compass: Compass
@@ -179,12 +181,27 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 	for cat in D.CATEGORIES:
 		all_slots.append_array(cat[1])
 	all_slots.append(D.WEAPON)
+	if team >= 0:
+		my_pn = D.TEAM_HOME[team]
 	if not headless:
 		_build_scene()
 	if is_server:
+		# главные базы команд — на своих лунах
 		for t in 2:
 			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0,
-				"pn": D.HOME_PLANET})
+				"pn": D.TEAM_HOME[t], "main": true})
+		# нейтральная база на каждой луне: ядро + лазерные турели вокруг
+		var site: int = planet.core_center[D.T_NEUTRAL]
+		var ring3: Array = []
+		var r := planet.rings(site, 3)
+		for c in r:
+			if int(r[c]) == 3:
+				ring3.append(c)
+		for pn in D.PLANETS.size():
+			_add_building({"id": _new_id(), "type": D.CORE, "team": D.T_NEUTRAL, "cell": site, "dir": 0, "pn": pn})
+			for i in D.NEUTRAL_TURRETS:
+				var tc: int = ring3[int(i * ring3.size() / D.NEUTRAL_TURRETS)]
+				_add_building({"id": _new_id(), "type": D.TURRET, "team": D.T_NEUTRAL, "cell": tc, "dir": 0, "pn": pn})
 
 
 # =====================================================================
@@ -282,8 +299,32 @@ func _upos(u: Dictionary) -> Vector3:
 	return d * (planet.top_r(u.cell) + 0.3)
 
 
+## Ядро команды для возрождения: главное, если ещё наше, иначе любое своё.
+func _home_core(team: int):
+	var any = null
+	for b in buildings.values():
+		if b.type == D.CORE and b.team == team:
+			if b.main:
+				return b
+			any = b
+	return any
+
+
+func _spawn_pn(team: int) -> int:
+	var hc = _home_core(team)
+	return int(hc.pn) if hc != null else int(D.TEAM_HOME[maxi(team, 0) % 2])
+
+
 func _spawn_pos(team: int) -> Vector3:
-	var c: int = planet.spawn_cell[team]
+	var hc = _home_core(team)
+	var c: int = planet.spawn_cell[maxi(team, 0) % 2]
+	if hc != null:
+		# клетка на втором кольце вокруг ядра
+		var r := planet.rings(int(hc.cell), 2)
+		for x in r:
+			if int(r[x]) == 2:
+				c = x
+				break
 	return planet.dirs[c] * (planet.top_r(c) + 1.0)
 
 
@@ -321,7 +362,8 @@ func _can_place(team: int, type: int, cell: int, dir: int, pn: int) -> bool:
 	for c in foot:
 		if grid.has(_k(pn, c)) or planet.level[c] >= D.MAX_LEVEL:
 			return false
-		if pn == D.HOME_PLANET and _arc(c, planet.core_center[1 - team]) < D.ENEMY_ZONE:
+	for b in buildings.values():
+		if b.type == D.CORE and b.pn == pn and b.team != team and _arc(cell, b.cell) < D.ENEMY_ZONE:
 			return false
 	if _is_drill(type):
 		var dep: int = _drill_ore(foot)[0]
@@ -340,6 +382,7 @@ func _add_building(d: Dictionary) -> void:
 	var b := {
 		"id": int(d.id), "type": int(d.type), "team": int(d.team),
 		"cell": int(d.cell), "dir": int(d.dir), "pn": int(d.get("pn", D.HOME_PLANET)),
+		"main": bool(d.get("main", false)), "cap_team": -1, "cap": 0,
 		"hp": D.HP[int(d.type)], "item": D.I_NONE, "prog": 0.0,
 		"store": 0, "timer": 0, "rr": 0,
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
@@ -390,7 +433,7 @@ func _remove_building(id: int) -> void:
 
 func _bdata(b: Dictionary) -> Dictionary:
 	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
-		"pn": b.pn}
+		"pn": b.pn, "main": b.main}
 
 
 # =====================================================================
@@ -441,7 +484,7 @@ func send_full_sync(peer: int) -> void:
 		list.append(_bdata(b))
 	full_sync.rpc_id(peer, list)
 	if finished:
-		ev_over.rpc_id(peer, 0 if core_hp[0] > 0 else 1)
+		ev_over.rpc_id(peer, 0 if int(base_count[0]) > 0 else 1)
 
 
 func server_player_state(peer: int, pos: Vector3, fwd: Vector3, held: int, pn: int) -> void:
@@ -573,14 +616,39 @@ func ev_remove(id: int) -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
+func ev_team(ids: PackedInt32Array, team: int) -> void:
+	_apply_team(ids, team)
+
+
+## У построек сменилась команда: обновить данные и перекрасить.
+func _apply_team(ids: PackedInt32Array, team: int) -> void:
+	for id in ids:
+		if not buildings.has(id):
+			continue
+		var b: Dictionary = buildings[id]
+		b.team = team
+		if b.pn == my_pn and bnodes.has(id):
+			bnodes[id].queue_free()
+			bnodes.erase(id)
+			turret_nodes.erase(id)
+			_vis_add(b)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func caps_snap(caps: Array, counts: Array) -> void:
+	cur_caps = caps
+	base_count = counts
+
+
+@rpc("authority", "call_remote", "reliable")
 func ev_over(winner: int) -> void:
 	_show_over(winner)
 
 
 @rpc("authority", "call_remote", "reliable")
-func ev_respawn(pos: Vector3) -> void:
+func ev_respawn(pos: Vector3, pn: int) -> void:
 	if player:
-		_switch_planet(D.HOME_PLANET)
+		_switch_planet(pn)
 		player.teleport(pos)
 
 
@@ -708,6 +776,11 @@ func _status(b: Dictionary) -> Array:
 	var t: int = b.type
 	if D.POWER_USE.has(t) and not power_has_gen.has(power_root.get(b.id, b.id)):
 		return [ST_STOP, "нет энергии: рядом нет генератора"]
+	if t == D.CORE and b.team == D.T_NEUTRAL:
+		if b.cap_team >= 0:
+			return [ST_SLOW, "нейтральная база, захватывают %s: %d%%" % [D.TEAM_NAMES[b.cap_team],
+				int(100.0 * b.cap / D.CAPTURE_TICKS)]]
+		return [ST_IDLE, "нейтральная база — встань у ядра, чтобы захватить"]
 	if t == D.CORE:
 		var full := PackedStringArray()
 		var st: Dictionary = storage[b.team]
@@ -1039,6 +1112,7 @@ func _sim_tick() -> void:
 	_units_tick()
 	_rovers_tick()
 	_proj_tick()
+	_capture_tick()
 	state_acc += 1
 	if state_acc >= 5:
 		state_acc = 0
@@ -1793,13 +1867,13 @@ func _players_tick() -> void:
 		if o.dead_t <= 0:
 			o.hp = D.PLAYER_HP
 			o.pos = _spawn_pos(o.team)
-			o["pn"] = D.HOME_PLANET
+			o["pn"] = _spawn_pn(o.team)
 			if pid == 1 and not headless:
 				if player:
-					_switch_planet(D.HOME_PLANET)
+					_switch_planet(int(o.pn))
 					player.teleport(o.pos)
 			elif Net.ready_peers.has(pid):
-				ev_respawn.rpc_id(pid, o.pos)
+				ev_respawn.rpc_id(pid, o.pos, int(o.pn))
 
 
 func _units_tick() -> void:
@@ -1888,22 +1962,93 @@ func _nearest_enemy_building(from: Vector3, team: int, pn: int):
 
 func _damage_building(b: Dictionary, dmg: int) -> void:
 	b.hp -= dmg
-	if b.type == D.CORE:
-		core_hp[b.team] = maxi(b.hp, 0)
 	if b.hp > 0:
 		return
 	if b.type == D.CORE:
-		finished = true
-		var winner: int = 1 - b.team
-		_destroy(b.id)
-		for p in Net.ready_peers:
-			ev_over.rpc_id(p, winner)
-		if headless:
-			print("[server] Игра окончена, победили: %s" % D.TEAM_NAMES[winner])
+		# разрушенное ядро не исчезает: база становится нейтральной, её можно захватить
+		if b.team != D.T_NEUTRAL:
+			b.hp = int(D.HP[D.CORE] * D.NEUTRALIZED_HP)
+			_set_core_team(b, D.T_NEUTRAL)
 		else:
-			_show_over(winner)
+			b.hp = 1
 	else:
 		_destroy(b.id)
+
+
+## Ядро сменило хозяина: постройки прежнего хозяина вокруг базы переходят вместе с ним.
+func _set_core_team(core: Dictionary, team: int) -> void:
+	var old: int = core.team
+	var ids := PackedInt32Array()
+	var center := _bpos(core)
+	for b in buildings.values():
+		if b.pn != core.pn or b.team != old:
+			continue
+		if b.id == core.id or _bpos(b).distance_to(center) < D.BASE_RADIUS:
+			b.team = team
+			ids.append(b.id)
+	core.cap = 0
+	core.cap_team = -1
+	for r in rovers:
+		if buildings.has(r.home) and buildings[r.home].team != r.team:
+			r.team = buildings[r.home].team
+	power_dirty = true
+	for p in Net.ready_peers:
+		ev_team.rpc_id(p, ids, team)
+	if not headless:
+		_apply_team(ids, team)
+	_check_victory()
+
+
+## Команда без единого ядра проигрывает.
+func _check_victory() -> void:
+	var cnt := [0, 0, 0]
+	for b in buildings.values():
+		if b.type == D.CORE:
+			cnt[b.team] += 1
+	base_count = cnt
+	if finished:
+		return
+	for t in 2:
+		if cnt[t] == 0:
+			finished = true
+			var winner := 1 - t
+			for p in Net.ready_peers:
+				ev_over.rpc_id(p, winner)
+			if headless:
+				print("[server] Игра окончена, победили: %s" % D.TEAM_NAMES[winner])
+			else:
+				_show_over(winner)
+			return
+
+
+## Захват нейтральных баз: стоять у ядра, пока рядом нет других команд.
+func _capture_tick() -> void:
+	for core in buildings.values():
+		if core.type != D.CORE or core.team != D.T_NEUTRAL:
+			continue
+		var c := _bpos(core)
+		var present := {}
+		for pid in players:
+			var o: Dictionary = players[pid]
+			if o.hp > 0 and int(o.get("pn", -1)) == core.pn and Vector3(o.pos).distance_to(c) < D.CAPTURE_RADIUS:
+				present[int(o.team)] = true
+		for u in units:
+			if u.hp > 0 and u.pn == core.pn and _upos(u).distance_to(c) < D.CAPTURE_RADIUS:
+				present[int(u.team)] = true
+		present.erase(D.T_NEUTRAL)
+		if present.size() == 1:
+			var t: int = present.keys()[0]
+			if core.cap_team != t:
+				core.cap_team = t
+				core.cap = 0
+			core.cap += 1
+			if core.cap >= D.CAPTURE_TICKS:
+				core.hp = maxi(core.hp, int(D.HP[D.CORE] * 0.5))
+				_set_core_team(core, t)
+		elif present.is_empty() and core.cap > 0:
+			core.cap = maxi(0, core.cap - 2)   # ушли — прогресс тает
+			if core.cap == 0:
+				core.cap_team = -1
 
 
 ## Данные одной луны для снапшота (кэшируются: игроки на одной луне получают одно и то же).
@@ -1951,8 +2096,12 @@ func _snap_data(pn: int) -> Dictionary:
 	for r in rovers:
 		if r.pn == pn:
 			rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
+	var caps: Array = []
+	for b in buildings.values():
+		if b.type == D.CORE and b.pn == pn:
+			caps.append([b.id, b.team, b.cap_team, float(b.cap) / D.CAPTURE_TICKS, float(b.hp) / D.HP[D.CORE]])
 	return {"u": u, "it": it, "itt": itt, "pl": pl, "rv": rv, "pp": pp, "pv": pv, "pk": pk,
-		"aim_ids": aim_ids, "aim_dirs": aim_dirs}
+		"aim_ids": aim_ids, "aim_dirs": aim_dirs, "caps": caps}
 
 
 func _send_snapshot() -> void:
@@ -1966,14 +2115,16 @@ func _send_snapshot() -> void:
 		if not cache.has(pn):
 			cache[pn] = _snap_data(pn)
 		var sd: Dictionary = cache[pn]
-		snapshot.rpc_id(p, sd.u, sd.it, sd.itt, sd.pl, storage, core_hp, power_stats, sd.rv, world_time)
+		snapshot.rpc_id(p, sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv, world_time)
+		caps_snap.rpc_id(p, sd.caps, base_count)
 		proj_snap.rpc_id(p, sd.pp, sd.pv, sd.pk)
 		ships_snap.rpc_id(p, sv)
 		if not sd.aim_ids.is_empty():
 			turret_aims.rpc_id(p, sd.aim_ids, sd.aim_dirs)
 	if not headless:
 		var sd: Dictionary = cache[my_pn] if cache.has(my_pn) else _snap_data(my_pn)
-		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, core_hp, power_stats, sd.rv)
+		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv)
+		cur_caps = sd.caps
 		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
 		_apply_aims(sd.aim_ids, sd.aim_dirs)
@@ -2300,11 +2451,11 @@ func _build_space() -> void:
 	space_root.add_child(giant)
 	# траектории и метки корабля
 	local_traj = MeshInstance3D.new()
-	local_traj.mesh = ImmediateMesh.new()
 	local_root.add_child(local_traj)
 	sys_traj = MeshInstance3D.new()
-	sys_traj.mesh = ImmediateMesh.new()
 	space_root.add_child(sys_traj)
+	enc_label = _marker_label("◯", Color(0.45, 1.0, 0.5))
+	space_root.add_child(enc_label)
 	map_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
 	local_root.add_child(map_ship_label)
 	sys_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
@@ -2672,7 +2823,7 @@ func _apply_snapshot(u: PackedFloat32Array, it: PackedVector3Array, itt: PackedB
 	snap_time = 0.0
 	if not is_server:
 		storage = st
-		core_hp = hp
+		base_count = hp
 
 
 func _set_fps(on: bool) -> void:
@@ -2852,11 +3003,18 @@ func _update_sky() -> void:
 
 
 func _update_flashlight() -> void:
-	var on := flash_on and player != null and not player.dead
+	var on := flash_on and player != null and not player.dead and piloting == null
 	RenderingServer.global_shader_parameter_set("flash_on", 1.0 if on else 0.0)
 	if player:
 		RenderingServer.global_shader_parameter_set("flash_pos", player.cam.global_position)
 		RenderingServer.global_shader_parameter_set("flash_dir", player.look_dir())
+	# посадочный фонарь: сам включается у поверхности
+	var land := piloting != null and piloting.pn >= 0 and piloting.altitude() < D.LANDING_LIGHT_ALT
+	RenderingServer.global_shader_parameter_set("land_on", 1.0 if land else 0.0)
+	if piloting:
+		piloting.beam.visible = land
+		RenderingServer.global_shader_parameter_set("land_pos", piloting.global_position)
+		RenderingServer.global_shader_parameter_set("land_dir", -piloting.global_transform.basis.y.normalized())
 
 
 ## Уровень света 0..16 в точке поверхности (то же, что считает шейдер, без фонарика).
@@ -3103,6 +3261,12 @@ func _predict() -> Dictionary:
 	var v: Vector3 = piloting.vel
 	var t := world_time
 	var after_enc := 0
+	# орбиту вокруг стартовой луны рисуем относительно её положения СЕЙЧАС (как в KSP),
+	# участок у луны-цели — относительно её положения в момент встречи
+	var p_now := SkyCalc.planet_pos(maxi(start_pn, 0), world_time)
+	var ft_now := SkyCalc.frame(maxi(start_pn, 0), world_time).transposed()
+	var p_enc := Vector3.ZERO
+	var ft_enc := Basis.IDENTITY
 	for step in 900:
 		if cur >= 0:
 			var rl := r.length()
@@ -3123,7 +3287,10 @@ func _predict() -> Dictionary:
 			t += dt
 			if cur == start_pn and int(res.enc) == -1:
 				loc.append(r)
-			ine.append(SkyCalc.to_inertial(cur, t, r))
+			if cur == start_pn and int(res.enc) == -1:
+				ine.append(p_now + ft_now * r)
+			else:
+				ine.append(p_enc + ft_enc * r)
 		else:
 			var rl := r.length()
 			if rl < D.GIANT_R:
@@ -3140,6 +3307,9 @@ func _predict() -> Dictionary:
 					if int(res.enc) == -1 and (j != start_pn or t - world_time > 30.0):
 						res.enc = j
 						res.enc_t = t - world_time
+						res["enc_pos"] = SkyCalc.planet_pos(j, t)
+					p_enc = SkyCalc.planet_pos(j, t)
+					ft_enc = SkyCalc.frame(j, t).transposed()
 						res.enc_idx = ine.size()
 					var f := SkyCalc.frame(j, t)
 					r = f * d
@@ -3156,27 +3326,58 @@ func _predict() -> Dictionary:
 
 
 func _draw_trajectories() -> void:
-	_strip(local_traj, pred.get("local", PackedVector3Array()), -1, Color(1.0, 0.85, 0.3), Color.WHITE)
+	var r := piloting.global_position
+	var nrm := r.cross(piloting.vel)
+	if nrm.length() < 0.01:
+		nrm = _up_basis(r.normalized()).z
+	var w_local := map_cam.size * 0.004 if map_mode == 1 else 0.6
+	var w_sys := map_cam.size * 0.003 if map_mode == 2 else 3.0
+	_strip(local_traj, pred.get("local", PackedVector3Array()), -1, Color(1.0, 0.85, 0.3), Color.WHITE,
+		nrm.normalized(), w_local)
 	_strip(sys_traj, pred.get("inertial", PackedVector3Array()), int(pred.get("enc_idx", -1)),
-		Color(0.35, 0.8, 1.0), Color(0.35, 1.0, 0.45))
+		Color(0.35, 0.8, 1.0), Color(0.35, 1.0, 0.45), Vector3.UP, w_sys)
+	# «призрак» луны-цели там, где она будет в момент встречи
+	enc_label.visible = pred.has("enc_pos")
+	if enc_label.visible:
+		enc_label.position = pred.enc_pos
+		enc_label.text = "◯ %s при встрече" % D.PLANETS[int(pred.enc)].name
 
 
 ## Линия по точкам; после split — другим цветом (участок у луны, к которой летим).
-func _strip(mi: MeshInstance3D, pts: PackedVector3Array, split: int, c1: Color, c2: Color) -> void:
-	var im: ImmediateMesh = mi.mesh
-	im.clear_surfaces()
-	if pts.size() < 2:
+## Траектория лентой шириной w в плоскости с нормалью nrm; после split — другим цветом.
+func _strip(mi: MeshInstance3D, pts: PackedVector3Array, split: int, c1: Color, c2: Color,
+		nrm: Vector3, w: float) -> void:
+	var am := ArrayMesh.new()
+	if pts.size() >= 2:
+		var n1 := pts.size() if split <= 1 else mini(split, pts.size())
+		_ribbon_surface(am, pts, 0, n1, nrm, w, c1)
+		if split > 1 and split < pts.size() - 1:
+			_ribbon_surface(am, pts, split - 1, pts.size(), nrm, w, c2)
+	mi.mesh = am
+
+
+func _ribbon_surface(am: ArrayMesh, pts: PackedVector3Array, from: int, to: int, nrm: Vector3,
+		w: float, col: Color) -> void:
+	if to - from < 2:
 		return
-	var n1 := pts.size() if split <= 1 else mini(split, pts.size())
-	im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _mat(c1, true))
-	for i in n1:
-		im.surface_add_vertex(pts[i])
-	im.surface_end()
-	if split > 1 and split < pts.size() - 1:
-		im.surface_begin(Mesh.PRIMITIVE_LINE_STRIP, _mat(c2, true))
-		for i in range(split - 1, pts.size()):
-			im.surface_add_vertex(pts[i])
-		im.surface_end()
+	var verts := PackedVector3Array()
+	for i in range(from, to):
+		var a := pts[maxi(i - 1, from)]
+		var b := pts[mini(i + 1, to - 1)]
+		var side := (b - a).cross(nrm)
+		side = side.normalized() * (w / 2.0) if side.length() > 0.000001 else Vector3.ZERO
+		verts.append(pts[i] - side)
+		verts.append(pts[i] + side)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.albedo_color = col
+	m.no_depth_test = true
+	am.surface_set_material(am.get_surface_count() - 1, m)
 
 
 ## Камера карты: 1 — вид сверху на орбиту вокруг луны, 2 — вся система сверху.
@@ -3301,6 +3502,12 @@ func on_ship_soi(pn: int) -> void:
 		_switch_planet(pn)
 
 
+## Корабль сам включил «против движения» перед посадкой.
+func on_auto_retro() -> void:
+	big_msg.text = "АВТОПИЛОТ: против движения (посадка)"
+	get_tree().create_timer(2.0).timeout.connect(_clear_msg)
+
+
 ## Вызывает корабль при жёсткой посадке.
 func on_ship_crash(_sh: Node3D, self_destruct := false) -> void:
 	var id := piloting_id
@@ -3308,7 +3515,7 @@ func on_ship_crash(_sh: Node3D, self_destruct := false) -> void:
 		server_ship_crash(1, id)
 	else:
 		req_ship_crash.rpc_id(1, id)
-	_switch_planet(D.HOME_PLANET)
+	_switch_planet(_spawn_pn(my_team))
 	_stop_piloting(_spawn_pos(my_team))
 	if self_destruct:
 		big_msg.text = "КОРАБЛЬ САМОУНИЧТОЖЕН"
@@ -3409,6 +3616,25 @@ func _make_ship(team: int) -> Node3D:
 	flame.visible = false
 	n.add_child(flame)
 	n.set_meta("flame", flame)
+	# видимый луч посадочного фонаря (прозрачный конус вниз)
+	var beam := MeshInstance3D.new()
+	var bcm := CylinderMesh.new()
+	bcm.top_radius = 0.35
+	bcm.bottom_radius = 7.0
+	bcm.height = 14.0
+	bcm.radial_segments = 16
+	beam.mesh = bcm
+	beam.position = Vector3(0, -7.0, 0)
+	var bmat := StandardMaterial3D.new()
+	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	bmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	bmat.albedo_color = Color(1.0, 0.95, 0.8, 0.08)
+	beam.material_override = bmat
+	beam.visible = false
+	n.add_child(beam)
+	n.set_meta("beam", beam)
 	return n
 
 
@@ -3709,11 +3935,13 @@ func _update_hud() -> void:
 	var pw: Array = power_stats[my_team]
 	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
 	var top := "%s    Здоровье %d    Свет %d/16    Энергия %d / %d" % [D.PLANETS[my_pn].name, my_hp, lvl, int(pw[0]), int(pw[1])]
-	if core_hp[my_team] < D.HP[D.CORE]:
-		top += "    Ядро %d%%" % int(100.0 * core_hp[my_team] / D.HP[D.CORE])
+	top += "    Баз: %d (у врага %d)" % [int(base_count[my_team]), int(base_count[1 - my_team])]
 	if eclipse:
 		top += "    ЗАТМЕНИЕ"
 	lines.append(top)
+	var cap_line := _capture_hint()
+	if cap_line != "":
+		lines.append(cap_line)
 
 	# склад: только то, что есть
 	var st: Dictionary = storage[my_team]
@@ -3751,6 +3979,29 @@ func _update_hud() -> void:
 	hud.text = "\n".join(lines)
 
 
+## Подсказка про захват, если стоишь рядом с чужим ядром.
+func _capture_hint() -> String:
+	if player == null:
+		return ""
+	for e in cur_caps:
+		var id: int = e[0]
+		if not buildings.has(id):
+			continue
+		var team: int = e[1]
+		if team == my_team:
+			continue
+		var d := player.global_position.distance_to(_bpos(buildings[id]))
+		if d > D.CAPTURE_RADIUS * 2.0:
+			continue
+		if team == D.T_NEUTRAL:
+			if int(e[2]) >= 0:
+				return "ЗАХВАТ БАЗЫ: %s %d%%%s" % [D.TEAM_NAMES[int(e[2])], int(float(e[3]) * 100.0),
+					"" if d < D.CAPTURE_RADIUS else "  (подойди ближе к ядру)"]
+			return "Нейтральная база: встань у ядра (ближе %d м), чтобы захватить" % int(D.CAPTURE_RADIUS)
+		return "Вражеская база: разрушь ядро (прочность %d%%), оно станет нейтральным" % int(float(e[4]) * 100.0)
+	return ""
+
+
 func _build_help() -> Control:
 	var bg := ColorRect.new()
 	bg.color = Color(0, 0, 0, 0.75)
@@ -3780,6 +4031,11 @@ func _build_help() -> Control:
 Строить / снести            ЛКМ (можно тянуть) / ПКМ
 Орбитальная камера          Tab  (WASD — крутить планету, колесо — зум)
 Отпустить курсор            Esc
+
+ЗАХВАТ БАЗ
+нейтральную — стоять у ядра 15 с, пока рядом нет врагов
+вражескую — разрушить ядро, оно станет нейтральным, потом захватить
+проигрывает команда, у которой не осталось ни одного ядра
 
 ОГОНЁК НА ПОСТРОЙКЕ
 зелёный — работает     жёлтый — мало энергии
