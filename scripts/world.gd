@@ -16,6 +16,7 @@ const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
 const IN_SHIP := -2   # «что в руке» = сидит в корабле (аватар прячем)
 const ICON_SHADER = preload("res://shaders/icon.gdshader")
 const SUIT_COLOR := Color(0.88, 0.88, 0.9)
+const FAR_VIEW := 90.0   # дальше этого (м от камеры) игроки рисуются стрелками
 const LIT_SHADER = preload("res://shaders/lit16.gdshader")
 const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
@@ -100,6 +101,7 @@ var viewmodel: Node3D       # рука с предметом от первого
 var vm_hand: Node3D         # сюда кладётся предмет
 var held_type := -999       # какой предмет сейчас в руке у вида от первого лица
 var vm_time := 0.0
+var self_avatar: Node3D = null   # свой космонавт — виден в виде сверху
 var icon_atlas: ImageTexture
 var item_radial: RadialMenu    # меню выбора груза для точки выгрузки (держать E)
 var unit_radial: RadialMenu    # меню выбора юнита для сборщика (держать E)
@@ -2635,6 +2637,7 @@ func _build_scene() -> void:
 		add_child(player)
 		player.teleport(_spawn_pos(my_team))
 		_build_viewmodel()
+		self_avatar = _make_avatar(my_team)
 		_set_fps(true)
 	else:
 		_set_fps(false)
@@ -3168,6 +3171,7 @@ func _update_client(delta: float) -> void:
 	_update_sky()
 	_update_flashlight()
 	_update_viewmodel(delta)
+	_update_self_avatar()
 	_update_units()
 	_update_items()
 	_update_players(delta)
@@ -3491,6 +3495,7 @@ func _update_players(delta: float) -> void:
 		f = f.normalized()
 		var x := f.cross(up)   # вперёд = -Z, значит X = Y × Z = up × (-f) = f × up
 		node.transform = Transform3D(Basis(x, up, -f), p)
+		_apply_far(node, _cam_dist(p))
 	for pid in others.keys():
 		if not seen.has(pid):
 			others[pid].queue_free()
@@ -4060,30 +4065,32 @@ func _make_rover(team: int) -> Node3D:
 ## Правая рука вытянута вперёд, в ней — предмет (метка "hand").
 func _make_avatar(team: int) -> Node3D:
 	var n := Node3D.new()
+	var body := Node3D.new()   # сам космонавт; на дальнем зуме прячется, вместо него — стрелка
+	n.add_child(body)
 	var col: Color = D.TEAM_COLORS[team]
 	var suit := _pmat(SUIT_COLOR, 1)
 	var dark := _pmat(Color(0.35, 0.36, 0.4), 1)
 	# ноги и ботинки
 	for sx in [-0.12, 0.12]:
-		_part(n, "box", Vector3(0.18, 0.75, 0.2), Vector3(sx, 0.45, 0), suit)
-		_part(n, "box", Vector3(0.2, 0.12, 0.28), Vector3(sx, 0.06, -0.03), dark)
+		_part(body, "box", Vector3(0.18, 0.75, 0.2), Vector3(sx, 0.45, 0), suit)
+		_part(body, "box", Vector3(0.2, 0.12, 0.28), Vector3(sx, 0.06, -0.03), dark)
 	# корпус + полоса цвета команды
-	_part(n, "box", Vector3(0.5, 0.62, 0.3), Vector3(0, 1.12, 0), suit)
-	_part(n, "box", Vector3(0.52, 0.08, 0.32), Vector3(0, 1.02, 0), _pmat(col, 0))
+	_part(body, "box", Vector3(0.5, 0.62, 0.3), Vector3(0, 1.12, 0), suit)
+	_part(body, "box", Vector3(0.52, 0.08, 0.32), Vector3(0, 1.02, 0), _pmat(col, 0))
 	# ранец и антенна
-	_part(n, "box", Vector3(0.42, 0.5, 0.18), Vector3(0, 1.15, 0.24), dark)
-	_part(n, "cyl", Vector3(0.015, 0.35, 0.015), Vector3(0.14, 1.55, 0.26), dark)
-	_box(n, Vector3(0.06, 0.06, 0.06), Vector3(0.14, 1.74, 0.26), col, true)
+	_part(body, "box", Vector3(0.42, 0.5, 0.18), Vector3(0, 1.15, 0.24), dark)
+	_part(body, "cyl", Vector3(0.015, 0.35, 0.015), Vector3(0.14, 1.55, 0.26), dark)
+	_box(body, Vector3(0.06, 0.06, 0.06), Vector3(0.14, 1.74, 0.26), col, true)
 	# шлем и визор
-	_part(n, "sphere", Vector3(0.24, 0.48, 0), Vector3(0, 1.62, 0), suit)
-	_box(n, Vector3(0.32, 0.17, 0.08), Vector3(0, 1.64, -0.2), Color(1.0, 0.75, 0.3), true)
+	_part(body, "sphere", Vector3(0.24, 0.48, 0), Vector3(0, 1.62, 0), suit)
+	_box(body, Vector3(0.32, 0.17, 0.08), Vector3(0, 1.64, -0.2), Color(1.0, 0.75, 0.3), true)
 	# левая рука опущена
-	_part(n, "box", Vector3(0.13, 0.55, 0.14), Vector3(-0.33, 1.1, 0), suit)
+	_part(body, "box", Vector3(0.13, 0.55, 0.14), Vector3(-0.33, 1.1, 0), suit)
 	# правая рука вытянута вперёд, в кисти — предмет
 	var shoulder := Node3D.new()
 	shoulder.position = Vector3(0.33, 1.35, 0)
 	shoulder.rotation_degrees = Vector3(70, 0, 0)
-	n.add_child(shoulder)
+	body.add_child(shoulder)
 	_part(shoulder, "box", Vector3(0.13, 0.55, 0.14), Vector3(0, -0.27, 0), suit)
 	var hand := Node3D.new()
 	hand.position = Vector3(0, -0.58, 0)
@@ -4092,8 +4099,67 @@ func _make_avatar(team: int) -> Node3D:
 	n.set_meta("hand", hand)
 	n.set_meta("held", -999)
 	n.set_meta("team", team)
+	var arrow := _make_arrow(col)
+	n.add_child(arrow)
+	n.set_meta("body", body)
+	n.set_meta("arrow", arrow)
 	local_root.add_child(n)
 	return n
+
+
+## Стрелка на поверхности: остриё вперёд (-Z), видна сквозь рельеф.
+func _make_arrow(col: Color) -> MeshInstance3D:
+	var v := PackedVector3Array([
+		Vector3(0, 0, -1.3), Vector3(0.8, 0, 0.7), Vector3(0, 0, 0.25),
+		Vector3(0, 0, -1.3), Vector3(0, 0, 0.25), Vector3(-0.8, 0, 0.7),
+	])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = v
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.no_depth_test = true
+	m.albedo_color = col.lightened(0.3)
+	var mi := MeshInstance3D.new()
+	mi.mesh = am
+	mi.material_override = m
+	mi.position = Vector3(0, 0.4, 0)
+	mi.visible = false
+	return mi
+
+
+## Вблизи — космонавт, издалека — стрелка (растёт с расстоянием, чтобы не теряться).
+func _apply_far(node: Node3D, cam_d: float) -> void:
+	var far := cam_d > FAR_VIEW
+	var body: Node3D = node.get_meta("body")
+	var arrow: Node3D = node.get_meta("arrow")
+	body.visible = not far
+	arrow.visible = far
+	if far:
+		arrow.scale = Vector3.ONE * clampf(cam_d / 35.0, 1.0, 120.0)
+
+
+func _cam_dist(p: Vector3) -> float:
+	var c := get_viewport().get_camera_3d()
+	return c.global_position.distance_to(p) if c else 0.0
+
+
+## Свой космонавт виден только со стороны (вид сверху), от первого лица — нет.
+func _update_self_avatar() -> void:
+	if self_avatar == null:
+		return
+	var vis := player != null and not fps_mode and piloting == null and not player.dead
+	self_avatar.visible = vis
+	if not vis:
+		return
+	self_avatar.global_transform = player.global_transform
+	if int(self_avatar.get_meta("held")) != sel_type:
+		self_avatar.set_meta("held", sel_type)
+		_set_held(self_avatar.get_meta("hand"), sel_type, my_team)
+	_apply_far(self_avatar, _cam_dist(player.global_position))
 
 
 ## Деталь из примитива: "box" — size; "cyl" и "sphere" — (радиус, высота, -).
