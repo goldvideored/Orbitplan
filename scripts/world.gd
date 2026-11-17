@@ -22,6 +22,9 @@ const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
 const RINGS_SHADER = preload("res://shaders/rings.gdshader")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const NO_CELL := -1
+# цвета орбит лун на карте (и подписи того же цвета)
+const PLANET_COLORS := [Color(1.0, 0.6, 0.3), Color(0.35, 0.8, 1.0), Color(0.45, 1.0, 0.45),
+	Color(0.8, 0.5, 1.0), Color(1.0, 0.9, 0.35)]
 const CORE_H := 1.1   # высота основания ядра
 
 # состояние постройки -> цвет огонька-индикатора
@@ -129,6 +132,8 @@ var compass: Compass
 var navball: Navball
 var ap_labels: Array = []      # метки «Ап»/«Пе»: [у луны Ап, у луны Пе, в системе Ап, в системе Пе]
 var destruct_armed := 0.0      # до какого момента ждём второе нажатие самоуничтожения
+var orbit_ribbons: Array = []  # орбиты лун — ленты, толщина подстраивается под масштаб
+var orbit_width := -1.0
 var pred := {}                 # прогноз траектории корабля
 var pred_acc := 0.0
 var mm_units: MultiMesh
@@ -2258,6 +2263,7 @@ func _build_space() -> void:
 		node.add_child(ball)
 		var lbl := Label3D.new()
 		lbl.text = D.PLANETS[j].name
+		lbl.modulate = PLANET_COLORS[j]
 		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lbl.fixed_size = true
 		lbl.pixel_size = 0.0012
@@ -2269,8 +2275,17 @@ func _build_space() -> void:
 		node.add_child(_circle_mesh(SkyCalc.soi(j), Color(0.5, 0.7, 1.0, 0.5)))
 		space_root.add_child(node)
 		space_moons.append(node)
-		# орбита луны
-		space_root.add_child(_circle_mesh(float(D.PLANETS[j].a), Color(0.6, 0.6, 0.7, 0.6)))
+		# орбита луны — лента её цвета
+		var rib := MeshInstance3D.new()
+		var rmat := StandardMaterial3D.new()
+		rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		rmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var oc: Color = PLANET_COLORS[j]
+		rmat.albedo_color = Color(oc.r, oc.g, oc.b, 0.8)
+		rib.material_override = rmat
+		space_root.add_child(rib)
+		orbit_ribbons.append(rib)
 	# гигант в центре системы
 	var giant := MeshInstance3D.new()
 	var gs := SphereMesh.new()
@@ -2304,6 +2319,27 @@ func _build_space() -> void:
 		var l := _marker_label("Ап" if i % 2 == 0 else "Пе", Color(0.4, 0.9, 1.0) if i % 2 == 0 else Color(1.0, 0.6, 0.3))
 		(local_root if i < 2 else space_root).add_child(l)
 		ap_labels.append(l)
+
+
+## Перестраивает ленты орбит, если толщина заметно поменялась (при зуме карты).
+func _set_orbit_width(w: float) -> void:
+	if orbit_width > 0.0 and absf(w - orbit_width) / orbit_width < 0.15:
+		return
+	orbit_width = w
+	for j in orbit_ribbons.size():
+		var a: float = D.PLANETS[j].a
+		var verts := PackedVector3Array()
+		for i in 257:
+			var ang := TAU * i / 256.0
+			var dir := Vector3(cos(ang), 0, sin(ang))
+			verts.append(dir * (a - w / 2.0))
+			verts.append(dir * (a + w / 2.0))
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = verts
+		var am := ArrayMesh.new()
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
+		orbit_ribbons[j].mesh = am
 
 
 func _marker_label(txt: String, col: Color) -> Label3D:
@@ -3169,24 +3205,27 @@ func _update_map_view() -> void:
 			ap_labels[i].position = oi.ap_pos
 			ap_labels[i + 1].position = oi.pe_pos
 	if map_mode == 0:
+		_set_orbit_width(8.0)   # в полёте по космосу — ленты толщиной 8 м
 		if not piloting.cam.current:
 			piloting.cam.current = true
 		return
 	if not map_cam.current:
 		map_cam.current = true
+	# карта следит за ракетой: корабль всегда в центре
 	if map_mode == 1:
 		var r := piloting.global_position
 		var nrm := r.cross(piloting.vel)
 		if nrm.length() < 0.01:
 			nrm = _up_basis(r.normalized()).z
 		nrm = nrm.normalized()
-		map_cam.size = map_zoom * maxf(r.length() * 3.0, 400.0)
-		map_cam.global_position = nrm * 5000.0
-		map_cam.look_at(Vector3.ZERO, _up_basis(nrm).z)
+		map_cam.size = map_zoom * maxf(r.length() * 4.0, 500.0)
+		map_cam.global_position = r + nrm * 5000.0
+		map_cam.look_at(r, _up_basis(nrm).z)
 	else:
-		map_cam.size = map_zoom * 12500.0
-		map_cam.global_position = Vector3(0, 12000, 0)
-		map_cam.look_at(Vector3.ZERO, Vector3.FORWARD)
+		map_cam.size = map_zoom * 3000.0
+		map_cam.global_position = Vector3(ship_i.x, 12000, ship_i.z)
+		map_cam.look_at(Vector3(ship_i.x, 0, ship_i.z), Vector3.FORWARD)
+		_set_orbit_width(map_cam.size * 0.004)
 
 
 ## Компас: «север» — ось вращения луны (в космосе — ось орбит), курс носа и направление полёта.
@@ -3786,7 +3825,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if mbp.button_index == MOUSE_BUTTON_WHEEL_UP:
 				map_zoom = maxf(0.02, map_zoom / 1.2)
 			elif mbp.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				map_zoom = minf(3.0, map_zoom * 1.2)
+				map_zoom = minf(5.0, map_zoom * 1.2)
 		if mbp and mbp.pressed and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		return
