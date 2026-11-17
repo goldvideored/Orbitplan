@@ -8,6 +8,7 @@ global uniform float giant_level; // 0..1 — фаза гиганта
 global uniform vec3 flash_pos;
 global uniform vec3 flash_dir;
 global uniform float flash_on;
+global uniform float space_mode;  // 1 — открытый космос: планеты под ногами нет, тень от неё не считаем
 
 const float LEVELS = 16.0;
 const float GIANT_MAX = 4.0 / 16.0;
@@ -32,6 +33,12 @@ float hash3(vec3 p) {
 // Освещённость с квантованием на 16 уровней: 0 — абсолютная темнота.
 // Планета в центре координат, поэтому нормаль сферы = normalize(wpos).
 vec3 light16(vec3 base, vec3 wpos, vec3 n) {
+	if (space_mode > 0.5) {
+		// в космосе: только солнце + слабая подсветка (звёзды, гигант), чтобы силуэт был виден
+		float sp = max(dot(n, sun_dir), 0.0) * sun_level;
+		float lv = clamp(floor(sp * LEVELS + 0.5), 2.0, LEVELS);
+		return base * (lv / LEVELS);
+	}
 	vec3 up = normalize(wpos);
 	float s = max(dot(n, sun_dir), 0.0) * smoothstep(-0.03, 0.03, dot(up, sun_dir)) * sun_level;
 	float g = max(dot(n, giant_dir), 0.0) * smoothstep(-0.03, 0.03, dot(up, giant_dir)) * giant_level * GIANT_MAX;

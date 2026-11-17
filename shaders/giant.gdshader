@@ -40,7 +40,10 @@ void fragment() {
 		c = mix(vec3(0.75, 0.3, 0.18), vec3(0.95, 0.55, 0.35), step(0.45, sd));
 	}
 	// освещение солнцем, тоже 16 ступеней
-	float l = max(dot(normalize(n_w), sun_dir), 0.0);
+	vec3 nw = normalize(n_w);
+	float l = max(dot(nw, sun_dir), 0.0);
 	l = floor(l * 16.0 + 0.5) / 16.0;
-	ALBEDO = c * max(l, 0.02);
+	// ночная сторона не совсем чёрная: полосы еле видны, по краю — светлый ободок атмосферы
+	float rim = pow(1.0 - abs(dot(nw, normalize(CAMERA_POSITION_WORLD - (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz))), 3.0);
+	ALBEDO = c * max(l, 0.07) + vec3(0.9, 0.6, 0.35) * rim * 0.25;
 }

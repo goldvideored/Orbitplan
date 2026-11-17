@@ -11,6 +11,7 @@ const RadialMenu = preload("res://scripts/radial_menu.gd")
 const Icons = preload("res://scripts/icons.gd")
 const Ship = preload("res://scripts/ship.gd")
 const Compass = preload("res://scripts/compass.gd")
+const Navball = preload("res://scripts/navball.gd")
 const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
 const IN_SHIP := -2   # «что в руке» = сидит в корабле (аватар прячем)
 const ICON_SHADER = preload("res://shaders/icon.gdshader")
@@ -125,6 +126,9 @@ var sys_traj: MeshInstance3D
 var map_ship_label: Label3D
 var sys_ship_label: Label3D
 var compass: Compass
+var navball: Navball
+var ap_labels: Array = []      # метки «Ап»/«Пе»: [у луны Ап, у луны Пе, в системе Ап, в системе Пе]
+var destruct_armed := 0.0      # до какого момента ждём второе нажатие самоуничтожения
 var pred := {}                 # прогноз траектории корабля
 var pred_acc := 0.0
 var mm_units: MultiMesh
@@ -2215,6 +2219,8 @@ func _build_scene() -> void:
 	layer.add_child(crosshair)
 	compass.visible = false
 	layer.add_child(compass)
+	navball.visible = false
+	layer.add_child(navball)
 
 	# персонаж
 	if my_team >= 0:
@@ -2293,6 +2299,11 @@ func _build_space() -> void:
 	map_cam.far = 30000
 	add_child(map_cam)
 	compass = Compass.new()
+	navball = Navball.new()
+	for i in 4:
+		var l := _marker_label("Ап" if i % 2 == 0 else "Пе", Color(0.4, 0.9, 1.0) if i % 2 == 0 else Color(1.0, 0.6, 0.3))
+		(local_root if i < 2 else space_root).add_child(l)
+		ap_labels.append(l)
 
 
 func _marker_label(txt: String, col: Color) -> Label3D:
@@ -2764,15 +2775,20 @@ func _update_sky() -> void:
 	var sysv := _system_view()
 	local_root.visible = not sysv
 	space_root.visible = sysv
+	# звёзды «бесконечно далеко»: сфера едет вместе с камерой, иначе её край обрезается дальностью
+	var cam_now := get_viewport().get_camera_3d()
+	var cam_pos := cam_now.global_position if cam_now else Vector3.ZERO
+	stars_node.global_position = cam_pos
+	RenderingServer.global_shader_parameter_set("space_mode", 1.0 if sysv else 0.0)
 	if sysv:
 		# система гиганта: неподвижные оси, солнце в направлении SUN_DIR
 		var sun_i: Vector3 = D.SUN_DIR.normalized()
 		RenderingServer.global_shader_parameter_set("sun_dir", sun_i)
 		RenderingServer.global_shader_parameter_set("sun_level", 1.0)
 		RenderingServer.global_shader_parameter_set("giant_level", 0.0)
-		sun_node.position = sun_i * D.SUN_VIS_DIST
+		sun_node.global_position = cam_pos + sun_i * D.SUN_VIS_DIST
 		sun_node.visible = true
-		stars_node.transform = Transform3D.IDENTITY
+		stars_node.basis = Basis.IDENTITY
 		for j in space_moons.size():
 			space_moons[j].position = SkyCalc.planet_pos(j, world_time)
 		return
@@ -2787,9 +2803,9 @@ func _update_sky() -> void:
 	RenderingServer.global_shader_parameter_set("giant_dir", gdir)
 	RenderingServer.global_shader_parameter_set("giant_level", float(st.phase))
 	giant_node.position = giant_rel
-	sun_node.position = sun * D.SUN_VIS_DIST
+	sun_node.global_position = cam_pos + sun * D.SUN_VIS_DIST
 	sun_node.visible = float(st.sun_level) > 0.02
-	stars_node.transform = Transform3D(frame, Vector3.ZERO)
+	stars_node.basis = frame
 	# соседние луны в небе
 	for j in sky_moons.size():
 		sky_moons[j].visible = false
@@ -2992,6 +3008,7 @@ func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: i
 	sh.cam.current = true
 	crosshair.visible = false
 	compass.visible = true
+	navball.visible = true
 	if ship_nodes.has(id):
 		ship_nodes[id].queue_free()
 		ship_nodes.erase(id)
@@ -3005,6 +3022,9 @@ func _stop_piloting(out_pos: Vector3) -> void:
 	piloting_id = -1
 	map_mode = 0
 	compass.visible = false
+	navball.visible = false
+	for l in ap_labels:
+		l.visible = false
 	local_traj.visible = false
 	map_ship_label.visible = false
 	player.visible = true
@@ -3137,6 +3157,17 @@ func _update_map_view() -> void:
 	map_ship_label.position = piloting.global_position
 	# на карте системы корабль внутри сферы луны рисуем меткой (его модель в координатах луны)
 	piloting.visible = not (map_mode == 2 and piloting.pn >= 0)
+	var oi := piloting.orbit_info()
+	var show_local := map_mode == 1 and not oi.is_empty()
+	var show_sys := sysv and piloting.pn < 0 and not oi.is_empty()
+	ap_labels[0].visible = show_local
+	ap_labels[1].visible = show_local
+	ap_labels[2].visible = show_sys
+	ap_labels[3].visible = show_sys
+	if not oi.is_empty():
+		for i in [0, 2]:
+			ap_labels[i].position = oi.ap_pos
+			ap_labels[i + 1].position = oi.pe_pos
 	if map_mode == 0:
 		if not piloting.cam.current:
 			piloting.cam.current = true
@@ -3179,6 +3210,20 @@ func _update_compass() -> void:
 	var pro_h := rad_to_deg(atan2(vh.dot(east), vh.dot(north)))
 	var pro_p := rad_to_deg(asin(clampf(v.normalized().dot(up), -1.0, 1.0))) if show_pro else 0.0
 	compass.set_data(heading, pitch, pro_h, pro_p, show_pro)
+	# навбол: в центре нос, сверху на экране — «спина» корабля (сторона иллюминатора)
+	var us := -b.z.normalized()
+	var right := nose.cross(us)
+	var hvec := piloting.global_position.cross(v)
+	var marks: Array = []
+	if show_pro:
+		marks.append([v, "pro"])
+		marks.append([-v, "retro"])
+	if hvec.length() > 0.01:
+		marks.append([hvec, "normal"])
+		marks.append([-hvec, "anti"])
+	marks.append([up, "out"])
+	marks.append([-up, "in"])
+	navball.set_data(nose, right, us, up, north, marks, piloting.sas_mode, piloting.power)
 
 
 ## Перешли на другую луну: перерисовываем постройки, сбрасываем то, что видели на старой.
@@ -3218,7 +3263,7 @@ func on_ship_soi(pn: int) -> void:
 
 
 ## Вызывает корабль при жёсткой посадке.
-func on_ship_crash(_sh: Node3D) -> void:
+func on_ship_crash(_sh: Node3D, self_destruct := false) -> void:
 	var id := piloting_id
 	if is_server:
 		server_ship_crash(1, id)
@@ -3226,7 +3271,10 @@ func on_ship_crash(_sh: Node3D) -> void:
 		req_ship_crash.rpc_id(1, id)
 	_switch_planet(D.HOME_PLANET)
 	_stop_piloting(_spawn_pos(my_team))
-	big_msg.text = "КОРАБЛЬ РАЗБИТ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
+	if self_destruct:
+		big_msg.text = "КОРАБЛЬ САМОУНИЧТОЖЕН"
+	else:
+		big_msg.text = "КОРАБЛЬ РАЗБИТ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
 	get_tree().create_timer(3.0).timeout.connect(_clear_msg)
 
 
@@ -3609,7 +3657,11 @@ func _update_hud() -> void:
 			lines.append("Суборбитальный полёт: апоцентр %d м (для орбиты подними перицентр выше 5 м)" % int(orb[0]))
 		lines.append("Нужно Δv: взлёт ~%d, перелёт к соседней луне ~%d, посадка ~%d м/с" % [
 			D.DV_LAUNCH, D.DV_TRANSFER, D.DV_LAND])
-		lines.append("Space — тяга   W/S, A/D, Q/E — повороты   мышь — камера   M — карта   G — выйти (после посадки)")
+		var oi := sh.orbit_info()
+		if not oi.is_empty():
+			lines.append("До апоцентра %d с    до перицентра %d с" % [int(oi.t_ap), int(oi.t_pe)])
+		lines.append("Shift/Ctrl — тяга, Z — полная, X — ноль   W/S A/D Q/E — повороты   1–7 — автопилот   M — карта")
+		lines.append("G — выйти (после посадки)   Backspace ×2 — самоуничтожение")
 		if map_mode != 0:
 			lines.append("КАРТА: %s   (M — дальше, колесо — масштаб)" % ["", "орбита вокруг луны", "звёздная система"][map_mode])
 		hud.text = "\n".join(lines)
@@ -3679,7 +3731,10 @@ func _build_help() -> Control:
 Меню построек               держать Z: мышь — группа, колесо — подтип
 Быстрый выбор группы        1–7,  бластер — 8
 Корабль                     E на площадке — собрать, E рядом — сесть, G — выйти
-В полёте                    Space — тяга, W/S A/D Q/E — повороты, мышь — камера
+В полёте                    Shift/Ctrl — дроссель, Z — полный, X — ноль, Space — полная тяга пока держишь
+                            W/S A/D Q/E — повороты, мышь — камера
+Автопилот ориентации        1 выкл, 2 по движению, 3 против, 4 нормаль, 5 антинормаль, 6/7 радиально
+Самоуничтожение             Backspace дважды
 Карта в корабле             M (орбита -> система), колесо — масштаб
 Груз точки выгрузки         навестись и держать E
 Повернуть постройку         R
@@ -3705,6 +3760,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kp and kp.pressed and not kp.echo:
 			if kp.keycode == KEY_G:
 				_exit_ship()
+			elif kp.keycode >= KEY_1 and kp.keycode <= KEY_7:
+				piloting.sas_mode = kp.keycode - KEY_1   # 1 — выкл, 2..7 — режимы автопилота
+			elif kp.keycode == KEY_BACKSPACE:
+				var now := Time.get_ticks_msec() / 1000.0
+				if now < destruct_armed:
+					on_ship_crash(piloting, true)
+				else:
+					destruct_armed = now + 2.0
+					big_msg.text = "САМОУНИЧТОЖЕНИЕ?\nнажми Backspace ещё раз"
+					get_tree().create_timer(2.0).timeout.connect(_clear_msg)
 			elif kp.keycode == KEY_M:
 				# в сфере луны: нет -> орбита -> система; в космосе: нет -> система
 				if piloting.pn >= 0:

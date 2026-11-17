@@ -22,6 +22,10 @@ var cam_dist := 16.0
 var flame: Node3D
 var cell_hint := -1
 var pn := -1                 # луна, в сфере влияния которой летим; -1 — открытый космос
+var throttle := 0.0          # дроссель 0..1 (Shift/Ctrl, Z — полный, X — ноль)
+var sas_mode := 0            # автопилот ориентации: 0 выкл, 1 по движению, 2 против, 3 нормаль,
+                             # 4 антинормаль, 5 радиально наружу, 6 радиально внутрь
+var power := 0.0             # тяга сейчас, 0..1
 
 
 func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int) -> void:
@@ -74,6 +78,53 @@ func orbit() -> Array:
 	return [a * (1.0 + ecc) - body_r(), a * (1.0 - ecc) - body_r()]
 
 
+## Подробно об орбите: где апоцентр и перицентр и через сколько секунд мы там будем.
+func orbit_info() -> Dictionary:
+	var mu := body_mu()
+	var r := global_position
+	var v := vel
+	var rl := r.length()
+	var energy := v.length_squared() / 2.0 - mu / rl
+	if energy >= 0.0 or landed:
+		return {}
+	var a := -mu / (2.0 * energy)
+	var evec := (r * (v.length_squared() - mu / rl) - v * r.dot(v)) / mu
+	var ecc := evec.length()
+	var pe_dir := evec / ecc if ecc > 0.0001 else r / rl
+	var cos_nu := clampf(pe_dir.dot(r / rl), -1.0, 1.0)
+	var nu := acos(cos_nu)
+	if r.dot(v) < 0.0:
+		nu = TAU - nu
+	var e_an := 2.0 * atan(sqrt((1.0 - ecc) / (1.0 + ecc)) * tan(nu / 2.0))
+	var m_an := fposmod(e_an - ecc * sin(e_an), TAU)
+	var n := sqrt(mu / (a * a * a))
+	return {
+		"ap_pos": -pe_dir * a * (1.0 + ecc), "pe_pos": pe_dir * a * (1.0 - ecc),
+		"t_pe": (TAU - m_an) / n, "t_ap": fposmod(PI - m_an, TAU) / n, "ecc": ecc,
+	}
+
+
+## Куда держать нос в текущем режиме автопилота.
+func sas_target() -> Vector3:
+	var r := global_position.normalized()
+	var v := vel
+	var h := global_position.cross(vel)
+	match sas_mode:
+		1:
+			return v.normalized() if v.length() > 0.3 else Vector3.ZERO
+		2:
+			return -v.normalized() if v.length() > 0.3 else Vector3.ZERO
+		3:
+			return h.normalized() if h.length() > 0.01 else Vector3.ZERO
+		4:
+			return -h.normalized() if h.length() > 0.01 else Vector3.ZERO
+		5:
+			return r
+		6:
+			return -r
+	return Vector3.ZERO
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if world.map_mode != 0:
 		return   # на карте мышь и колесо управляют картой
@@ -94,6 +145,21 @@ func _physics_process(dt: float) -> void:
 		return
 	# повороты в осях корабля: W/S — тангаж, A/D — рыскание, Q/E — крен
 	var rate: float = D.SHIP_TURN * dt
+	var manual := false
+	for key in [KEY_W, KEY_S, KEY_A, KEY_D, KEY_Q, KEY_E]:
+		if Input.is_key_pressed(key):
+			manual = true
+	if not manual and sas_mode > 0:
+		# автопилот: доворачиваем нос к нужному направлению
+		var target := sas_target()
+		var nose_dir := global_transform.basis.y.normalized()
+		if target != Vector3.ZERO:
+			var ang := nose_dir.angle_to(target)
+			if ang > 0.002:
+				var axis := nose_dir.cross(target)
+				if axis.length() < 0.000001:
+					axis = global_transform.basis.x
+				global_transform.basis = Basis(axis.normalized(), minf(ang, rate)) * global_transform.basis
 	if Input.is_key_pressed(KEY_W):
 		rotate_object_local(Vector3.RIGHT, -rate)
 	if Input.is_key_pressed(KEY_S):
@@ -107,12 +173,24 @@ func _physics_process(dt: float) -> void:
 	if Input.is_key_pressed(KEY_E):
 		rotate_object_local(Vector3.UP, -rate)
 
-	thrusting = Input.is_key_pressed(KEY_SPACE) and fuel > 0.0
+	# дроссель: Shift — больше, Ctrl — меньше, Z — полный, X — ноль; Space — полная тяга, пока держишь
+	if Input.is_key_pressed(KEY_SHIFT):
+		throttle = minf(1.0, throttle + D.THROTTLE_RATE * dt)
+	if Input.is_key_pressed(KEY_CTRL):
+		throttle = maxf(0.0, throttle - D.THROTTLE_RATE * dt)
+	if Input.is_key_pressed(KEY_Z):
+		throttle = 1.0
+	if Input.is_key_pressed(KEY_X):
+		throttle = 0.0
+	power = 1.0 if Input.is_key_pressed(KEY_SPACE) else throttle
+	thrusting = power > 0.001 and fuel > 0.0
 	if thrusting:
-		vel += global_transform.basis.y.normalized() * (D.SCOUT_THRUST / mass()) * dt
+		var f: float = D.SCOUT_THRUST * power
+		vel += global_transform.basis.y.normalized() * (f / mass()) * dt
 		# расход массы: тяга / скорость истечения
-		fuel = maxf(0.0, fuel - D.SCOUT_THRUST / D.SCOUT_VE * dt / D.FUEL_UNIT_MASS)
+		fuel = maxf(0.0, fuel - f / D.SCOUT_VE * dt / D.FUEL_UNIT_MASS)
 		landed = false
+	flame.scale = Vector3(1, maxf(0.2, power), 1)
 
 	if not landed:
 		var r := global_position.length()

@@ -52,3 +52,7 @@ flash_on={
 "type": "float",
 "value": 0.0
 }
+space_mode={
+"type": "float",
+"value": 0.0
+}
