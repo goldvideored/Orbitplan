@@ -13,6 +13,11 @@ const Ship = preload("res://scripts/ship.gd")
 const Compass = preload("res://scripts/compass.gd")
 const Navball = preload("res://scripts/navball.gd")
 const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
+const UNIT_SHADER = preload("res://shaders/unit.gdshader")
+# роль детали юнита — альфа цвета вершины (см. unit.gdshader)
+const PAINT := 0.0    # краска команды
+const GLOW := 0.7     # светится сама
+const METAL := 1.0
 const IN_SHIP := -2   # «что в руке» = сидит в корабле (аватар прячем)
 const ICON_SHADER = preload("res://shaders/icon.gdshader")
 const SUIT_COLOR := Color(0.88, 0.88, 0.9)
@@ -119,6 +124,7 @@ var unit_pos := {}             # id своего юнита -> где он се�
 var sel_box: Control
 var sel_start := Vector2.ZERO
 var selecting := false
+var unit_face := {}            # id юнита -> куда смотрит (по ходу движения)
 var filter_cell := NO_CELL
 var cur_rovers: Array = []
 var rover_nodes := {}          # id ровера -> Node3D
@@ -2870,27 +2876,12 @@ func _build_scene() -> void:
 	proj_mmi.multimesh = mm_proj
 	local_root.add_child(proj_mmi)
 
-	mm_units = MultiMesh.new()
-	mm_units.transform_format = MultiMesh.TRANSFORM_3D
-	mm_units.use_colors = true
-	mm_units.instance_count = 4096
-	mm_units.visible_instance_count = 0
-	var ubox := BoxMesh.new()
-	ubox.size = Vector3(0.6, 0.45, 0.6)
-	ubox.material = _vc_mat()
-	mm_units.mesh = ubox
-	var units_mmi := MultiMeshInstance3D.new()
-	units_mmi.multimesh = mm_units
-	local_root.add_child(units_mmi)
-	# дроны — пирамидки, мехи — большие коробки, кольца выделения
-	var pm := PrismMesh.new()
-	pm.size = Vector3(0.7, 0.35, 0.7)
-	pm.material = _vc_mat()
-	mm_drones = _make_mm(pm, 2048, true)
-	var mb := BoxMesh.new()
-	mb.size = Vector3(1.8, 2.6, 1.8)
-	mb.material = _vc_mat()
-	mm_mechs = _make_mm(mb, 512, true)
+	# юниты: модели из деталей, цвет команды и прочность — через данные экземпляра
+	var umat := ShaderMaterial.new()
+	umat.shader = UNIT_SHADER
+	mm_units = _make_mm(_tank_mesh(umat), 4096, false)
+	mm_drones = _make_mm(_drone_mesh(umat), 2048, false)
+	mm_mechs = _make_mm(_mech_mesh(umat), 512, false)
 	var ring := TorusMesh.new()
 	ring.inner_radius = 0.8
 	ring.outer_radius = 1.0
@@ -3172,6 +3163,7 @@ func _make_mm(mesh: Mesh, count: int, colors: bool) -> MultiMesh:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = colors
+	mm.use_custom_data = not colors
 	mm.instance_count = count
 	mm.visible_instance_count = 0
 	mm.mesh = mesh
@@ -3179,6 +3171,131 @@ func _make_mm(mesh: Mesh, count: int, colors: bool) -> MultiMesh:
 	mmi.multimesh = mm
 	local_root.add_child(mmi)
 	return mm
+
+
+# ---------------------------------------------------------------------
+# Модели юнитов: детали сливаются в один меш (чтобы рисовать сотнями через MultiMesh)
+# ---------------------------------------------------------------------
+
+func _pb(size: Vector3) -> PrimitiveMesh:
+	var m := BoxMesh.new()
+	m.size = size
+	return m
+
+
+func _pc(r_top: float, r_bot: float, h: float, segs := 8) -> PrimitiveMesh:
+	var m := CylinderMesh.new()
+	m.top_radius = r_top
+	m.bottom_radius = r_bot
+	m.height = h
+	m.radial_segments = segs
+	m.rings = 1
+	return m
+
+
+func _ps(r: float) -> PrimitiveMesh:
+	var m := SphereMesh.new()
+	m.radius = r
+	m.height = r * 2.0
+	m.radial_segments = 10
+	m.rings = 5
+	return m
+
+
+## Деталь: [меш, где стоит, поворот в градусах, цвет (альфа — роль детали)].
+func _merge(parts: Array, mat: Material) -> ArrayMesh:
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var cols := PackedColorArray()
+	var idx := PackedInt32Array()
+	for part in parts:
+		var pm: PrimitiveMesh = part[0]
+		var rot: Vector3 = part[2]
+		var xf := Transform3D(Basis.from_euler(rot * (PI / 180.0)), part[1])
+		var col: Color = part[3]
+		var arr := pm.get_mesh_arrays()
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var nn: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+		var base := verts.size()
+		for i in v.size():
+			verts.append(xf * v[i])
+			norms.append((xf.basis * nn[i]).normalized())
+			cols.append(col)
+		var ii = arr[Mesh.ARRAY_INDEX]
+		if ii != null and ii.size() > 0:
+			for k in ii:
+				idx.append(base + int(k))
+		else:
+			for k in v.size():
+				idx.append(base + k)
+	var out := []
+	out.resize(Mesh.ARRAY_MAX)
+	out[Mesh.ARRAY_VERTEX] = verts
+	out[Mesh.ARRAY_NORMAL] = norms
+	out[Mesh.ARRAY_COLOR] = cols
+	out[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
+	am.surface_set_material(0, mat)
+	return am
+
+
+## Мини-танк: корпус на гусеницах, башня цвета команды, ствол. Перёд — -Z.
+func _tank_mesh(mat: Material) -> ArrayMesh:
+	var dark := Color(0.22, 0.22, 0.24, METAL)
+	var steel := Color(0.5, 0.5, 0.53, METAL)
+	var team := Color(1, 1, 1, PAINT)
+	var parts := [
+		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(-0.5, 0.16, 0), Vector3.ZERO, dark],     # гусеницы
+		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(0.5, 0.16, 0), Vector3.ZERO, dark],
+		[_pb(Vector3(0.8, 0.3, 1.15)), Vector3(0, 0.36, 0), Vector3.ZERO, steel],         # корпус
+		[_pb(Vector3(0.82, 0.06, 0.5)), Vector3(0, 0.53, 0.25), Vector3.ZERO, team],       # полоса
+		[_pc(0.28, 0.32, 0.24, 8), Vector3(0, 0.62, 0.05), Vector3.ZERO, team],           # башня
+		[_pc(0.05, 0.06, 0.7, 6), Vector3(0, 0.66, -0.42), Vector3(90, 0, 0), dark],      # ствол
+		[_pb(Vector3(0.12, 0.06, 0.05)), Vector3(0, 0.36, -0.6), Vector3.ZERO, Color(1.0, 0.85, 0.4, GLOW)],  # фара
+	]
+	return _merge(parts, mat)
+
+
+## Дрон-камикадзе: корпус цвета команды, крестовина с 4 винтами, глаз, заряд снизу. Центр — середина.
+func _drone_mesh(mat: Material) -> ArrayMesh:
+	var dark := Color(0.2, 0.2, 0.22, METAL)
+	var steel := Color(0.55, 0.55, 0.6, METAL)
+	var team := Color(1, 1, 1, PAINT)
+	var parts := [
+		[_ps(0.22), Vector3.ZERO, Vector3.ZERO, team],
+		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, 45, 0), steel],
+		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, -45, 0), steel],
+		[_pb(Vector3(0.1, 0.04, 0.06)), Vector3(0, 0.02, -0.2), Vector3.ZERO, Color(1.0, 0.25, 0.15, GLOW)],   # глаз
+		[_ps(0.1), Vector3(0, -0.2, 0), Vector3.ZERO, Color(1.0, 0.55, 0.15, GLOW)],                             # заряд
+	]
+	for sx in [-1.0, 1.0]:
+		for sz in [-1.0, 1.0]:
+			parts.append([_pc(0.17, 0.17, 0.03, 10), Vector3(sx * 0.35, 0.05, sz * 0.35), Vector3.ZERO, dark])
+	return _merge(parts, mat)
+
+
+## Боевой мех: ноги, корпус цвета команды, кабина с визором, пушки на руках. Перёд — -Z.
+func _mech_mesh(mat: Material) -> ArrayMesh:
+	var dark := Color(0.2, 0.2, 0.22, METAL)
+	var steel := Color(0.48, 0.48, 0.52, METAL)
+	var team := Color(1, 1, 1, PAINT)
+	var parts := [
+		[_pb(Vector3(1.1, 0.35, 0.6)), Vector3(0, 1.45, 0), Vector3.ZERO, steel],         # таз
+		[_pb(Vector3(1.4, 1.0, 0.95)), Vector3(0, 2.1, 0), Vector3.ZERO, team],           # корпус
+		[_pb(Vector3(0.65, 0.42, 0.55)), Vector3(0, 2.8, -0.1), Vector3.ZERO, steel],     # кабина
+		[_pb(Vector3(0.52, 0.12, 0.05)), Vector3(0, 2.82, -0.39), Vector3.ZERO, Color(1.0, 0.8, 0.3, GLOW)],  # визор
+		[_pb(Vector3(0.9, 0.12, 0.6)), Vector3(0, 2.66, 0.2), Vector3.ZERO, dark],         # ранец
+	]
+	for sx in [-1.0, 1.0]:
+		parts.append([_pb(Vector3(0.4, 1.3, 0.45)), Vector3(sx * 0.42, 0.75, 0), Vector3(-8, 0, 0), dark])   # ноги
+		parts.append([_pb(Vector3(0.55, 0.16, 0.8)), Vector3(sx * 0.42, 0.08, -0.08), Vector3.ZERO, steel])    # ступни
+		parts.append([_pb(Vector3(0.5, 0.25, 0.6)), Vector3(sx * 0.95, 2.55, 0), Vector3.ZERO, team])          # наплечники
+		parts.append([_pb(Vector3(0.32, 0.36, 1.1)), Vector3(sx * 0.95, 2.05, -0.25), Vector3.ZERO, steel])    # руки-пушки
+		parts.append([_pc(0.07, 0.08, 0.6, 6), Vector3(sx * 0.95, 2.05, -1.05), Vector3(90, 0, 0), dark])      # стволы
+		parts.append([_pb(Vector3(0.1, 0.1, 0.04)), Vector3(sx * 0.95, 2.05, -1.36), Vector3.ZERO,
+			Color(1.0, 0.5, 0.2, GLOW)])
+	return _merge(parts, mat)
 
 
 func _mat(color: Color, glow := false) -> Material:
@@ -3755,9 +3872,10 @@ func _update_units() -> void:
 	var can_lerp := prev_units.size() == cur_units.size()
 	var counts := [0, 0, 0]
 	var mms := [mm_units, mm_drones, mm_mechs]
-	var lifts := [0.25, 2.5, 1.3]   # дроны летают, мехи высокие
+	var lifts := [0.0, D.DRONE_ALT, 0.0]   # модели стоят на земле, дроны летают
 	var ns := 0
 	unit_pos.clear()
+	var seen_ids := {}
 	for i in n:
 		var j := i * stride
 		var p := Vector3(cur_units[j], cur_units[j + 1], cur_units[j + 2])
@@ -3767,14 +3885,29 @@ func _update_units() -> void:
 		var hpf := cur_units[j + 4]
 		var id := int(cur_units[j + 5])
 		var kind := clampi(int(cur_units[j + 6]), 0, 2)
+		seen_ids[id] = true
 		var up := p.normalized()
 		var mm: MultiMesh = mms[kind]
 		var c: int = counts[kind]
 		if c >= mm.instance_count:
 			continue
 		var col: Color = D.TEAM_COLORS[team]
-		mm.set_instance_transform(c, Transform3D(_up_basis(up), p + up * (float(lifts[kind]) - 0.25)))
-		mm.set_instance_color(c, col.darkened(0.6 * (1.0 - hpf)))
+		# куда смотрит: по ходу движения (между снапшотами), иначе — как раньше
+		var face: Vector3 = unit_face.get(id, Vector3.ZERO)
+		if can_lerp:
+			var mv := Vector3(cur_units[j], cur_units[j + 1], cur_units[j + 2]) \
+					- Vector3(prev_units[j], prev_units[j + 1], prev_units[j + 2])
+			mv -= up * mv.dot(up)
+			if mv.length() > 0.01:
+				face = mv.normalized()
+				unit_face[id] = face
+		var bas := _up_basis(up)
+		face -= up * face.dot(up)
+		if face.length() > 0.01:
+			var f := face.normalized()
+			bas = Basis(f.cross(up), up, -f)
+		mm.set_instance_transform(c, Transform3D(bas, p + up * (float(lifts[kind]) - 0.3)))
+		mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, hpf))
 		counts[kind] = c + 1
 		if team == my_team:
 			unit_pos[id] = p
@@ -3785,6 +3918,10 @@ func _update_units() -> void:
 	for k in 3:
 		mms[k].visible_instance_count = counts[k]
 	mm_sel.visible_instance_count = ns
+	if unit_face.size() > seen_ids.size() + 64:
+		for id in unit_face.keys():
+			if not seen_ids.has(id):
+				unit_face.erase(id)
 	# выделенные, которых больше нет, — забываем
 	for id in selected.keys():
 		if not unit_pos.has(id):
