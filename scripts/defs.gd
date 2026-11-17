@@ -300,6 +300,7 @@ const MODE_GUARD := 1
 const MODE_HOLD := 2
 const MODE_NAMES := ["агрессия", "охрана", "стоять"]
 
+const CELL_M := 1.9            # примерная ширина клетки, м (для дальностей «в клетках»)
 const TURRET_RANGE := 6 * CELL_M
 const TURRET_DMG := 7
 const TURRET_CD := 5           # тиков между выстрелами

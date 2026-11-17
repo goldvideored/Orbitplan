@@ -4082,9 +4082,9 @@ func _predict() -> Dictionary:
 						res.enc = j
 						res.enc_t = t - world_time
 						res["enc_pos"] = SkyCalc.planet_pos(j, t)
+						res.enc_idx = ine.size()
 					p_enc = SkyCalc.planet_pos(j, t)
 					ft_enc = SkyCalc.frame(j, t).transposed()
-						res.enc_idx = ine.size()
 					var f := SkyCalc.frame(j, t)
 					r = f * d
 					v = f * (v - SkyCalc.planet_vel(j, t))
