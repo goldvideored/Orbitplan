@@ -905,7 +905,7 @@ func _status(b: Dictionary) -> Array:
 		if sh == null:
 			return [ST_IDLE, "корабля нет — держи E: собрать разведчика или транспорт"]
 		var dv := _ship_dv(float(sh.fuel), int(sh.kind))
-		var st_txt := "в полёте" if sh.state == 1 else "на площадке"
+		var st_txt: String = "в полёте" if sh.state == 1 else "на площадке"
 		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
 			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
 	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
@@ -926,7 +926,7 @@ func _status(b: Dictionary) -> Array:
 		var ammo := int(b.get("ammo", 0))
 		for it in b.buf:
 			ammo += int(b.buf[it]) * D.AA_SHOTS_PER_ITEM
-		var boost := "  вода %d — стрельба ×2" % b.water if b.water > 0 else "  (подай воду — стрельба ×2)"
+		var boost: String = ("  вода %d — стрельба ×2" % b.water) if b.water > 0 else "  (подай воду — стрельба ×2)"
 		if creative or b.team == D.T_NEUTRAL:
 			return [ST_OK, "ПВО, боеприпасы бесконечны"]
 		if ammo <= 0:
@@ -1996,7 +1996,7 @@ func _aa_tick(b: Dictionary) -> void:
 	var tgt := _find_air_target(b.team, from, D.AA_RANGE, b.pn)
 	if tgt.is_empty():
 		return
-	var free_ammo := creative or b.team == D.T_NEUTRAL
+	var free_ammo: bool = creative or b.team == D.T_NEUTRAL
 	if not free_ammo and int(b.get("ammo", 0)) <= 0:
 		# заряжаем: уран в приоритете, иначе что есть
 		var it := D.I_NONE
@@ -3708,7 +3708,7 @@ func _update_flashlight() -> void:
 		RenderingServer.global_shader_parameter_set("flash_pos", player.cam.global_position)
 		RenderingServer.global_shader_parameter_set("flash_dir", player.look_dir())
 	# посадочный фонарь: сам включается у поверхности
-	var land := piloting != null and piloting.pn >= 0 and piloting.altitude() < D.LANDING_LIGHT_ALT
+	var land: bool = piloting != null and piloting.pn >= 0 and piloting.altitude() < D.LANDING_LIGHT_ALT
 	RenderingServer.global_shader_parameter_set("land_on", 1.0 if land else 0.0)
 	if piloting:
 		piloting.beam.visible = land
