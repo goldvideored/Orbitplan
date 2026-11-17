@@ -204,18 +204,39 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 		for t in 2:
 			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0,
 				"pn": D.TEAM_HOME[t], "main": true})
-		# нейтральная база на каждой луне: ядро + лазерные турели вокруг
+		# нейтральная база на каждой луне: ядро + готовая оборона
 		var site: int = planet.core_center[D.T_NEUTRAL]
-		var ring3: Array = []
-		var r := planet.rings(site, 3)
+		var rings_by := {}   # кольцо -> клетки
+		var r := planet.rings(site, 6)
 		for c in r:
-			if int(r[c]) == 3:
-				ring3.append(c)
+			var dist: int = r[c]
+			if not rings_by.has(dist):
+				rings_by[dist] = []
+			rings_by[dist].append(c)
 		for pn in D.PLANETS.size():
 			_add_building({"id": _new_id(), "type": D.CORE, "team": D.T_NEUTRAL, "cell": site, "dir": 0, "pn": pn})
-			for i in D.NEUTRAL_TURRETS:
-				var tc: int = ring3[int(i * ring3.size() / D.NEUTRAL_TURRETS)]
-				_add_building({"id": _new_id(), "type": D.TURRET, "team": D.T_NEUTRAL, "cell": tc, "dir": 0, "pn": pn})
+			_place_defense(D.TURRET, rings_by[3], D.NEUTRAL_LASERS, pn)
+			_place_defense(D.TURRET2, rings_by[6], D.NEUTRAL_GUNS, pn)
+
+
+## Расставить count турелей типа type равномерно по клеткам кольца (пропуская занятые места).
+func _place_defense(type: int, ring: Array, count: int, pn: int) -> void:
+	var n := ring.size()
+	if n == 0 or count <= 0:
+		return
+	for k in count:
+		# равные промежутки по кольцу; место занято — пробуем следующую клетку
+		var start := k * n / count
+		for t in n / count:
+			var cell: int = ring[(start + t) % n]
+			var foot := _footprint(type, cell, 0)
+			var ok := foot.size() == _size_of(type)
+			for c in foot:
+				if grid.has(_k(pn, c)) or planet.level[c] >= D.MAX_LEVEL:
+					ok = false
+			if ok:
+				_add_building({"id": _new_id(), "type": type, "team": D.T_NEUTRAL, "cell": cell, "dir": 0, "pn": pn})
+				break
 
 
 # =====================================================================
@@ -849,7 +870,12 @@ func _status(b: Dictionary) -> Array:
 		if b.cap_team >= 0:
 			return [ST_SLOW, "нейтральная база, захватывают %s: %d%%" % [D.TEAM_NAMES[b.cap_team],
 				int(100.0 * b.cap / D.CAPTURE_TICKS)]]
-		return [ST_IDLE, "нейтральная база — встань у ядра, чтобы захватить"]
+		var def_n := 0
+		for o in buildings.values():
+			if o.team == D.T_NEUTRAL and o.pn == b.pn and D.DEFENSE_TYPES.has(o.type) \
+					and _bpos(o).distance_to(_bpos(b)) < D.BASE_RADIUS:
+				def_n += 1
+		return [ST_IDLE, "нейтральная база, оборона: %d турелей — встань у ядра, чтобы захватить" % def_n]
 	if t == D.CORE:
 		var full := PackedStringArray()
 		var st: Dictionary = storage[b.team]
@@ -876,7 +902,7 @@ func _status(b: Dictionary) -> Array:
 			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
 	if t == D.TURRET2:
 		var cu := int(b.buf.get(D.I_COPPER, 0))
-		if not creative and cu <= 0 and int(b.get("ammo", 0)) <= 0:
+		if not creative and b.team != D.T_NEUTRAL and cu <= 0 and int(b.get("ammo", 0)) <= 0:
 			return [ST_STOP, "нет меди"]
 		return [ST_OK, "медь %d" % cu if not creative else "боеприпасы бесконечны"]
 	if t == D.TURRET3:
@@ -1737,7 +1763,7 @@ func _turret2_tick(b: Dictionary) -> void:
 	if b.timer > 0:
 		b.timer -= 1
 		return
-	if not creative and int(b.get("ammo", 0)) <= 0:
+	if not creative and b.team != D.T_NEUTRAL and int(b.get("ammo", 0)) <= 0:
 		if not _buf_take(b, D.I_COPPER, 1):
 			return
 		b["ammo"] = D.T2_SHOTS_PER_COPPER
@@ -1750,7 +1776,7 @@ func _turret2_tick(b: Dictionary) -> void:
 		return
 	b["aim"] = vel.normalized()
 	_spawn_proj(from, vel, b.team, 0, D.T2_DMG, 1.2, b.cell, b.pn)
-	if not creative:
+	if not creative and b.team != D.T_NEUTRAL:
 		b["ammo"] = int(b.ammo) - 1
 	b.timer = D.T2_CD
 
@@ -1762,7 +1788,7 @@ func _turret3_tick(b: Dictionary) -> void:
 		return
 	var has_u := int(b.buf.get(D.I_URANIUM, 0)) > 0
 	var has_pb := int(b.buf.get(D.I_LEAD, 0)) > 0
-	if not creative and not has_u and not has_pb:
+	if not creative and b.team != D.T_NEUTRAL and not has_u and not has_pb:
 		return
 	var from := _muzzle(b, 2.5)
 	var tgt := _find_target(b.team, from, D.T3_RANGE, true, b.pn)
@@ -2188,13 +2214,25 @@ func _damage_building(b: Dictionary, dmg: int) -> void:
 func _set_core_team(core: Dictionary, team: int) -> void:
 	var old: int = core.team
 	var ids := PackedInt32Array()
+	var gone: Array = []
 	var center := _bpos(core)
 	for b in buildings.values():
 		if b.pn != core.pn or b.team != old:
 			continue
 		if b.id == core.id or _bpos(b).distance_to(center) < D.BASE_RADIUS:
+			# нейтральная оборона при захвате исчезает, остальное переходит новому хозяину
+			if old == D.T_NEUTRAL and b.id != core.id and D.DEFENSE_TYPES.has(b.type):
+				gone.append(b)
+				continue
 			b.team = team
 			ids.append(b.id)
+	for b in gone:
+		var at := _bpos(b)
+		_destroy(b.id)
+		for p in Net.ready_peers:
+			fx_boom.rpc_id(p, at, 3.0, false, core.pn)
+		if not headless and core.pn == my_pn:
+			_boom(at, 3.0, false)
 	core.cap = 0
 	core.cap_team = -1
 	for r in rovers:
