@@ -40,7 +40,7 @@ const IND_H := {
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
-	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25,
+	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9,
 }
 
 var my_team := 0
@@ -56,7 +56,11 @@ var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate(), {}]   
 var power_stats := [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
 var base_count := [1, 1, D.PLANETS.size()]   # сколько ядер у каждой команды
 var cur_caps: Array = []
-var unit_stat: Array = []     # [[танки, дроны, мехи, лимит×3] по командам]      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
+var unit_stat: Array = []     # [[танки, дроны, мехи, лимит×3] по командам]
+var alert_last := {}          # сервер: когда последний раз тревожили «команда:луна»
+var alerts: Array = []        # клиент: [текст, до какого времени показывать]
+var alert_marks := {}         # клиент: луна -> до какого времени показывать ⚠ на карте
+var alert_labels: Array = []  # метки ⚠ у лун в виде системы      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
 var finished := false
 
 # --- только сервер ---
@@ -508,7 +512,11 @@ func server_remove(team: int, cell: int, pn: int) -> void:
 	_destroy(b.id)
 
 
-func _destroy(id: int) -> void:
+func _destroy(id: int, by_damage := false) -> void:
+	if by_damage and buildings.has(id):
+		var b: Dictionary = buildings[id]
+		_alert_team(int(b.team), "Постройка разрушена: %s — %s" % [D.NAMES[b.type], D.PLANETS[int(b.pn)].name],
+			int(b.pn), 1)
 	_remove_building(id)
 	for peer in Net.ready_peers:
 		ev_remove.rpc_id(peer, id)
@@ -900,6 +908,20 @@ func _status(b: Dictionary) -> Array:
 		var st_txt := "в полёте" if sh.state == 1 else "на площадке"
 		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
 			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
+	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
+		var what: String = D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"
+		if t == D.BRIDGE:
+			return [ST_OK, "%s, дальний мост: %s" % [what, "есть" if _bridge_target(b) != null else "нет — выдаёт вперёд"]]
+		return [ST_OK, what]
+	if t == D.POWER_POLE:
+		var root: int = power_root.get(b.id, b.id)
+		if power_has_gen.has(root):
+			return [ST_OK, "в сети с генератором"]
+		return [ST_IDLE, "нет генератора в сети — поставь столбы цепочкой до генератора"]
+	if t == D.WALL:
+		return [ST_OK, "забор"]
+	if t == D.REPAIR or t == D.UNIT_REPAIR:
+		return _power_state(b, "чинит %s в %d м" % ["постройки" if t == D.REPAIR else "юнитов", int(D.REPAIR_RADIUS)])
 	if t == D.AA_GUN:
 		var ammo := int(b.get("ammo", 0))
 		for it in b.buf:
@@ -1097,14 +1119,20 @@ func _rebuild_power() -> void:
 	power_dirty = false
 	var parent := {}
 	for b in buildings.values():
-		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type):
+		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type) or b.type == D.POWER_POLE:
 			parent[b.id] = b.id
+	# генераторы и энергостолбы связывают в одну сеть всё вокруг себя; столбы — цепочкой
 	for b in buildings.values():
-		if not D.GENERATORS.has(b.type):
+		var ring := 0
+		if D.GENERATORS.has(b.type):
+			ring = D.POWER_RING
+		elif b.type == D.POWER_POLE:
+			ring = D.POLE_RING
+		else:
 			continue
 		var covered := {}
 		for c in b.cells:
-			var r := planet.rings(c, D.POWER_RING)
+			var r := planet.rings(c, ring)
 			for x in r:
 				covered[x] = true
 		for x in covered:
@@ -1213,6 +1241,10 @@ func _sim_tick() -> void:
 			_turret3_tick(b)
 		elif t == D.AA_GUN:
 			_aa_tick(b)
+		elif t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
+			_logistic_tick(b)
+		elif t == D.REPAIR or t == D.UNIT_REPAIR:
+			_repair_tick(b, r)
 		elif t == D.UNLOADER:
 			_unloader_tick(b)
 		elif t == D.LAUNCH_PAD:
@@ -1379,6 +1411,10 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 		return
 	var sh: Dictionary = ships[id]
 	var now := Time.get_ticks_msec() / 1000.0
+	if pn >= 0 and int(sh.pn) != pn:
+		# корабль вошёл в атмосферу луны — тревога другой команде
+		_alert_team(1 - int(sh.team), "⚠ Вражеский %s вошёл в атмосферу: %s" % [
+			String(D.SHIP_KINDS[int(sh.kind)].name).to_lower(), D.PLANETS[pn].name], pn, 2)
 	var dt_rep := now - float(sh.get("rep_t", now))
 	if dt_rep > 0.01 and int(sh.pn) == pn:
 		sh["vel"] = (pos - Vector3(sh.pos)) / dt_rep
@@ -1544,6 +1580,8 @@ func _wants_power(b: Dictionary) -> bool:
 		return not b.blocked and b.water > 0
 	if D.RECIPES.has(t):
 		return b.cur != -1
+	if t == D.REPAIR or t == D.UNIT_REPAIR:
+		return true
 	return false
 
 
@@ -1688,6 +1726,21 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 	if o.team != team:
 		return false
 	var t: int = o.type
+	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
+		# берут и твёрдое, и воду — совмещены с трубами
+		if o.item != D.I_NONE:
+			return false
+		if t == D.BRIDGE and int(grid.get(_k(pn, _out_cell(o)), -1)) == src_id:
+			return false
+		if t == D.JUNCTION:
+			var jout := _junction_out(o, src_id, pn)
+			if jout < 0:
+				return false
+			o["jout"] = jout
+		o.item = item
+		o.prog = 0.0
+		o["src"] = src_id
+		return true
 	if t == D.CONVEYOR or t == D.PIPE:
 		# вода — только в трубы, всё твёрдое — только на конвейеры
 		if (item == D.I_WATER) != (t == D.PIPE):
@@ -1827,6 +1880,87 @@ func _turret3_tick(b: Dictionary) -> void:
 	b["aim"] = vel.normalized()
 	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell, b.pn)
 	b.timer = D.T3_CD
+
+
+# ---------------------------------------------------------------------
+# Разветвитель, перекрёсток, мост; ремонт
+# ---------------------------------------------------------------------
+
+func _logistic_tick(b: Dictionary) -> void:
+	if b.item == D.I_NONE:
+		return
+	var t: int = b.type
+	if t == D.SPLITTER:
+		# по кругу во все соседние клетки, кроме той постройки, откуда пришло
+		var nb: PackedInt32Array = planet.nbrs[b.cell]
+		var k := nb.size()
+		for i in k:
+			var idx: int = (b.rr + i) % k
+			if int(grid.get(_k(b.pn, nb[idx]), -1)) == int(b.get("src", -2)):
+				continue
+			if _push(nb[idx], b.id, b.team, b.item, b.pn):
+				b.rr = (idx + 1) % k
+				b.item = D.I_NONE
+				return
+	elif t == D.JUNCTION:
+		if _push(int(b.get("jout", -1)), b.id, b.team, b.item, b.pn):
+			b.item = D.I_NONE
+	elif t == D.BRIDGE:
+		var far = _bridge_target(b)
+		if far != null:
+			if far.item == D.I_NONE:
+				far.item = b.item
+				far.prog = 0.0
+				far["src"] = b.id
+				b.item = D.I_NONE
+		elif _push(_out_cell(b), b.id, b.team, b.item, b.pn):
+			b.item = D.I_NONE
+
+
+## Следующий свой мост по направлению моста (до BRIDGE_RANGE клеток).
+func _bridge_target(b: Dictionary):
+	var heading: Vector3 = planet.dirs[_out_cell(b)] - planet.dirs[b.cell]
+	var c: int = b.cell
+	for i in D.BRIDGE_RANGE:
+		c = planet._step(c, heading)
+		var id := int(grid.get(_k(b.pn, c), -1))
+		if id != -1 and id != b.id:
+			var o: Dictionary = buildings[id]
+			if o.type == D.BRIDGE and o.team == b.team:
+				return o
+	return null
+
+
+## Перекрёсток: куда выпустить груз — в клетку напротив той, откуда он пришёл.
+func _junction_out(o: Dictionary, src_id: int, pn: int) -> int:
+	var nb: PackedInt32Array = planet.nbrs[o.cell]
+	var k := nb.size()
+	for d in k:
+		if int(grid.get(_k(pn, nb[d]), -1)) == src_id:
+			return nb[(d + k / 2) % k]
+	return -1
+
+
+func _repair_tick(b: Dictionary, r: float) -> void:
+	if r <= 0.001:
+		return
+	var c := _bpos(b)
+	if b.type == D.REPAIR:
+		var rate := int(ceil(D.REPAIR_RATE * r))
+		for o in buildings.values():
+			if o.team != b.team or o.pn != b.pn or o.id == b.id:
+				continue
+			var mx: int = D.HP[o.type]
+			if o.hp < mx and _bpos(o).distance_to(c) < D.REPAIR_RADIUS:
+				o.hp = mini(mx, o.hp + rate)
+	else:
+		var rate := int(ceil(D.UNIT_REPAIR_RATE * r))
+		for u in units:
+			if u.team != b.team or u.pn != b.pn or u.hp <= 0:
+				continue
+			var mx: int = D.UNIT_STATS[u.kind].hp
+			if u.hp < mx and _upos(u).distance_to(c) < D.REPAIR_RADIUS:
+				u.hp = mini(mx, u.hp + rate)
 
 
 ## Ближайшая вражеская летающая цель: дрон или корабль в полёте. {pos, vel} или пустой словарь.
@@ -2340,6 +2474,7 @@ func _units_tick() -> void:
 
 
 ## Шаг юнита по поверхности к точке (останавливается на расстоянии reach).
+## Наземный юнит упирается во вражеский забор: тогда не идёт, а ломает его.
 func _unit_step(u: Dictionary, tpos: Vector3, speed: float, reach: float) -> void:
 	var ud: Vector3 = u.dir
 	var dist := _upos(u).distance_to(tpos)
@@ -2348,8 +2483,18 @@ func _unit_step(u: Dictionary, tpos: Vector3, speed: float, reach: float) -> voi
 	if tangent.length() > 0.00001:
 		var step: float = minf(speed, dist - reach + 0.01)
 		if step > 0.0:
-			u.dir = (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
-			u.cell = planet.walk(u.cell, u.dir)
+			var nd := (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
+			var nc := planet.walk(u.cell, nd)
+			if u.kind != D.U_DRONE and nc != u.cell:
+				var wid := int(grid.get(_k(u.pn, nc), -1))
+				if wid != -1 and buildings[wid].type == D.WALL and buildings[wid].team != u.team:
+					if u.cd == 0:
+						var st: Dictionary = D.UNIT_STATS[u.kind]
+						u.cd = maxi(int(st.cd), 3)
+						_damage_building(buildings[wid], maxi(int(st.dmg), 4))
+					return
+			u.dir = nd
+			u.cell = nc
 
 
 func _nearest_enemy_building(from: Vector3, team: int, pn: int):
@@ -2377,7 +2522,39 @@ func _damage_building(b: Dictionary, dmg: int) -> void:
 		else:
 			b.hp = 1
 	else:
-		_destroy(b.id)
+		_destroy(b.id, true)
+
+
+## Тревога игрокам команды (тревоги о разрушениях — не чаще раза в ALERT_COOLDOWN на луну).
+func _alert_team(team: int, text: String, pn: int, kind: int) -> void:
+	if team < 0 or team > 1:
+		return
+	if kind == 1:
+		var key := "%d:%d" % [team, pn]
+		var now := Time.get_ticks_msec() / 1000.0
+		if now - float(alert_last.get(key, -100.0)) < D.ALERT_COOLDOWN:
+			return
+		alert_last[key] = now
+	for p in Net.ready_peers:
+		if Net.team_of(p) == team:
+			ev_alert.rpc_id(p, text, pn, kind)
+	if not headless and my_team == team:
+		_on_alert(text, pn, kind)
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_alert(text: String, pn: int, kind: int) -> void:
+	_on_alert(text, pn, kind)
+
+
+## Показать тревогу: строка в HUD на 6 с и метка ⚠ у луны на карте на 30 с.
+func _on_alert(text: String, pn: int, kind: int) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	alerts.append([text, now + 6.0])
+	if alerts.size() > 4:
+		alerts.pop_front()
+	if pn >= 0:
+		alert_marks[pn] = now + 30.0
 
 
 ## Ядро сменило хозяина: постройки прежнего хозяина вокруг базы переходят вместе с ним.
@@ -2887,6 +3064,10 @@ func _build_space() -> void:
 		lbl.position = Vector3(0, D.PLANET_R * 1.6, 0)
 		node.add_child(lbl)
 		node.add_child(_circle_mesh(SkyCalc.soi(j), Color(0.5, 0.7, 1.0, 0.5)))
+		var warn := _marker_label("⚠ тревога", Color(1.0, 0.3, 0.2))
+		warn.position = Vector3(0, -D.PLANET_R * 1.6, 0)
+		node.add_child(warn)
+		alert_labels.append(warn)
 		space_root.add_child(node)
 		space_moons.append(node)
 		# орбита луны — лента её цвета
@@ -3130,9 +3311,9 @@ func _vis_add(b: Dictionary) -> void:
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
-		shape.size = Vector3(1.2, 1.3, 1.2)
+		shape.size = Vector3(1.6, 3.0, 1.6) if t == D.WALL else Vector3(1.2, 1.3, 1.2)
 		shape_node.shape = shape
-		shape_node.position.y = 0.65
+		shape_node.position.y = shape.size.y / 2.0
 		body.add_child(shape_node)
 		n.add_child(body)
 	local_root.add_child(root)
@@ -3260,6 +3441,36 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.9, 0.5, 0.22))   # короб с медными патронами
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
+	elif t == D.SPLITTER:
+		_cyl(n, 0.8, 0.14, Vector3(0, 0.07, 0), Color(0.32, 0.32, 0.35), 6)
+		for a in 3:
+			var arm := _box(n, Vector3(0.5, 0.1, 0.14), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
+			arm.rotation.y = TAU * a / 3.0
+			arm.position = Vector3(cos(arm.rotation.y), 0, -sin(arm.rotation.y)) * 0.3 + Vector3(0, 0.17, 0)
+	elif t == D.JUNCTION:
+		_cyl(n, 0.8, 0.14, Vector3(0, 0.07, 0), Color(0.32, 0.32, 0.35), 6)
+		_box(n, Vector3(1.2, 0.1, 0.18), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
+		_box(n, Vector3(0.18, 0.1, 1.2), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
+	elif t == D.BRIDGE:
+		_box(n, Vector3(0.2, 0.9, 0.9), Vector3(-0.35, 0.45, 0), Color(0.45, 0.45, 0.5))
+		_box(n, Vector3(1.0, 0.14, 0.9), Vector3(0.05, 0.95, 0), Color(0.35, 0.35, 0.4))
+		_box(n, Vector3(0.6, 0.1, 0.18), Vector3(0.2, 1.06, 0), col, true)
+	elif t == D.POWER_POLE:
+		_cyl(n, 0.08, 2.6, Vector3(0, 1.3, 0), Color(0.5, 0.45, 0.35))
+		_box(n, Vector3(0.9, 0.08, 0.08), Vector3(0, 2.4, 0), Color(0.5, 0.45, 0.35))
+		_box(n, Vector3(0.14, 0.14, 0.14), Vector3(0, 2.65, 0), Color(1.0, 0.85, 0.3), true)
+	elif t == D.REPAIR:
+		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78))
+		_box(n, Vector3(0.5, 0.14, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
+		_box(n, Vector3(0.14, 0.5, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
+	elif t == D.UNIT_REPAIR:
+		_cyl(n, 0.8, 0.2, Vector3(0, 0.1, 0), Color(0.35, 0.4, 0.45), 6)
+		_box(n, Vector3(0.15, 1.2, 0.15), Vector3(0.6, 0.6, 0), Color(0.6, 0.62, 0.66))
+		_box(n, Vector3(0.6, 0.12, 0.12), Vector3(0.35, 1.2, 0), Color(0.6, 0.62, 0.66))
+		_box(n, Vector3(0.2, 0.2, 0.2), Vector3(0.05, 1.1, 0), Color(0.3, 1.0, 0.4), true)
+	elif t == D.WALL:
+		_cyl(n, 0.85, 2.4, Vector3(0, 1.2, 0), Color(0.45, 0.45, 0.48), 6)
+		_cyl(n, 0.9, 0.12, Vector3(0, 2.46, 0), col.darkened(0.3), 6)
 	elif t == D.AA_GUN:
 		_box(n, Vector3(1.0, 0.45, 1.0), Vector3(0, 0.22, 0), col.darkened(0.35))
 		var pitch := _turret_head(n, Vector3(0, 0.62, 0), Vector3(0, 0.15, 0))
@@ -3462,8 +3673,10 @@ func _update_sky() -> void:
 		sun_node.global_position = cam_pos + sun_i * D.SUN_VIS_DIST
 		sun_node.visible = true
 		stars_node.basis = Basis.IDENTITY
+		var now := Time.get_ticks_msec() / 1000.0
 		for j in space_moons.size():
 			space_moons[j].position = SkyCalc.planet_pos(j, world_time)
+			alert_labels[j].visible = float(alert_marks.get(j, 0.0)) > now
 		return
 	var st := SkyCalc.state(world_time, my_pn)
 	sky_state = st
@@ -3521,11 +3734,12 @@ func _update_ghost() -> void:
 	var foot := _footprint(sel_type, hover_cell, hover_dir)
 	var pr: Array = planet.prism(foot, 0.35, 0.96, Color.WHITE, Color.WHITE)
 	ghost_foot.mesh = pr[0]
-	ghost_cover.visible = D.GENERATORS.has(sel_type)
+	ghost_cover.visible = D.GENERATORS.has(sel_type) or sel_type == D.POWER_POLE
 	if ghost_cover.visible:
 		var zone := {}
+		var ring: int = D.POLE_RING if sel_type == D.POWER_POLE else D.POWER_RING
 		for c in foot:
-			var r := planet.rings(c, D.POWER_RING)
+			var r := planet.rings(c, ring)
 			for x in r:
 				zone[x] = true
 		var cp: Array = planet.prism(zone.keys(), 0.08, 0.9, Color.WHITE, Color.WHITE)
@@ -4532,6 +4746,7 @@ func _update_hud() -> void:
 		lines.append("")
 		lines.append("")
 		lines.append("")
+		lines.append_array(_alert_lines())
 		lines.append("%s    Δv %d м/с    топливо %.1f / %d" % [String(D.SHIP_KINDS[sh.kind].name).to_upper(),
 			int(sh.dv()), sh.fuel, int(D.SHIP_KINDS[sh.kind].tank)])
 		for e in cur_ships:
@@ -4584,6 +4799,7 @@ func _update_hud() -> void:
 	if eclipse:
 		top += "    ЗАТМЕНИЕ"
 	lines.append(top)
+	lines.append_array(_alert_lines())
 	var cap_line := _capture_hint()
 	if cap_line != "":
 		lines.append(cap_line)
@@ -4633,6 +4849,19 @@ func _update_hud() -> void:
 			elif dep != D.I_NONE:
 				lines.append("Залежь: " + D.ITEM_NAMES[dep] + ("  (нужен Бур II+)" if D.RARE_ORES.has(dep) else ""))
 	hud.text = "\n".join(lines)
+
+
+## Строки активных тревог (упакованные массивы в GDScript передаются по значению — поэтому возвращаем).
+func _alert_lines() -> PackedStringArray:
+	var out := PackedStringArray()
+	var now := Time.get_ticks_msec() / 1000.0
+	var keep: Array = []
+	for a in alerts:
+		if float(a[1]) > now:
+			keep.append(a)
+			out.append("!!! " + String(a[0]))
+	alerts = keep
+	return out
 
 
 ## Подсказка про захват, если стоишь рядом с чужим ядром.
