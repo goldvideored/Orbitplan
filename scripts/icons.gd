@@ -6,8 +6,23 @@ extends RefCounted
 const D = preload("res://scripts/defs.gd")
 
 const COLS := 8   # значков в строке атласа
-const ROWS := 3
+const ROWS := 4
 const SIZE := 8
+
+# значки интерфейса (не предметы) — номера от 100, чтобы не пересекаться с предметами
+const UI_HEART := 100
+const UI_SUN := 101
+const UI_BOLT := 102
+const UI_CORE := 103
+const UI_TANK := 104
+const UI_DRONE := 105
+const UI_MECH := 106
+const UI_HULL := 107
+const UI_DV := 108
+const UI_ALT := 109
+const UI_SPEED := 110
+const UI_CLOCK := 111
+const UI_CARGO := 112
 
 const SHAPES := {
 	"ore": [
@@ -110,6 +125,126 @@ const SHAPES := {
 		"olbbbbdo",
 		".oooooo.",
 	],
+	"heart": [
+		"........",
+		".oo..oo.",
+		"olloobbo",
+		"olbbbbbo",
+		"obbbbbdo",
+		".obbbdo.",
+		"..obdo..",
+		"...oo...",
+	],
+	"sun": [
+		"s..s..s.",
+		".s.oo.s.",
+		"..olbo..",
+		"sollbbos",
+		"sobbbdos",
+		"..obdo..",
+		".s.oo.s.",
+		"s..s..s.",
+	],
+	"bolt": [
+		"....ooo.",
+		"...olo..",
+		"..olo...",
+		".ollooo.",
+		".oooblo.",
+		"...obo..",
+		"..obo...",
+		".ooo....",
+	],
+	"core": [
+		"..oooo..",
+		".olllbo.",
+		"olsllbdo",
+		"olllbbdo",
+		"obbbbbdo",
+		"obbbsddo",
+		".oddddo.",
+		"oooooooo",
+	],
+	"tank": [
+		"........",
+		"..ooo...",
+		".olbbooo",
+		"..obbo..",
+		"oooooooo",
+		"olllbbdo",
+		"osdsdsdo",
+		".oooooo.",
+	],
+	"drone": [
+		"oo....oo",
+		"ol.oo.lo",
+		".oolboo.",
+		"..obbo..",
+		"..osbo..",
+		".oobdoo.",
+		"ol....do",
+		"oo....oo",
+	],
+	"mech": [
+		"..oooo..",
+		"..olso..",
+		"oooooooo",
+		"olobbodo",
+		"o.obbo.o",
+		"..o..o..",
+		"..o..o..",
+		".oo..oo.",
+	],
+	"shield": [
+		"oooooooo",
+		"ollllbbo",
+		"olllbbbo",
+		"ollbbbdo",
+		".olbbdo.",
+		".obbbdo.",
+		"..obdo..",
+		"...oo...",
+	],
+	"rocket": [
+		"...oo...",
+		"..olbo..",
+		"..olbo..",
+		"..osbo..",
+		".ollbdo.",
+		"oolbbdoo",
+		"o.oooo.o",
+		"..s..s..",
+	],
+	"up": [
+		"...oo...",
+		"..olbo..",
+		".olbbdo.",
+		"oolbbdoo",
+		"..olbo..",
+		"..olbo..",
+		"..olbo..",
+		"..oooo..",
+	],
+	"speed": [
+		"o...o...",
+		"oo..oo..",
+		".lo..lo.",
+		"..lo..lo",
+		"..lo..lo",
+		".lo..lo.",
+		"oo..oo..",
+		"o...o...",
+	],
+	"clock": [
+		"..oooo..",
+		".olllbo.",
+		"olllsbbo",
+		"ollsbbbo",
+		"olllbbdo",
+		"olbbbbdo",
+		".obbddo.",
+		"..oooo..",
+	],
 }
 
 # предмет -> [шаблон, основной цвет, цвет вкраплений]
@@ -131,6 +266,19 @@ const ICONS := {
 	D.I_FUEL: ["canister", Color(0.6, 0.3, 0.8), Color(1.0, 0.7, 1.0)],
 	D.I_WATER: ["drop", Color(0.2, 0.5, 1.0), Color(0.7, 0.9, 1.0)],
 	D.I_CHIP: ["chip", Color(0.15, 0.5, 0.25), Color(0.95, 0.8, 0.3)],
+	UI_HEART: ["heart", Color(0.9, 0.2, 0.25), Color(1, 1, 1)],
+	UI_SUN: ["sun", Color(1.0, 0.85, 0.3), Color(1.0, 0.75, 0.2)],
+	UI_BOLT: ["bolt", Color(1.0, 0.85, 0.2), Color(1, 1, 1)],
+	UI_CORE: ["core", Color(0.55, 0.6, 0.7), Color(0.4, 0.9, 1.0)],
+	UI_TANK: ["tank", Color(0.7, 0.72, 0.75), Color(0.25, 0.25, 0.28)],
+	UI_DRONE: ["drone", Color(0.7, 0.72, 0.75), Color(1.0, 0.3, 0.2)],
+	UI_MECH: ["mech", Color(0.7, 0.72, 0.75), Color(1.0, 0.6, 0.2)],
+	UI_HULL: ["shield", Color(0.6, 0.65, 0.75), Color(1, 1, 1)],
+	UI_DV: ["rocket", Color(0.85, 0.85, 0.9), Color(1.0, 0.55, 0.2)],
+	UI_ALT: ["up", Color(0.4, 0.85, 0.45), Color(1, 1, 1)],
+	UI_SPEED: ["speed", Color(0.35, 0.8, 1.0), Color(1, 1, 1)],
+	UI_CLOCK: ["clock", Color(0.75, 0.75, 0.8), Color(0.2, 0.2, 0.25)],
+	UI_CARGO: ["cube", Color(0.75, 0.6, 0.35), Color(1, 1, 1)],
 }
 
 

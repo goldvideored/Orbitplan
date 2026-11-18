@@ -83,6 +83,9 @@ var next_ship_id := 1
 var next_rover_id := 1
 var power_root := {}    # id постройки -> id корня её энергосети
 var power_has_gen := {} # корень -> есть ли в сети генератор
+var building_set := {}  # id построек, которые сейчас строятся или сносятся
+var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
+var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
 
 # --- только клиент ---
 var bnodes := {}
@@ -99,7 +102,8 @@ var ghost_cover: MeshInstance3D   # зона питания генератора
 var ghost_key := ""
 var radial: RadialMenu
 var inspect_cell := NO_CELL
-var inspect_text := ""
+var inspect_info: Array = []   # постройка под прицелом: [тип, состояние, текст, прочность, прогресс, предметы, команда]
+var ui := {}                   # виджеты панели справа
 var inspect_acc := 0.0
 var help_panel: Control
 var state_acc := 0
@@ -166,7 +170,6 @@ var orbit_width := -1.0
 var pred := {}                 # прогноз траектории корабля
 var pred_acc := 0.0
 var mm_units: MultiMesh
-var hud: Label
 var big_msg: Label
 var crosshair: Label
 var prev_units := PackedFloat32Array()
@@ -437,6 +440,9 @@ func _add_building(d: Dictionary) -> void:
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
 		"ukind": int(d.get("ukind", D.U_TANK)), "lit": bool(d.get("lit", true)),
+		# стройка: bt — готовность 0..1, decon — идёт снос, by — кто строит/сносит (peer)
+		"bt": float(d.get("bt", 1.0)), "decon": bool(d.get("decon", false)), "by": int(d.get("by", 0)),
+		"refund_full": false,
 	}
 	var cells := _footprint(b.type, b.cell, b.dir)
 	b["cells"] = cells
@@ -459,8 +465,11 @@ func _add_building(d: Dictionary) -> void:
 	if is_server and b.type == D.LOADER:
 		_spawn_rover(b)
 	next_id = maxi(next_id, b.id + 1)
+	if _busy(b):
+		building_set[b.id] = true
 	if not headless and b.pn == my_pn:
 		_vis_add(b)
+		_refresh_links(b)
 
 
 func _remove_building(id: int) -> void:
@@ -478,11 +487,20 @@ func _remove_building(id: int) -> void:
 		bnodes.erase(id)
 	turret_nodes.erase(id)
 	turret_aim.erase(id)
+	building_set.erase(id)
+	asm_nodes.erase(id)
+	if not headless and b.pn == my_pn:
+		_refresh_links(b)
+
+
+## Постройка ещё строится или уже сносится — не работает.
+func _busy(b: Dictionary) -> bool:
+	return float(b.bt) < 1.0 or bool(b.decon)
 
 
 func _bdata(b: Dictionary) -> Dictionary:
 	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
-		"pn": b.pn, "main": b.main, "ukind": b.ukind, "lit": b.lit}
+		"pn": b.pn, "main": b.main, "ukind": b.ukind, "lit": b.lit, "bt": b.bt, "decon": b.decon, "by": b.by}
 
 
 # =====================================================================
@@ -499,7 +517,7 @@ func _in_reach(peer: int, cell: int, pn: int) -> bool:
 	return Vector3(pl.pos).distance_to(planet.top_pos(cell)) <= D.BUILD_REACH + 4.0
 
 
-func server_place(team: int, type: int, cell: int, dir: int, pn: int) -> void:
+func server_place(team: int, type: int, cell: int, dir: int, pn: int, peer := 0) -> void:
 	if not D.COST.has(type) or type == D.CORE:
 		return
 	var nb0: PackedInt32Array = planet.nbrs[cell]
@@ -512,23 +530,54 @@ func server_place(team: int, type: int, cell: int, dir: int, pn: int) -> void:
 		for it in cost:
 			st[it] = int(st.get(it, 0)) - int(cost[it])
 	var nb: PackedInt32Array = planet.nbrs[cell]
-	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size()), "pn": pn}
+	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size()), "pn": pn,
+		"bt": 0.0, "by": peer}
 	_add_building(d)
-	for peer in Net.ready_peers:
-		ev_add.rpc_id(peer, d)
+	for p in Net.ready_peers:
+		ev_add.rpc_id(p, d)
 
 
-func server_remove(team: int, cell: int, pn: int) -> void:
+## Снос не мгновенный: постройка разбирается столько же, сколько строилась, ресурсы — в конце.
+func server_remove(team: int, cell: int, pn: int, peer := 0) -> void:
 	if finished or not grid.has(_k(pn, cell)):
 		return
 	var b: Dictionary = buildings[grid[_k(pn, cell)]]
-	if b.team != team or b.type == D.CORE:
+	if b.team != team or b.type == D.CORE or b.decon:
 		return
-	var st: Dictionary = storage[team]
-	var cost: Dictionary = D.COST[b.type]
-	for it in cost:
-		st[it] = mini(int(st.get(it, 0)) + int(cost[it]) / 2, D.CORE_CAP)   # возврат половины, не выше лимита
-	_destroy(b.id)
+	b.refund_full = float(b.bt) < 1.0   # недостроенное — отмена стройки, вернём всё
+	b.decon = true
+	b.by = peer
+	building_set[b.id] = true
+	power_dirty = true
+	for p in Net.ready_peers:
+		ev_build.rpc_id(p, b.id, float(b.bt), true, peer)
+	if not headless:
+		_on_build_state(b)
+
+
+## Сервер: шаг стройки или сноса одной постройки.
+func _build_tick(b: Dictionary) -> void:
+	var step: float = D.TICK / D.build_time(int(b.type))
+	if b.decon:
+		b.bt = float(b.bt) - step
+		if b.bt <= 0.0:
+			var st: Dictionary = storage[int(b.team)]
+			var cost: Dictionary = D.COST[b.type]
+			if not creative and int(b.team) < 2:
+				for it in cost:
+					var back: int = int(cost[it]) if b.refund_full else int(cost[it]) / 2
+					st[it] = mini(int(st.get(it, 0)) + back, D.CORE_CAP)   # не выше лимита склада
+			_destroy(b.id)
+		return
+	b.bt = float(b.bt) + step
+	if b.bt >= 1.0:
+		b.bt = 1.0
+		building_set.erase(b.id)
+		power_dirty = true
+		for p in Net.ready_peers:
+			ev_build.rpc_id(p, b.id, 1.0, false, int(b.by))
+		if not headless:
+			_on_build_state(b)
 
 
 func _destroy(id: int, by_damage := false) -> void:
@@ -647,7 +696,7 @@ func req_place(type: int, cell: int, dir: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
 		if _in_reach(peer, cell, _peer_pn(peer)):
-			server_place(Net.team_of(peer), type, cell, dir, _peer_pn(peer))
+			server_place(Net.team_of(peer), type, cell, dir, _peer_pn(peer), peer)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -655,7 +704,7 @@ func req_remove(cell: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
 		if _in_reach(peer, cell, _peer_pn(peer)):
-			server_remove(Net.team_of(peer), cell, _peer_pn(peer))
+			server_remove(Net.team_of(peer), cell, _peer_pn(peer), peer)
 
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
@@ -680,6 +729,23 @@ func ev_remove(id: int) -> void:
 	_remove_building(id)
 
 
+## Началась/закончилась стройка или снос.
+@rpc("authority", "call_remote", "reliable")
+func ev_build(id: int, bt: float, decon: bool, by: int) -> void:
+	if not buildings.has(id):
+		return
+	var b: Dictionary = buildings[id]
+	b.bt = bt
+	b.decon = decon
+	b.by = by
+	if _busy(b):
+		building_set[id] = true
+	else:
+		building_set.erase(id)
+	power_dirty = true
+	_on_build_state(b)
+
+
 @rpc("authority", "call_remote", "reliable")
 func ev_team(ids: PackedInt32Array, team: int) -> void:
 	_apply_team(ids, team)
@@ -696,6 +762,7 @@ func _apply_team(ids: PackedInt32Array, team: int) -> void:
 			bnodes[id].queue_free()
 			bnodes.erase(id)
 			turret_nodes.erase(id)
+			asm_nodes.erase(id)
 			_vis_add(b)
 
 
@@ -911,30 +978,50 @@ func _apply_filter(id: int, item: int) -> void:
 func req_inspect(cell: int) -> void:
 	if multiplayer.is_server():
 		var peer := multiplayer.get_remote_sender_id()
-		inspect_reply.rpc_id(peer, cell, _inspect_text(cell, _peer_pn(peer)))
+		inspect_reply.rpc_id(peer, cell, _inspect_info(cell, _peer_pn(peer)))
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func inspect_reply(cell: int, text: String) -> void:
+func inspect_reply(cell: int, info: Array) -> void:
 	inspect_cell = cell
-	inspect_text = text
+	inspect_info = info
 
 
-## Одна строка о постройке под прицелом (считает сервер — у него внутренности машин).
-func _inspect_text(cell: int, pn: int) -> String:
+## Данные о постройке под прицелом (считает сервер — у него внутренности машин).
+func _inspect_info(cell: int, pn: int) -> Array:
 	if not grid.has(_k(pn, cell)):
-		return ""
+		return []
 	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	var st: Array = _status(b)
-	var txt := "%s — %s" % [D.NAMES[b.type], st[1]]
-	if b.hp < D.HP[b.type]:
-		txt += "   (прочность %d%%)" % int(100.0 * b.hp / D.HP[b.type])
-	return txt
+	var t: int = b.type
+	var prog := -1.0
+	if _busy(b):
+		prog = float(b.bt)
+	elif D.RECIPES.has(t) and int(b.cur) != -1:
+		prog = float(b.prog) / float(D.RECIPES[t][b.cur]["t"])
+	elif t == D.ASSEMBLER and int(b.timer) > 0:
+		prog = 1.0 - float(b.timer) / float(D.UNIT_STATS[b.ukind].build)
+	elif t == D.LAUNCH_PAD and int(b.timer) > 0:
+		prog = 1.0 - float(b.timer) / float(D.SHIP_KINDS[int(b.get("ship_kind", 0))].build)
+	var items := PackedInt32Array()
+	for it in b.buf:
+		if int(b.buf[it]) > 0:
+			items.append(int(it))
+			items.append(int(b.buf[it]))
+	if int(b.water) > 0 and not b.buf.has(D.I_WATER):
+		items.append(D.I_WATER)
+		items.append(int(b.water))
+	if b.item != D.I_NONE and items.is_empty():
+		items.append(int(b.item))
+		items.append(1)
+	return [t, int(st[0]), String(st[1]), float(b.hp) / float(D.HP[t]), prog, items, int(b.team)]
 
 
 ## [состояние ST_*, короткий текст]
 func _status(b: Dictionary) -> Array:
 	var t: int = b.type
+	if _busy(b):
+		return [ST_IDLE, ("снос %d%%" if b.decon else "стройка %d%%") % int(100.0 * float(b.bt))]
 	if D.POWER_USE.has(t) and not power_has_gen.has(power_root.get(b.id, b.id)):
 		return [ST_STOP, "нет энергии: рядом нет генератора"]
 	if t == D.CORE and b.team == D.T_NEUTRAL:
@@ -1184,10 +1271,14 @@ func _rebuild_power() -> void:
 	power_dirty = false
 	var parent := {}
 	for b in buildings.values():
+		if _busy(b):
+			continue
 		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type) or b.type == D.POWER_POLE:
 			parent[b.id] = b.id
 	# генераторы и энергостолбы связывают в одну сеть всё вокруг себя; столбы — цепочкой
 	for b in buildings.values():
+		if not parent.has(b.id):
+			continue
 		var ring := 0
 		if D.GENERATORS.has(b.type):
 			ring = D.POWER_RING
@@ -1240,6 +1331,8 @@ func _sim_tick() -> void:
 
 	# проход 1: генераторы и спрос на энергию
 	for b in list:
+		if _busy(b):
+			continue
 		var t: int = b.type
 		var team: int = b.team
 		var out := 0.0
@@ -1280,9 +1373,12 @@ func _sim_tick() -> void:
 	for team in 2:
 		power_stats[team] = [prod[team], demand[team]]
 
-	# проход 2: работа
+	# проход 2: работа (стройка и снос — вместо работы)
 	for b in list:
 		if not buildings.has(b.id):
+			continue
+		if _busy(b):
+			_build_tick(b)
 			continue
 		var t: int = b.type
 		var r := 1.0
@@ -1788,7 +1884,7 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 	if not grid.has(_k(pn, cell)):
 		return false
 	var o: Dictionary = buildings[grid[_k(pn, cell)]]
-	if o.team != team:
+	if o.team != team or _busy(o):
 		return false
 	var t: int = o.type
 	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
@@ -2728,6 +2824,7 @@ func _snap_data(pn: int) -> Dictionary:
 	var itt := PackedByteArray()
 	var aim_ids := PackedInt32Array()
 	var aim_dirs := PackedVector3Array()
+	var asm := PackedInt32Array()   # сборщики за работой: [id, тип юнита, готовность ×1000]...
 	for b in buildings.values():
 		if b.pn != pn:
 			continue
@@ -2740,6 +2837,11 @@ func _snap_data(pn: int) -> Dictionary:
 		if b.has("aim"):
 			aim_ids.append(b.id)
 			aim_dirs.append(b.aim)
+		if b.type == D.ASSEMBLER and int(b.timer) > 0:
+			var k: int = b.ukind
+			asm.append(b.id)
+			asm.append(k)
+			asm.append(int(1000.0 * (1.0 - float(b.timer) / float(D.UNIT_STATS[k].build))))
 	var pl: Array = []
 	for pid in players:
 		var o: Dictionary = players[pid]
@@ -2762,7 +2864,7 @@ func _snap_data(pn: int) -> Dictionary:
 		if b.type == D.CORE and b.pn == pn:
 			caps.append([b.id, b.team, b.cap_team, float(b.cap) / D.CAPTURE_TICKS, float(b.hp) / D.HP[D.CORE]])
 	return {"u": u, "it": it, "itt": itt, "pl": pl, "rv": rv, "pp": pp, "pv": pv, "pk": pk,
-		"aim_ids": aim_ids, "aim_dirs": aim_dirs, "caps": caps}
+		"aim_ids": aim_ids, "aim_dirs": aim_dirs, "caps": caps, "asm": asm}
 
 
 func _send_snapshot() -> void:
@@ -2792,6 +2894,7 @@ func _send_snapshot() -> void:
 		ships_snap.rpc_id(p, sv)
 		if not sd.aim_ids.is_empty():
 			turret_aims.rpc_id(p, sd.aim_ids, sd.aim_dirs)
+		asm_snap.rpc_id(p, sd.asm)
 	if not headless:
 		var sd: Dictionary = cache[my_pn] if cache.has(my_pn) else _snap_data(my_pn)
 		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv)
@@ -2800,6 +2903,18 @@ func _send_snapshot() -> void:
 		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
 		_apply_aims(sd.aim_ids, sd.aim_dirs)
+		_apply_asm(sd.asm)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func asm_snap(a: PackedInt32Array) -> void:
+	_apply_asm(a)
+
+
+func _apply_asm(a: PackedInt32Array) -> void:
+	asm_prog.clear()
+	for i in range(0, a.size() - 2, 3):
+		asm_prog[a[i]] = [float(a[i + 2]) / 1000.0, a[i + 1]]
 
 
 # =====================================================================
@@ -2993,13 +3108,7 @@ func _build_scene() -> void:
 	# интерфейс
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	hud = Label.new()
-	hud.position = Vector2(16, 12)
-	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hud.add_theme_font_size_override("font_size", 15)
-	hud.add_theme_constant_override("outline_size", 5)
-	hud.add_theme_color_override("font_outline_color", Color.BLACK)
-	layer.add_child(hud)
+	_build_panel(layer)
 
 	big_msg = Label.new()
 	big_msg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -3435,10 +3544,11 @@ func _vis_add(b: Dictionary) -> void:
 	var cells: Array = b.cells
 	var multi := cells.size() > 1
 	var base_h := CORE_H if t == D.CORE else 0.45
+	var mi: MeshInstance3D = null
 	if multi:
 		# основание — призмы точно по контуру клеток
 		var pr: Array = planet.prism(cells, base_h, 0.94, col.darkened(0.55), col.darkened(0.3))
-		var mi := MeshInstance3D.new()
+		mi = MeshInstance3D.new()
 		mi.mesh = pr[0]
 		mi.material_override = _vc_mat()
 		root.add_child(mi)
@@ -3487,12 +3597,12 @@ func _vis_add(b: Dictionary) -> void:
 		sp.visible = false
 		n.add_child(sp)
 		root.set_meta("filter_sprite", sp)
-	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим)
-	if not multi and t != D.CONVEYOR and t != D.PIPE:
+	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим; у забора — свои секции)
+	if not multi and t != D.CONVEYOR and t != D.PIPE and t != D.WALL:
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
-		shape.size = Vector3(1.6, 3.0, 1.6) if t == D.WALL else Vector3(1.2, 1.3, 1.2)
+		shape.size = Vector3(1.2, 2.8, 1.2) if t == D.POWER_POLE else Vector3(1.2, 1.3, 1.2)
 		shape_node.shape = shape
 		shape_node.position.y = shape.size.y / 2.0
 		body.add_child(shape_node)
@@ -3513,8 +3623,441 @@ func _vis_add(b: Dictionary) -> void:
 	else:
 		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
+	_vis_links(n, root, b)
+	root.set_meta("deco", n)
+	root.set_meta("deco_xf", n.transform)
+	root.set_meta("deco_h", _deco_height(n))
+	root.set_meta("anchor", planet.top_pos(b.cell))
+	if mi != null:
+		root.set_meta("prism", mi)
+	if _busy(b):
+		_apply_build_vis(b)
 	if b.filter != D.I_NONE:
 		_apply_filter(b.id, b.filter)
+
+
+# ---------------------------------------------------------------------
+# Соединения: конвейеры и трубы стыкуются с соседями, заборы — в сплошную стену, столбы — проводами
+# ---------------------------------------------------------------------
+
+const LINK_TYPES := [D.CONVEYOR, D.PIPE, D.WALL, D.POWER_POLE]
+
+
+## Направление на соседнюю клетку в локальных координатах декора (в плоскости клетки) и расстояние до неё.
+func _local_dir(n: Node3D, from_cell: int, to_cell: int) -> Array:
+	var w := planet.top_pos(to_cell) - planet.top_pos(from_cell)
+	var l := n.transform.basis.inverse() * w
+	l.y = 0.0
+	return [l.normalized(), w.length()]
+
+
+## Узел, повёрнутый так, что его +X смотрит вдоль v (v — в плоскости XZ).
+func _seg_node(n: Node3D, v: Vector3) -> Node3D:
+	var seg := Node3D.new()
+	seg.rotation.y = atan2(-v.z, v.x)
+	n.add_child(seg)
+	return seg
+
+
+func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
+	var t: int = b.type
+	if not LINK_TYPES.has(t):
+		return
+	var pn: int = b.pn
+	var cell: int = b.cell
+	var nb: PackedInt32Array = planet.nbrs[cell]
+	var col: Color = D.TEAM_COLORS[b.team]
+	if t == D.CONVEYOR or t == D.PIPE:
+		var out := _local_dir(n, cell, _out_cell(b))
+		var half: float = float(out[1]) * 0.5
+		var feeders: Array = []
+		for x in nb:
+			if x == _out_cell(b) or not grid.has(_k(pn, x)):
+				continue
+			var o: Dictionary = buildings[grid[_k(pn, x)]]
+			if o.type == t and _out_cell(o) == cell:
+				feeders.append(x)
+			elif o.type == D.SPLITTER or o.type == D.JUNCTION or o.type == D.BRIDGE:
+				feeders.append(x)
+		_belt_half(n, out[0], half, false, t == D.PIPE, col)
+		if feeders.is_empty():
+			_belt_half(n, -Vector3(out[0]), half, true, t == D.PIPE, col)   # начало ленты — прямой кусок
+		for x in feeders:
+			var fd := _local_dir(n, cell, x)
+			_belt_half(n, fd[0], float(fd[1]) * 0.5, true, t == D.PIPE, col)
+		if t == D.CONVEYOR:
+			# стык в центре: барабан-ролик под лентой и стрелка направления
+			_cyl(n, 0.36, 0.07, Vector3(0, 0.135, 0), Color(0.16, 0.16, 0.18), 8).material_override = \
+					_pmat(Color(0.2, 0.2, 0.22), 2)
+			var arrow := _seg_node(n, out[0])
+			for sgn in [1.0, -1.0]:
+				var wing := _box(arrow, Vector3(0.22, 0.03, 0.06), Vector3(0.14, 0.18, 0.06 * sgn), col, true)
+				wing.rotation = Vector3(0.0, 0.6 * sgn, 0.0)
+		else:
+			_box(n, Vector3(0.42, 0.42, 0.42), Vector3(0, 0.3, 0), Color(0.42, 0.45, 0.5)).material_override = \
+					_pmat(Color(0.42, 0.45, 0.5), 1)
+	elif t == D.WALL:
+		var stone := _pmat(Color(0.45, 0.45, 0.48), 1)
+		var post := _cyl(n, 0.45, 2.7, Vector3(0, 1.35, 0), Color(0.4, 0.4, 0.43), 6)
+		post.material_override = stone
+		_cyl(n, 0.5, 0.12, Vector3(0, 2.76, 0), col.darkened(0.3), 6)
+		var body := StaticBody3D.new()
+		n.add_child(body)
+		var pcs := CollisionShape3D.new()
+		var pshape := CylinderShape3D.new()
+		pshape.radius = 0.5
+		pshape.height = 3.0
+		pcs.shape = pshape
+		pcs.position.y = 1.5
+		body.add_child(pcs)
+		for x in nb:
+			if not grid.has(_k(pn, x)):
+				continue
+			var o: Dictionary = buildings[grid[_k(pn, x)]]
+			if o.type != D.WALL and not D.DEFENSE_TYPES.has(o.type):
+				continue
+			var ld := _local_dir(n, cell, x)
+			var hl: float = float(ld[1]) * 0.5 + 0.02
+			var seg := _seg_node(n, ld[0])
+			var panel := _box(seg, Vector3(hl, 2.2, 0.5), Vector3(hl * 0.5, 1.1, 0), Color(0.4, 0.4, 0.43))
+			panel.material_override = stone
+			_box(seg, Vector3(hl, 0.1, 0.56), Vector3(hl * 0.5, 2.25, 0), col.darkened(0.3))
+			var cs := CollisionShape3D.new()
+			var bs := BoxShape3D.new()
+			bs.size = Vector3(hl, 3.0, 0.6)
+			cs.shape = bs
+			cs.position = Vector3(hl * 0.5, 1.5, 0)
+			cs.rotation.y = seg.rotation.y
+			cs.position = seg.transform * cs.position
+			body.add_child(cs)
+	elif t == D.POWER_POLE:
+		var wood := Color(0.5, 0.45, 0.35)
+		_cyl(n, 0.08, 2.6, Vector3(0, 1.3, 0), wood)
+		_box(n, Vector3(0.9, 0.08, 0.08), Vector3(0, 2.4, 0), wood)
+		_box(n, Vector3(0.14, 0.14, 0.14), Vector3(0, 2.65, 0), Color(1.0, 0.85, 0.3), true)
+		# провода — к двум ближайшим столбам своей команды, поставленным раньше
+		var near: Array = []
+		var r := planet.rings(cell, D.POLE_RING)
+		for x in r:
+			if x == cell or not grid.has(_k(pn, x)):
+				continue
+			var o: Dictionary = buildings[grid[_k(pn, x)]]
+			if o.type == D.POWER_POLE and o.team == b.team and o.id < b.id:
+				near.append([int(r[x]), x])
+		near.sort_custom(func(a, c): return a[0] < c[0])
+		for i in mini(2, near.size()):
+			_wire(root, cell, int(near[i][1]))
+
+
+## Половина ленты/трубы: от центра клетки до края в сторону v. inward — груз едет к центру.
+func _belt_half(n: Node3D, v: Vector3, length: float, inward: bool, pipe: bool, col: Color) -> void:
+	var seg := _seg_node(n, -v if inward else v)   # +X узла — направление движения груза
+	var cx := -length * 0.5 if inward else length * 0.5
+	var ln := length + 0.04
+	if pipe:
+		var tube := _box(seg, Vector3(ln, 0.26, 0.26), Vector3(cx, 0.3, 0), Color(0.3, 0.38, 0.5))
+		tube.material_override = _pmat(Color(0.25, 0.4, 0.6), 3)
+		var fx := cx * 2.0 - 0.06 if not inward else cx * 2.0 + 0.06
+		_box(seg, Vector3(0.06, 0.34, 0.34), Vector3(fx, 0.3, 0), Color(0.45, 0.48, 0.52))   # фланец у края
+		_box(seg, Vector3(0.08, 0.3, 0.08), Vector3(cx, 0.12, 0), Color(0.35, 0.36, 0.4))      # опора
+		return
+	# резиновое полотно с бегущими поперечными полосами
+	_box(seg, Vector3(ln, 0.05, 0.6), Vector3(cx, 0.15, 0), Color.WHITE).material_override = \
+			_pmat(Color(0.2, 0.2, 0.22), 2)
+	# станина и борта
+	_box(seg, Vector3(ln, 0.1, 0.5), Vector3(cx, 0.06, 0), Color(0.3, 0.3, 0.33)).material_override = \
+			_pmat(Color(0.3, 0.3, 0.33), 1)
+	for sz in [-0.34, 0.34]:
+		_box(seg, Vector3(ln, 0.16, 0.07), Vector3(cx, 0.15, sz), Color(0.55, 0.55, 0.6)).material_override = \
+				_pmat(Color(0.58, 0.56, 0.5), 1)
+	# ролики на краях бортов и полоса цвета команды по борту
+	var ex := cx * 2.0
+	for sz in [-0.34, 0.34]:
+		_box(seg, Vector3(0.1, 0.1, 0.09), Vector3(ex, 0.08, sz), Color(0.25, 0.25, 0.27))
+		_box(seg, Vector3(ln * 0.6, 0.03, 0.075), Vector3(cx, 0.235, sz), col.darkened(0.2))
+
+
+## Провод между верхушками двух столбов, с провисанием.
+func _wire(root: Node3D, a_cell: int, b_cell: int) -> void:
+	var a := planet.top_pos(a_cell) + planet.dirs[a_cell] * 2.45
+	var c := planet.top_pos(b_cell) + planet.dirs[b_cell] * 2.45
+	var up := ((a + c) * 0.5).normalized()
+	var sag := a.distance_to(c) * 0.06
+	var pts: Array = []
+	for i in 7:
+		var k := i / 6.0
+		pts.append(a.lerp(c, k) - up * sag * 4.0 * k * (1.0 - k))
+	var m := _mat(Color(0.12, 0.12, 0.13))
+	for i in 6:
+		var p0: Vector3 = pts[i]
+		var p1: Vector3 = pts[i + 1]
+		var seg := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.04, 0.04, p0.distance_to(p1))
+		seg.mesh = bm
+		seg.material_override = m
+		var dir := (p1 - p0).normalized()
+		var side := up.cross(dir)
+		if side.length() < 0.01:
+			side = Vector3.RIGHT
+		side = side.normalized()
+		seg.transform = Transform3D(Basis(side, dir.cross(side), dir), (p0 + p1) * 0.5)
+		root.add_child(seg)
+
+
+## После стройки/сноса перерисовать соседей, чьё соединение могло измениться.
+func _refresh_links(b: Dictionary) -> void:
+	var pn: int = b.pn
+	var ids := {}
+	for c in b.cells:
+		var nb: PackedInt32Array = planet.nbrs[c]
+		for x in nb:
+			var id: int = grid.get(_k(pn, x), -1)
+			if id != -1 and id != b.id and LINK_TYPES.has(int(buildings[id].type)):
+				ids[id] = true
+	if b.type == D.POWER_POLE:
+		var r := planet.rings(b.cell, D.POLE_RING)
+		for x in r:
+			var id: int = grid.get(_k(pn, x), -1)
+			if id != -1 and id != b.id and int(buildings[id].type) == D.POWER_POLE:
+				ids[id] = true
+	for id in ids:
+		_revis(id)
+
+
+func _revis(id: int) -> void:
+	if not bnodes.has(id) or not buildings.has(id):
+		return
+	bnodes[id].queue_free()
+	bnodes.erase(id)
+	turret_nodes.erase(id)
+	asm_nodes.erase(id)
+	_vis_add(buildings[id])
+
+
+## Высота декора (по мешам) в его локальных координатах.
+func _deco_height(n: Node3D) -> float:
+	var h := 0.3
+	var stack: Array = [[n, Transform3D.IDENTITY]]
+	while not stack.is_empty():
+		var e: Array = stack.pop_back()
+		var node: Node = e[0]
+		var xf: Transform3D = e[1]
+		for ch in node.get_children():
+			if ch is Node3D:
+				var cxf: Transform3D = xf * (ch as Node3D).transform
+				if ch is MeshInstance3D and (ch as MeshInstance3D).mesh != null:
+					var bb: AABB = cxf * (ch as MeshInstance3D).mesh.get_aabb()
+					h = maxf(h, bb.end.y)
+				stack.append([ch, cxf])
+	return h
+
+
+# ---------------------------------------------------------------------
+# Анимация стройки и сноса: постройка растёт из земли внутри светящегося каркаса,
+# к ней тянется луч от строителя. Снос — то же самое в обратную сторону (оранжевым).
+# ---------------------------------------------------------------------
+
+func _glow_mat(col: Color, alpha: float) -> Material:
+	var key := "glow|%s|%s" % [col, alpha]
+	if mats.has(key):
+		return mats[key]
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.albedo_color = Color(col.r, col.g, col.b, alpha)
+	mats[key] = m
+	return m
+
+
+## Каркас стройки: стойки по углам, рамка сверху и сканирующая плита (meta "plate").
+func _make_cage(parent: Node3D, xf: Transform3D, w: float, h: float, col: Color) -> Node3D:
+	var cage := Node3D.new()
+	cage.transform = xf
+	parent.add_child(cage)
+	var edge := _glow_mat(col, 0.85)
+	for c in [Vector2(w, w), Vector2(-w, w), Vector2(w, -w), Vector2(-w, -w)]:
+		var post := _box(cage, Vector3(0.05, h, 0.05), Vector3(c.x, h * 0.5, c.y), col)
+		post.material_override = edge
+	for k in [Vector3(0, h, w), Vector3(0, h, -w), Vector3(0, 0.02, w), Vector3(0, 0.02, -w)]:
+		_box(cage, Vector3(w * 2.0, 0.05, 0.05), k, col).material_override = edge
+	for k in [Vector3(w, h, 0), Vector3(-w, h, 0), Vector3(w, 0.02, 0), Vector3(-w, 0.02, 0)]:
+		_box(cage, Vector3(0.05, 0.05, w * 2.0), k, col).material_override = edge
+	var plate := _box(cage, Vector3(w * 2.0, 0.04, w * 2.0), Vector3.ZERO, col)
+	plate.material_override = _glow_mat(col, 0.35)
+	cage.set_meta("plate", plate)
+	cage.set_meta("h", h)
+	return cage
+
+
+func _apply_build_vis(b: Dictionary) -> void:
+	var root: Node3D = bnodes.get(b.id)
+	if root == null or not root.has_meta("deco"):
+		return
+	var n: Node3D = root.get_meta("deco")
+	var xf: Transform3D = root.get_meta("deco_xf")
+	var busy := _busy(b)
+	var p := clampf(_shown_bt(b), 0.0, 1.0) if busy else 1.0
+	var ps := maxf(p, 0.03)
+	n.transform = Transform3D(xf.basis * Basis.from_scale(Vector3(1.0, ps, 1.0)), xf.origin)
+	if root.has_meta("prism"):
+		var pm: MeshInstance3D = root.get_meta("prism")
+		var a: Vector3 = root.get_meta("anchor")
+		var up := a.normalized()
+		var k := ps - 1.0
+		var bs := Basis(Vector3(1, 0, 0) + up * up.x * k, Vector3(0, 1, 0) + up * up.y * k,
+			Vector3(0, 0, 1) + up * up.z * k)
+		pm.transform = Transform3D(bs, a - bs * a)
+	var cage: Node3D = root.get_meta("cage") if root.has_meta("cage") else null
+	if not busy:
+		if cage != null:
+			cage.queue_free()
+			root.remove_meta("cage")
+		if root.has_meta("beam"):
+			(root.get_meta("beam") as Node3D).queue_free()
+			root.remove_meta("beam")
+		return
+	if cage == null:
+		var col: Color = Color(1.0, 0.55, 0.15) if b.decon else D.TEAM_COLORS[b.team].lightened(0.3)
+		cage = _make_cage(root, xf, 0.8, float(root.get_meta("deco_h")), col)
+		root.set_meta("cage", cage)
+	var plate: Node3D = cage.get_meta("plate")
+	plate.position.y = float(cage.get_meta("h")) * p
+	_update_beam(root, b, cage.transform * plate.position)
+
+
+## Готовность для показа: клиент досчитывает сам, на хосте — сглаживаем между тиками.
+func _shown_bt(b: Dictionary) -> float:
+	var bt := float(b.bt)
+	if is_server:
+		var step: float = (tick_acc / D.TICK) * D.TICK / D.build_time(int(b.type))
+		bt += -step if b.decon else step
+	return bt
+
+
+## Луч от руки строителя к сканирующей плите — мерцает, как сварка.
+func _update_beam(root: Node3D, b: Dictionary, target: Vector3) -> void:
+	var from = null
+	var by: int = b.by
+	if by != 0 and by == multiplayer.get_unique_id():
+		if player != null and not player.dead and piloting == null:
+			from = vm_hand.global_position if fps_mode and vm_hand != null else \
+					player.global_position + player.global_position.normalized() * 1.2
+	elif others.has(by):
+		var o: Node3D = others[by]
+		if o.visible:
+			from = o.global_position + o.global_position.normalized() * 1.2
+	var beam: MeshInstance3D = root.get_meta("beam") if root.has_meta("beam") else null
+	if from == null or Vector3(from).distance_to(target) > 40.0:
+		if beam != null:
+			beam.visible = false
+		return
+	if beam == null:
+		beam = MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.05, 0.05, 1.0)
+		beam.mesh = bm
+		var col: Color = Color(1.0, 0.55, 0.15) if b.decon else D.TEAM_COLORS[b.team].lightened(0.4)
+		beam.material_override = _glow_mat(col, 0.8)
+		root.add_child(beam)
+		root.set_meta("beam", beam)
+	var jitter := Vector3(randf_range(-0.3, 0.3), 0.0, randf_range(-0.3, 0.3))
+	var to := target + jitter
+	var f: Vector3 = from
+	var d := to - f
+	var dir := d.normalized()
+	var side := dir.cross(Vector3.UP)
+	if side.length() < 0.01:
+		side = dir.cross(Vector3.RIGHT)
+	side = side.normalized()
+	beam.visible = true
+	beam.transform = Transform3D(Basis(side, dir.cross(side), dir * d.length()), (f + to) * 0.5)
+
+
+## Стройка/снос начались или закончились — пересобрать каркас.
+func _on_build_state(b: Dictionary) -> void:
+	if headless or b.pn != my_pn or not bnodes.has(b.id):
+		return
+	var root: Node3D = bnodes[b.id]
+	if root.has_meta("cage"):
+		(root.get_meta("cage") as Node3D).queue_free()
+		root.remove_meta("cage")
+	if root.has_meta("beam"):
+		(root.get_meta("beam") as Node3D).queue_free()
+		root.remove_meta("beam")
+	_apply_build_vis(b)
+	lamp_acc = 1.0
+
+
+## Каждый кадр: идёт стройка/снос и сборка юнитов в сборщиках.
+func _update_construction(delta: float) -> void:
+	for id in building_set.keys():
+		if not buildings.has(id):
+			building_set.erase(id)
+			continue
+		var b: Dictionary = buildings[id]
+		if not is_server:
+			var step: float = delta / D.build_time(int(b.type))
+			if b.decon:
+				b.bt = maxf(float(b.bt) - step, 0.0)
+			else:
+				b.bt = minf(float(b.bt) + step, 0.999)   # готовность подтвердит сервер
+		if b.pn == my_pn:
+			_apply_build_vis(b)
+	_update_assembly()
+
+
+## Юнит собирается на крыше сборщика: растёт снизу вверх в каркасе.
+func _update_assembly() -> void:
+	for id in asm_nodes.keys():
+		var hv = asm_nodes[id]
+		if not is_instance_valid(hv):
+			asm_nodes.erase(id)
+		elif not asm_prog.has(id) or not bnodes.has(id):
+			(hv as Node3D).queue_free()
+			asm_nodes.erase(id)
+	var meshes := [mm_units.mesh, mm_drones.mesh, mm_mechs.mesh]
+	for id in asm_prog:
+		if not bnodes.has(id) or not buildings.has(id):
+			continue
+		var b: Dictionary = buildings[id]
+		var e: Array = asm_prog[id]
+		var p := clampf(float(e[0]), 0.0, 1.0)
+		var kind := clampi(int(e[1]), 0, 2)
+		var root: Node3D = bnodes[id]
+		var holder: Node3D = asm_nodes.get(id)
+		if holder != null and int(holder.get_meta("kind")) != kind:
+			holder.queue_free()
+			holder = null
+		if holder == null:
+			var xf: Transform3D = root.get_meta("deco_xf")
+			var top: Vector3 = xf.origin + xf.basis.y * float(root.get_meta("deco_h"))
+			holder = Node3D.new()
+			holder.transform = Transform3D(xf.basis.orthonormalized(), top)
+			holder.set_meta("kind", kind)
+			root.add_child(holder)
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.use_custom_data = true
+			mm.instance_count = 1
+			mm.mesh = meshes[kind]
+			var col: Color = D.TEAM_COLORS[b.team]
+			mm.set_instance_custom_data(0, Color(col.r, col.g, col.b, 1.0))
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			holder.add_child(mmi)
+			holder.set_meta("mm", mm)
+			var ch := 2.8 if kind == D.U_MECH else 1.1
+			var cw := 1.3 if kind == D.U_MECH else 0.7
+			var cage := _make_cage(holder, Transform3D.IDENTITY, cw, ch, D.TEAM_COLORS[b.team].lightened(0.3))
+			holder.set_meta("cage", cage)
+			asm_nodes[id] = holder
+		var mmh: MultiMesh = holder.get_meta("mm")
+		mmh.set_instance_transform(0, Transform3D(Basis.from_scale(Vector3(1.0, maxf(p, 0.03), 1.0)), Vector3.ZERO))
+		var cg: Node3D = holder.get_meta("cage")
+		var plate: Node3D = cg.get_meta("plate")
+		plate.position.y = float(cg.get_meta("h")) * p
 
 
 ## Поворотная часть турели: head крутится вокруг вертикали, pitch внутри неё поднимает ствол.
@@ -3535,14 +4078,8 @@ func _turret_head(n: Node3D, head_pos: Vector3, pitch_pos: Vector3) -> Node3D:
 func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	var dark := col.darkened(0.45)
 	var metal := Color(0.6, 0.6, 0.65)
-	if t == D.CONVEYOR:
-		_cyl(n, 0.85, 0.1, Vector3(0, 0.05, 0), Color(0.27, 0.27, 0.3), 6).material_override = \
-				_pmat(Color(0.3, 0.3, 0.33), 2)
-		_box(n, Vector3(0.8, 0.12, 0.22), Vector3(0.2, 0.12, 0), col, true)
-	elif t == D.PIPE:
-		_cyl(n, 0.6, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.35, 0.45), 6).material_override = \
-				_pmat(Color(0.25, 0.4, 0.6), 3)
-		_box(n, Vector3(0.8, 0.14, 0.2), Vector3(0.2, 0.14, 0), Color(0.25, 0.55, 1.0), true)
+	if t == D.CONVEYOR or t == D.PIPE or t == D.WALL or t == D.POWER_POLE:
+		pass   # форма зависит от соседей — строит _vis_links
 	elif t == D.DRILL:
 		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), dark)
 		_cyl(n, 0.28, 0.8, Vector3(0, 1.1, 0), Color(0.85, 0.6, 0.3))
@@ -3636,10 +4173,6 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(n, Vector3(0.2, 0.9, 0.9), Vector3(-0.35, 0.45, 0), Color(0.45, 0.45, 0.5))
 		_box(n, Vector3(1.0, 0.14, 0.9), Vector3(0.05, 0.95, 0), Color(0.35, 0.35, 0.4))
 		_box(n, Vector3(0.6, 0.1, 0.18), Vector3(0.2, 1.06, 0), col, true)
-	elif t == D.POWER_POLE:
-		_cyl(n, 0.08, 2.6, Vector3(0, 1.3, 0), Color(0.5, 0.45, 0.35))
-		_box(n, Vector3(0.9, 0.08, 0.08), Vector3(0, 2.4, 0), Color(0.5, 0.45, 0.35))
-		_box(n, Vector3(0.14, 0.14, 0.14), Vector3(0, 2.65, 0), Color(1.0, 0.85, 0.3), true)
 	elif t == D.REPAIR:
 		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78))
 		_box(n, Vector3(0.5, 0.14, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
@@ -3654,9 +4187,6 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_cyl(n, 0.28, 0.08, Vector3(0, 2.05, 0), Color(0.3, 0.3, 0.32))
 		var bulb := _box(n, Vector3(0.26, 0.2, 0.26), Vector3(0, 1.92, 0), Color(1.0, 0.85, 0.55), true)
 		n.set_meta("bulb", bulb)
-	elif t == D.WALL:
-		_cyl(n, 0.85, 2.4, Vector3(0, 1.2, 0), Color(0.45, 0.45, 0.48), 6)
-		_cyl(n, 0.9, 0.12, Vector3(0, 2.46, 0), col.darkened(0.3), 6)
 	elif t == D.AA_GUN:
 		_box(n, Vector3(1.0, 0.45, 1.0), Vector3(0, 0.22, 0), col.darkened(0.35))
 		var pitch := _turret_head(n, Vector3(0, 0.62, 0), Vector3(0, 0.15, 0))
@@ -3675,7 +4205,7 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(pitch, Vector3(0.08, 0.18, 0.18), Vector3(1.42, 0, 0), Color(1.0, 0.55, 0.2), true)
 		pitch.rotation_degrees = Vector3(0, 0, 25)   # пока цели нет — ствол приподнят
 	# метка команды — маленький огонёк, чтобы своё было видно ночью
-	if t != D.CONVEYOR and t != D.PIPE:
+	if t != D.CONVEYOR and t != D.PIPE and t != D.WALL:
 		_box(n, Vector3(0.15, 0.15, 0.15), Vector3(-0.5, 0.15, -0.5), col, true)
 
 
@@ -3798,6 +4328,7 @@ func _update_client(delta: float) -> void:
 	_update_proj(delta)
 	_update_ships(delta)
 	_update_turrets(delta)
+	_update_construction(delta)
 
 	# стрельба
 	fire_cd -= delta
@@ -3824,7 +4355,7 @@ func _update_client(delta: float) -> void:
 		inspect_acc = 0.0
 		if is_server:
 			inspect_cell = hover_cell
-			inspect_text = _inspect_text(hover_cell, my_pn)
+			inspect_info = _inspect_info(hover_cell, my_pn)
 		else:
 			req_inspect.rpc_id(1, hover_cell)
 	if drag_mode != 0 and hover_cell != NO_CELL and hover_cell != drag_last and alive:
@@ -4460,6 +4991,7 @@ func _switch_planet(pn: int) -> void:
 	bnodes.clear()
 	turret_nodes.clear()
 	turret_aim.clear()
+	asm_nodes.clear()
 	for dict in [others, rover_nodes, ship_nodes]:
 		for id in dict.keys():
 			dict[id].queue_free()
@@ -4475,7 +5007,7 @@ func _switch_planet(pn: int) -> void:
 	lamp_acc = 1.0
 	hover_seed = NO_CELL
 	inspect_cell = NO_CELL
-	inspect_text = ""
+	inspect_info = []
 	for b in buildings.values():
 		if b.pn == pn:
 			_vis_add(b)
@@ -4808,7 +5340,7 @@ func _update_lights() -> void:
 	if cam_now:
 		cam_p = cam_now.global_position
 	for b in buildings.values():
-		if b.pn != my_pn:
+		if b.pn != my_pn or _busy(b):
 			continue
 		var t: int = b.type
 		if t == D.LAMP:
@@ -4987,123 +5519,548 @@ func _tracer(a: Vector3, b: Vector3, col := Color(1.0, 0.85, 0.3)) -> void:
 	get_tree().create_timer(0.08).timeout.connect(mi.queue_free)
 
 
-func _update_hud() -> void:
-	if my_team < 0:
-		return
-	var lines := PackedStringArray()
-	if piloting:
-		var sh := piloting
-		var up := sh.global_position.normalized()
-		var orb := sh.orbit()
-		lines.append("")
-		lines.append("")
-		lines.append("")
-		lines.append("")
-		lines.append_array(_alert_lines())
-		lines.append("%s    Δv %d м/с    топливо %.1f / %d" % [String(D.SHIP_KINDS[sh.kind].name).to_upper(),
-			int(sh.dv()), sh.fuel, int(D.SHIP_KINDS[sh.kind].tank)])
-		for e in cur_ships:
-			if int(e[0]) == piloting_id and e.size() > 10 and float(e[10]) < 0.999:
-				lines.append("КОРПУС ПОВРЕЖДЁН: %d%%" % int(float(e[10]) * 100.0))
-		if sh.kind == 1:
-			var used := 0
-			for e in cur_ships:
-				if int(e[0]) == piloting_id and e.size() > 9:
-					used = int(e[9])
-			lines.append("Груз: %d / %d мест   (после посадки: L — забрать юнитов рядом, U — выгрузить)" % [
-				used, int(D.SHIP_KINDS[1].cargo)])
-		if sh.pn >= 0:
-			var soi_txt := "Сфера влияния: %s (граница %d м)" % [D.PLANETS[sh.pn].name, int(SkyCalc.soi(sh.pn))]
-			if float(pred.get("exit_t", -1.0)) >= 0.0:
-				soi_txt += ", выход через %d с" % int(pred.exit_t)
-			lines.append(soi_txt)
-		else:
-			lines.append("Открытый космос: орбита вокруг гиганта")
-		if int(pred.get("enc", -1)) != -1:
-			lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
-		elif bool(pred.get("impact", false)):
-			lines.append("Траектория пересекает поверхность")
-		lines.append("Высота %d м    скорость %d м/с    вертикальная %+d м/с" % [
-			int(sh.altitude()), int(sh.vel.length()), int(sh.vel.dot(up))])
-		if sh.landed:
-			lines.append("На поверхности")
-		elif orb.is_empty():
-			lines.append("Траектория: уход от " + ("луны" if sh.pn >= 0 else "гиганта"))
-		elif float(orb[1]) > 5.0:
-			lines.append("ОРБИТА: апоцентр %d м, перицентр %d м" % [int(orb[0]), int(orb[1])])
-		else:
-			lines.append("Суборбитальный полёт: апоцентр %d м (для орбиты подними перицентр выше 5 м)" % int(orb[0]))
-		lines.append("Нужно Δv: взлёт ~%d, перелёт к соседней луне ~%d, посадка ~%d м/с" % [
-			D.DV_LAUNCH, D.DV_TRANSFER, D.DV_LAND])
-		var oi := sh.orbit_info()
-		if not oi.is_empty():
-			lines.append("До апоцентра %d с    до перицентра %d с" % [int(oi.t_ap), int(oi.t_pe)])
-		lines.append("Shift/Ctrl — тяга, Z — полная, X — ноль   W/S A/D Q/E — повороты   1–7 — автопилот   M — карта")
-		lines.append("G — выйти (после посадки)   Backspace ×2 — самоуничтожение")
-		if map_mode != 0:
-			lines.append("КАРТА: %s   (M — дальше, колесо — масштаб)" % ["", "орбита вокруг луны", "звёздная система"][map_mode])
-		hud.text = "\n".join(lines)
-		return
-	var lvl := light_level_at(player.global_position) if player else 0
-	var pw: Array = power_stats[my_team]
-	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
-	var top := "%s    Здоровье %d    Свет %d/16    Энергия %d / %d" % [D.PLANETS[my_pn].name, my_hp, lvl, int(pw[0]), int(pw[1])]
-	top += "    Баз: %d (у врага %d)" % [int(base_count[my_team]), int(base_count[1 - my_team])]
-	if eclipse:
-		top += "    ЗАТМЕНИЕ"
-	lines.append(top)
-	lines.append_array(_alert_lines())
-	var cap_line := _capture_hint()
-	if cap_line != "":
-		lines.append(cap_line)
+# ---------------------------------------------------------------------
+# Интерфейс: панель справа — значки, полоски, цифры. Тревоги — сверху, подсказки — снизу.
+# ---------------------------------------------------------------------
 
-	# склад: только то, что есть
-	var st: Dictionary = storage[my_team]
-	var parts := PackedStringArray()
+func _icon_rect(id: int, px := 22) -> TextureRect:
+	var at := AtlasTexture.new()
+	at.atlas = icon_atlas
+	var c := Icons.cell_of(id)
+	at.region = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
+	var tr := TextureRect.new()
+	tr.texture = at
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.custom_minimum_size = Vector2(px, px)
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return tr
+
+
+func _set_icon(tr: TextureRect, id: int) -> void:
+	var c := Icons.cell_of(id)
+	(tr.texture as AtlasTexture).region = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
+
+
+func _ui_label(size := 13, col := Color(0.85, 0.87, 0.9)) -> Label:
+	var l := Label.new()
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", col)
+	l.add_theme_constant_override("outline_size", 4)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return l
+
+
+func _bar(col: Color, h := 10) -> ProgressBar:
+	var pb := ProgressBar.new()
+	pb.show_percentage = false
+	pb.min_value = 0.0
+	pb.max_value = 1.0
+	pb.step = 0.001
+	pb.custom_minimum_size = Vector2(40, h)
+	pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	pb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0, 0, 0, 0.6)
+	bg.border_color = Color(1, 1, 1, 0.12)
+	bg.set_border_width_all(1)
+	var fg := StyleBoxFlat.new()
+	fg.bg_color = col
+	pb.add_theme_stylebox_override("background", bg)
+	pb.add_theme_stylebox_override("fill", fg)
+	return pb
+
+
+func _bar_color(pb: ProgressBar, col: Color) -> void:
+	(pb.get_theme_stylebox("fill") as StyleBoxFlat).bg_color = col
+
+
+## Строка панели: [значок][полоска][число].
+func _ui_row(parent: Control, icon_id: int, col: Color) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var ic := _icon_rect(icon_id)
+	row.add_child(ic)
+	var bar := _bar(col)
+	row.add_child(bar)
+	var num := _ui_label(13)
+	num.custom_minimum_size.x = 70
+	num.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(num)
+	parent.add_child(row)
+	return {"row": row, "bar": bar, "num": num, "icon": ic}
+
+
+func _ui_section(parent: Control) -> VBoxContainer:
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 4)
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(v)
+	return v
+
+
+func _ui_sep(parent: Control) -> void:
+	var r := ColorRect.new()
+	r.color = Color(1, 1, 1, 0.12)
+	r.custom_minimum_size = Vector2(0, 1)
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	parent.add_child(r)
+
+
+func _build_panel(layer: CanvasLayer) -> void:
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.05, 0.06, 0.09, 0.72)
+	sb.border_color = Color(1, 1, 1, 0.1)
+	sb.set_border_width_all(1)
+	sb.set_corner_radius_all(4)
+	sb.set_content_margin_all(10)
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.anchor_left = 1.0
+	panel.anchor_right = 1.0
+	panel.offset_left = -290
+	panel.offset_right = -12
+	panel.offset_top = 12
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(panel)
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 6)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_child(root)
+	ui.panel = panel
+
+	# --- состояние: луна, здоровье, свет, энергия, базы
+	var top := _ui_section(root)
+	ui.top = top
+	ui.planet = _ui_label(15, Color(1, 1, 1))
+	top.add_child(ui.planet)
+	ui.hp = _ui_row(top, Icons.UI_HEART, Color(0.9, 0.2, 0.25))
+	var lrow := HBoxContainer.new()
+	lrow.add_theme_constant_override("separation", 6)
+	lrow.add_child(_icon_rect(Icons.UI_SUN))
+	var segs := HBoxContainer.new()
+	segs.add_theme_constant_override("separation", 2)
+	segs.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var seg_list: Array = []
+	for i in D.LIGHT_LEVELS:
+		var sq := ColorRect.new()
+		sq.custom_minimum_size = Vector2(9, 10)
+		sq.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		sq.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		segs.add_child(sq)
+		seg_list.append(sq)
+	lrow.add_child(segs)
+	var ln := _ui_label(13)
+	ln.custom_minimum_size = Vector2(40, 0)
+	ln.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	lrow.add_child(ln)
+	ui.light_num = ln
+	top.add_child(lrow)
+	ui.light = seg_list
+	ui.power = _ui_row(top, Icons.UI_BOLT, Color(1.0, 0.85, 0.2))
+	var brow := HBoxContainer.new()
+	brow.add_theme_constant_override("separation", 3)
+	brow.add_child(_icon_rect(Icons.UI_CORE))
+	var bases := HBoxContainer.new()
+	bases.add_theme_constant_override("separation", 3)
+	bases.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	brow.add_child(bases)
+	top.add_child(brow)
+	ui.bases = bases
+
+	# --- склад
+	_ui_sep(root)
+	var store := GridContainer.new()
+	store.columns = 3
+	store.add_theme_constant_override("h_separation", 8)
+	store.add_theme_constant_override("v_separation", 4)
+	store.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(store)
+	ui.store_box = store
+	var cells := {}
 	for it in D.CORE_ACCEPT:
+		var cell := HBoxContainer.new()
+		cell.add_theme_constant_override("separation", 3)
+		cell.custom_minimum_size.x = 82
+		cell.add_child(_icon_rect(it, 20))
+		var vb := VBoxContainer.new()
+		vb.add_theme_constant_override("separation", 1)
+		vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var num := _ui_label(12)
+		vb.add_child(num)
+		var bar := _bar(Color(0.6, 0.75, 0.9), 4)
+		vb.add_child(bar)
+		cell.add_child(vb)
+		store.add_child(cell)
+		cells[it] = {"box": cell, "num": num, "bar": bar}
+	ui.store = cells
+	var cr := _ui_label(13, Color(1.0, 0.85, 0.3))
+	cr.text = "КРЕАТИВ ∞"
+	root.add_child(cr)
+	ui.creative = cr
+
+	# --- юниты: количество / лимит
+	_ui_sep(root)
+	var us := _ui_section(root)
+	ui.units_box = us
+	ui.units = [_ui_row(us, Icons.UI_TANK, Color(0.55, 0.8, 0.6)), _ui_row(us, Icons.UI_DRONE, Color(0.55, 0.8, 0.6)),
+		_ui_row(us, Icons.UI_MECH, Color(0.55, 0.8, 0.6))]
+
+	# --- в руках: название и цена (значки ресурсов, красным — не хватает)
+	_ui_sep(root)
+	var held := _ui_section(root)
+	ui.held_box = held
+	ui.held_name = _ui_label(15, Color(1, 1, 1))
+	held.add_child(ui.held_name)
+	var cost := HBoxContainer.new()
+	cost.add_theme_constant_override("separation", 8)
+	held.add_child(cost)
+	ui.held_cost = cost
+	ui.held_key = -2
+
+	# --- под прицелом
+	var insp := _ui_section(root)
+	ui.insp = insp
+	_ui_sep(insp)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 6)
+	var dot := ColorRect.new()
+	dot.custom_minimum_size = Vector2(12, 12)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	head.add_child(dot)
+	ui.insp_dot = dot
+	ui.insp_name = _ui_label(15, Color(1, 1, 1))
+	head.add_child(ui.insp_name)
+	insp.add_child(head)
+	ui.insp_hp = _ui_row(insp, Icons.UI_HEART, Color(0.9, 0.2, 0.25))
+	ui.insp_prog = _ui_row(insp, Icons.UI_CLOCK, Color(0.3, 0.9, 0.4))
+	var items := HFlowContainer.new()
+	items.add_theme_constant_override("h_separation", 8)
+	insp.add_child(items)
+	ui.insp_items = items
+	ui.insp_key = ""
+	var itx := _ui_label(12, Color(0.7, 0.72, 0.76))
+	itx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	itx.custom_minimum_size = Vector2(250, 0)
+	insp.add_child(itx)
+	ui.insp_text = itx
+	var ore := HBoxContainer.new()
+	ore.add_theme_constant_override("separation", 6)
+	ui.ore_icon = _icon_rect(D.I_COAL_ORE)
+	ore.add_child(ui.ore_icon)
+	ui.ore_text = _ui_label(13)
+	ore.add_child(ui.ore_text)
+	root.add_child(ore)
+	ui.ore = ore
+
+	# --- корабль
+	var ship := _ui_section(root)
+	ui.ship = ship
+	ui.ship_name = _ui_label(15, Color(1, 1, 1))
+	ship.add_child(ui.ship_name)
+	ui.s_fuel = _ui_row(ship, D.I_FUEL, Color(0.75, 0.4, 0.95))
+	ui.s_dv = _ui_row(ship, Icons.UI_DV, Color(1.0, 0.6, 0.25))
+	ui.s_hull = _ui_row(ship, Icons.UI_HULL, Color(0.6, 0.7, 0.85))
+	ui.s_cargo = _ui_row(ship, Icons.UI_CARGO, Color(0.8, 0.65, 0.35))
+	_ui_sep(ship)
+	ui.s_alt = _ui_row(ship, Icons.UI_ALT, Color(0.4, 0.85, 0.45))
+	ui.s_speed = _ui_row(ship, Icons.UI_SPEED, Color(0.35, 0.8, 1.0))
+	ui.s_ap = _ui_row(ship, Icons.UI_CLOCK, Color(0.45, 0.6, 1.0))
+	ui.s_pe = _ui_row(ship, Icons.UI_CLOCK, Color(1.0, 0.75, 0.3))
+	var stx := _ui_label(12, Color(0.75, 0.78, 0.82))
+	stx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	stx.custom_minimum_size = Vector2(250, 0)
+	ship.add_child(stx)
+	ui.s_text = stx
+
+	# --- сверху по центру: тревоги и захват
+	var topc := VBoxContainer.new()
+	topc.anchor_left = 0.5
+	topc.anchor_right = 0.5
+	topc.offset_left = -260
+	topc.offset_right = 260
+	topc.offset_top = 56
+	topc.alignment = BoxContainer.ALIGNMENT_BEGIN
+	topc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(topc)
+	ui.alerts = _ui_label(16, Color(1.0, 0.35, 0.3))
+	ui.alerts.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	topc.add_child(ui.alerts)
+	var cap := VBoxContainer.new()
+	ui.cap_text = _ui_label(14, Color(1, 1, 1))
+	ui.cap_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	cap.add_child(ui.cap_text)
+	ui.cap_bar = _bar(Color(1.0, 0.85, 0.2), 12)
+	cap.add_child(ui.cap_bar)
+	topc.add_child(cap)
+	ui.cap = cap
+
+	# --- снизу по центру: подсказка, что можно сделать сейчас
+	var hint := _ui_label(15, Color(1, 1, 1))
+	hint.anchor_left = 0.0
+	hint.anchor_right = 1.0
+	hint.anchor_top = 1.0
+	hint.anchor_bottom = 1.0
+	hint.offset_top = -64
+	hint.offset_bottom = -36
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	layer.add_child(hint)
+	ui.hint = hint
+
+
+func _set_row(r: Dictionary, frac: float, txt: String) -> void:
+	(r.bar as ProgressBar).value = clampf(frac, 0.0, 1.0)
+	(r.num as Label).text = txt
+
+
+func _update_hud() -> void:
+	if my_team < 0 or ui.is_empty():
+		return
+	var alert_txt := "\n".join(_alert_lines())
+	ui.alerts.text = alert_txt
+	ui.alerts.visible = alert_txt != ""
+	var flying := piloting != null
+	for k in ["top", "store_box", "units_box", "held_box"]:
+		(ui[k] as Control).visible = not flying
+	ui.ship.visible = flying
+	ui.creative.visible = creative and not flying
+	var hints := PackedStringArray()
+	if flying:
+		ui.insp.visible = false
+		ui.ore.visible = false
+		ui.cap.visible = false
+		_update_ship_panel()
+		if map_mode != 0:
+			hints.append("КАРТА: %s   M — дальше, колесо — масштаб" % ["", "орбита вокруг луны", "звёздная система"][map_mode])
+		ui.hint.text = "\n".join(hints)
+		return
+
+	# состояние
+	var lvl := light_level_at(player.global_position) if player else 0
+	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
+	ui.planet.text = String(D.PLANETS[my_pn].name) + ("   · затмение" if eclipse else "")
+	_set_row(ui.hp, float(my_hp) / float(D.PLAYER_HP), str(my_hp))
+	for i in D.LIGHT_LEVELS:
+		var sq: ColorRect = ui.light[i]
+		sq.color = Color(1.0, 0.85, 0.3).lerp(Color(1, 1, 0.9), float(i) / 16.0) if i < lvl else Color(1, 1, 1, 0.1)
+	ui.light_num.text = "%d" % lvl
+	var pw: Array = power_stats[my_team]
+	var prod := float(pw[0])
+	var dem := float(pw[1])
+	_set_row(ui.power, 1.0 if dem <= 0.0 else prod / dem, "%d / %d" % [int(prod), int(dem)])
+	_bar_color(ui.power.bar, Color(1.0, 0.85, 0.2) if prod >= dem else Color(1.0, 0.35, 0.2))
+	# базы: квадратики своего цвета, затем врага
+	var want := int(base_count[my_team]) + int(base_count[1 - my_team])
+	var box: HBoxContainer = ui.bases
+	if box.get_child_count() != want or box.get_meta("mine", -1) != int(base_count[my_team]):
+		for ch in box.get_children():
+			ch.queue_free()
+		for i in want:
+			var sq := ColorRect.new()
+			sq.custom_minimum_size = Vector2(14, 14)
+			sq.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			sq.color = D.TEAM_COLORS[my_team] if i < int(base_count[my_team]) else D.TEAM_COLORS[1 - my_team].darkened(0.2)
+			box.add_child(sq)
+		box.set_meta("mine", int(base_count[my_team]))
+
+	# склад
+	var st: Dictionary = storage[my_team]
+	for it in ui.store:
+		var c: Dictionary = ui.store[it]
 		var n := int(st.get(it, 0))
-		if n > 0:
-			parts.append("%s %d/%d" % [D.ITEM_NAMES[it], n, D.CORE_CAP])
-	if creative:
-		lines.append("КРЕАТИВ — ресурсы и боеприпасы бесконечны")
-	else:
-		lines.append("   ".join(parts) if not parts.is_empty() else "Склад пуст")
+		(c.box as Control).modulate = Color(1, 1, 1, 1.0 if n > 0 or creative else 0.35)
+		(c.num as Label).text = "∞" if creative else str(n)
+		(c.bar as ProgressBar).value = 1.0 if creative else float(n) / float(D.CORE_CAP)
+		_bar_color(c.bar, Color(1.0, 0.45, 0.25) if n >= D.CORE_CAP else Color(0.6, 0.75, 0.9))
 
-	lines.append("В руках: " + ("Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])))
+	# юниты
 	if unit_stat.size() > my_team:
-		var us: Array = unit_stat[my_team]
-		lines.append("Юниты: танки %d/%d   дроны %d/%d   мехи %d/%d" % [int(us[0]), int(us[3]), int(us[1]), int(us[4]),
-			int(us[2]), int(us[5])])
-	if not fps_mode:
-		if selected.is_empty():
-			lines.append("Ctrl + рамка — выделить юнитов   (строить с карты нельзя — Tab, вернуться к себе)")
-		else:
-			lines.append("Выбрано: %d   1 — агрессия   2 — охрана   3 — стоять   ПКМ — точка охраны" % selected.size())
-	if _near_ship() != -1:
-		lines.append("E — сесть в корабль")
+		var u: Array = unit_stat[my_team]
+		for k in 3:
+			var lim := maxi(int(u[k + 3]), 1)
+			_set_row(ui.units[k], float(u[k]) / float(lim), "%d / %d" % [int(u[k]), int(u[k + 3])])
 
-	# под прицелом — одна строка
+	# в руках
+	if ui.held_key != sel_type:
+		ui.held_key = sel_type
+		ui.held_name.text = "Бластер" if sel_type == D.WEAPON else String(D.NAMES[sel_type])
+		for ch in (ui.held_cost as Control).get_children():
+			ch.queue_free()
+		if sel_type != D.WEAPON:
+			var cost: Dictionary = D.COST[sel_type]
+			for it in cost:
+				var hb := HBoxContainer.new()
+				hb.add_theme_constant_override("separation", 2)
+				hb.add_child(_icon_rect(it, 18))
+				var l := _ui_label(13)
+				l.text = str(cost[it])
+				l.set_meta("item", it)
+				l.set_meta("need", int(cost[it]))
+				hb.add_child(l)
+				(ui.held_cost as Control).add_child(hb)
+	for hb in (ui.held_cost as Control).get_children():
+		if hb.get_child_count() < 2:
+			continue
+		var l: Label = hb.get_child(1)
+		var ok := creative or int(st.get(int(l.get_meta("item")), 0)) >= int(l.get_meta("need"))
+		l.add_theme_color_override("font_color", Color(0.85, 0.87, 0.9) if ok else Color(1.0, 0.3, 0.25))
+
+	# захват
+	var cap_line := _capture_hint()
+	ui.cap.visible = cap_line != ""
+	ui.cap_text.text = cap_line
+	ui.cap_bar.visible = cap_frac >= 0.0
+	ui.cap_bar.value = maxf(cap_frac, 0.0)
+
+	# под прицелом
+	var show_insp := false
+	ui.ore.visible = false
 	if hover_cell != NO_CELL:
 		if grid.has(_k(my_pn, hover_cell)):
-			if inspect_text != "" and int(grid.get(_k(my_pn, inspect_cell), -1)) == int(grid[_k(my_pn, hover_cell)]):
-				lines.append(inspect_text)
+			var b: Dictionary = buildings[grid[_k(my_pn, hover_cell)]]
+			show_insp = true
+			var info: Array = inspect_info if inspect_info.size() >= 7 \
+					and int(grid.get(_k(my_pn, inspect_cell), -1)) == int(b.id) else []
+			_fill_inspect(b, info)
 			if _hover_own(D.UNLOADER):
-				lines.append("E (держать) — выбрать груз")
+				hints.append("E (держать) — выбрать груз")
 			if _hover_own(D.LAUNCH_PAD):
-				lines.append("E (держать) — собрать корабль")
+				hints.append("E (держать) — собрать корабль")
 			if _hover_own(D.ASSEMBLER):
-				lines.append("E (держать) — выбрать юнита")
+				hints.append("E (держать) — выбрать юнита")
 			if _hover_own(D.LAMP):
-				lines.append("E — вкл/выкл лампу, Shift+E — все свои лампы на луне")
+				hints.append("E — вкл/выкл лампу,  Shift+E — все свои лампы на луне")
 		else:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
-				lines.append("Скалы — строить нельзя")
+				ui.ore.visible = true
+				ui.ore_icon.visible = false
+				ui.ore_text.text = "Скалы — строить нельзя"
 			elif _arc(hover_cell, planet.core_center[1 - my_team]) < D.ENEMY_ZONE:
-				lines.append("Зона вражеского ядра — строить нельзя")
+				ui.ore.visible = true
+				ui.ore_icon.visible = false
+				ui.ore_text.text = "Зона вражеского ядра"
 			elif dep != D.I_NONE:
-				lines.append("Залежь: " + D.ITEM_NAMES[dep] + ("  (нужен Бур II+)" if D.RARE_ORES.has(dep) else ""))
-	hud.text = "\n".join(lines)
+				ui.ore.visible = true
+				ui.ore_icon.visible = true
+				_set_icon(ui.ore_icon, dep)
+				ui.ore_text.text = String(D.ITEM_NAMES[dep]) + ("  · Бур II+" if D.RARE_ORES.has(dep) else "")
+	ui.insp.visible = show_insp
+
+	if not fps_mode:
+		if selected.is_empty():
+			hints.append("Ctrl + рамка — выделить юнитов   ·   строить с карты нельзя")
+		else:
+			hints.append("Выбрано %d:  1 агрессия · 2 охрана · 3 стоять · ПКМ — точка охраны" % selected.size())
+	if _near_ship() != -1:
+		hints.append("E — сесть в корабль")
+	ui.hint.text = "\n".join(hints)
+
+
+## Карточка постройки под прицелом. info от сервера может опаздывать — тогда только то, что знаем сами.
+func _fill_inspect(b: Dictionary, info: Array) -> void:
+	var t: int = b.type
+	ui.insp_name.text = String(D.NAMES[t])
+	var state := ST_IDLE
+	var txt := ""
+	var hp := 1.0
+	var prog := -1.0
+	var items := PackedInt32Array()
+	if not info.is_empty():
+		state = int(info[1])
+		txt = String(info[2])
+		hp = float(info[3])
+		prog = float(info[4])
+		items = info[5]
+	if _busy(b):
+		prog = clampf(_shown_bt(b), 0.0, 1.0)
+	(ui.insp_dot as ColorRect).color = STATE_COLORS[clampi(state, 0, 3)]
+	ui.insp_name.add_theme_color_override("font_color", D.TEAM_COLORS[b.team].lightened(0.4))
+	_set_row(ui.insp_hp, hp, "%d%%" % int(hp * 100.0))
+	(ui.insp_hp.row as Control).visible = hp < 0.999 or _busy(b)
+	(ui.insp_prog.row as Control).visible = prog >= 0.0
+	if prog >= 0.0:
+		_set_row(ui.insp_prog, prog, "%d%%" % int(prog * 100.0))
+		var pc := Color(1.0, 0.55, 0.15) if b.decon else Color(0.3, 0.9, 0.4)
+		_bar_color(ui.insp_prog.bar, pc)
+	ui.insp_text.text = txt
+	var key := str(items)
+	if key != ui.insp_key:
+		ui.insp_key = key
+		for ch in (ui.insp_items as Control).get_children():
+			ch.queue_free()
+		for i in range(0, items.size() - 1, 2):
+			var hb := HBoxContainer.new()
+			hb.add_theme_constant_override("separation", 2)
+			hb.add_child(_icon_rect(items[i], 18))
+			var l := _ui_label(13)
+			l.text = str(items[i + 1])
+			hb.add_child(l)
+			(ui.insp_items as Control).add_child(hb)
+
+
+func _update_ship_panel() -> void:
+	var sh := piloting
+	var up := sh.global_position.normalized()
+	var kind: int = sh.kind
+	var tank: float = D.SHIP_KINDS[kind].tank
+	ui.ship_name.text = String(D.SHIP_KINDS[kind].name)
+	_set_row(ui.s_fuel, sh.fuel / tank, "%.1f / %d" % [sh.fuel, int(tank)])
+	var dv_full := _ship_dv(tank, kind)
+	_set_row(ui.s_dv, sh.dv() / maxf(dv_full, 1.0), "%d м/с" % int(sh.dv()))
+	var hull := 1.0
+	var used := 0
+	for e in cur_ships:
+		if int(e[0]) == piloting_id:
+			if e.size() > 10:
+				hull = float(e[10])
+			if e.size() > 9:
+				used = int(e[9])
+	_set_row(ui.s_hull, hull, "%d%%" % int(hull * 100.0))
+	_bar_color(ui.s_hull.bar, Color(0.6, 0.7, 0.85) if hull > 0.5 else Color(1.0, 0.3, 0.2))
+	(ui.s_cargo.row as Control).visible = kind == 1
+	var cargo: int = D.SHIP_KINDS[1].cargo
+	_set_row(ui.s_cargo, float(used) / float(cargo), "%d / %d" % [used, cargo])
+	var soi: float = SkyCalc.soi(sh.pn) if sh.pn >= 0 else 1.0
+	_set_row(ui.s_alt, sh.altitude() / soi if sh.pn >= 0 else 0.0, "%d м" % int(sh.altitude()))
+	var vv := sh.vel.dot(up)
+	_set_row(ui.s_speed, sh.vel.length() / 60.0, "%d  %s%d" % [int(sh.vel.length()), "↑" if vv >= 0.0 else "↓", absi(int(vv))])
+	var orb := sh.orbit()
+	var oi := sh.orbit_info()
+	var has_orb := not orb.is_empty() and not sh.landed
+	(ui.s_ap.row as Control).visible = has_orb
+	(ui.s_pe.row as Control).visible = has_orb
+	if has_orb:
+		var ref := soi if sh.pn >= 0 else 8000.0
+		var tap := ("  %dс" % int(oi.t_ap)) if not oi.is_empty() else ""
+		var tpe := ("  %dс" % int(oi.t_pe)) if not oi.is_empty() else ""
+		_set_row(ui.s_ap, float(orb[0]) / ref, "Ап %d%s" % [int(orb[0]), tap])
+		_set_row(ui.s_pe, maxf(float(orb[1]), 0.0) / ref, "Пе %d%s" % [int(orb[1]), tpe])
+	var lines := PackedStringArray()
+	if sh.landed:
+		lines.append("На поверхности")
+	elif orb.is_empty():
+		lines.append("Уход от " + ("луны" if sh.pn >= 0 else "гиганта"))
+	elif float(orb[1]) > 5.0:
+		lines.append("Орбита")
+	else:
+		lines.append("Суборбита — подними перицентр выше 5 м")
+	if sh.pn >= 0:
+		var soi_txt := "%s, граница %d м" % [D.PLANETS[sh.pn].name, int(soi)]
+		if float(pred.get("exit_t", -1.0)) >= 0.0:
+			soi_txt += ", выход через %d с" % int(pred.exit_t)
+		lines.append(soi_txt)
+	else:
+		lines.append("Открытый космос")
+	if int(pred.get("enc", -1)) != -1:
+		lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
+	elif bool(pred.get("impact", false)):
+		lines.append("Траектория пересекает поверхность")
+	ui.s_text.text = "\n".join(lines)
 
 
 ## Строки активных тревог (упакованные массивы в GDScript передаются по значению — поэтому возвращаем).
@@ -5120,7 +6077,11 @@ func _alert_lines() -> PackedStringArray:
 
 
 ## Подсказка про захват, если стоишь рядом с чужим ядром.
+var cap_frac := -1.0   # прогресс захвата для полоски (-1 — полоски нет)
+
+
 func _capture_hint() -> String:
+	cap_frac = -1.0
 	if player == null:
 		return ""
 	for e in cur_caps:
@@ -5135,10 +6096,12 @@ func _capture_hint() -> String:
 			continue
 		if team == D.T_NEUTRAL:
 			if int(e[2]) >= 0:
+				cap_frac = float(e[3])
 				return "ЗАХВАТ БАЗЫ: %s %d%%%s" % [D.TEAM_NAMES[int(e[2])], int(float(e[3]) * 100.0),
 					"" if d < D.CAPTURE_RADIUS else "  (подойди ближе к ядру)"]
 			return "Нейтральная база: встань у ядра (ближе %d м), чтобы захватить" % int(D.CAPTURE_RADIUS)
-		return "Вражеская база: разрушь ядро (прочность %d%%), оно станет нейтральным" % int(float(e[4]) * 100.0)
+		cap_frac = float(e[4])
+		return "Вражеская база: разрушь ядро — оно станет нейтральным"
 	return ""
 
 
@@ -5482,7 +6445,7 @@ func _request_place(cell: int, dir: int) -> void:
 		return
 	if is_server:
 		if _in_reach(1, cell, my_pn):
-			server_place(my_team, sel_type, cell, dir, my_pn)
+			server_place(my_team, sel_type, cell, dir, my_pn, 1)
 	else:
 		req_place.rpc_id(1, sel_type, cell, dir)
 
@@ -5492,7 +6455,7 @@ func _request_remove(cell: int) -> void:
 		return
 	if is_server:
 		if _in_reach(1, cell, my_pn):
-			server_remove(my_team, cell, my_pn)
+			server_remove(my_team, cell, my_pn, 1)
 	else:
 		req_remove.rpc_id(1, cell)
 

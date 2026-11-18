@@ -182,6 +182,20 @@ const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
 	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9, AA_GUN: 3,
 }
+# время стройки, сек (снос — столько же); не указано — по размеру: 1 клетка 2.5 с, 3 — 6 с, 9 — 14 с
+const BUILD_TIME := {
+	CONVEYOR: 0.4, PIPE: 0.4, WALL: 1.0, POWER_POLE: 0.8, LAMP: 0.8,
+	SPLITTER: 0.8, JUNCTION: 0.8, BRIDGE: 1.2, TURRET3: 20.0, NUCLEAR: 20.0, LAUNCH_PAD: 20.0,
+}
+
+
+static func build_time(t: int) -> float:
+	if BUILD_TIME.has(t):
+		return float(BUILD_TIME[t])
+	var s: int = SIZE.get(t, 1)
+	return 2.5 if s == 1 else (6.0 if s == 3 else 14.0)
+
+
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
 const POWER_RING := 4          # генератор питает клетки в 4 кольцах вокруг себя (~61 клетка)
 
@@ -298,7 +312,7 @@ const UNIT_RECIPES := [
 	{I_COPPER: 6, I_SILICON: 4, I_CHIP: 1},
 	{I_IRON: 60, I_LEAD: 20, I_CHIP: 10},
 ]
-const UNIT_LIMIT := [20, 10, 3]     # на одно ядро команды: захватил базу — лимит вырос
+const UNIT_LIMIT := [20, 10, 6]     # на одно ядро команды: захватил базу — лимит вырос
 const KAMIKAZE_FRAC := 0.5          # дрон снимает половину максимальной прочности цели
 const GUARD_RADIUS := 15.0          # охрана: бьёт врагов в этом радиусе от точки охраны
 const MODE_AGGRO := 0
