@@ -4291,7 +4291,7 @@ func _update_anim() -> void:
 		var n: Node3D = root.get_meta("deco")
 		var b: Dictionary = buildings[id]
 		if n.has_meta("spin"):
-			var busy_spin := not _busy(b) and b.item != D.I_NONE
+			var busy_spin: bool = not _busy(b) and int(b.item) != D.I_NONE
 			(n.get_meta("spin") as Node3D).rotation.y = tm * (6.0 if busy_spin else 1.5)
 			continue
 		if not n.has_meta("arm"):
@@ -6328,7 +6328,7 @@ func _update_ship_panel() -> void:
 	ui.s_speed.num.text = "%d м/с   верт. %+d" % [int(sh.vel.length()), int(vv)]
 	var orb := sh.orbit()
 	var oi := sh.orbit_info()
-	var has_orb := not orb.is_empty() and not sh.landed
+	var has_orb: bool = not orb.is_empty() and not sh.landed
 	(ui.s_ap.row as Control).visible = has_orb
 	(ui.s_pe.row as Control).visible = has_orb
 	if has_orb:
