@@ -7,13 +7,22 @@ const D = preload("res://scripts/defs.gd")
 const Planet = preload("res://scripts/planet.gd")
 const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
 const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
+const UNIT_SHADER = preload("res://shaders/unit.gdshader")
+const World = preload("res://scripts/world.gd")
+const Icons = preload("res://scripts/icons.gd")
 
 const CAM_DIST := 300.0
 const FOV := 50.0
 const TARGET := 0.4          # доля планеты у каждой стороны
-const UNITS_PER_TEAM := 40
-const UNIT_SPEED := 5.0      # м/с
-const SHOT_RANGE := 22.0
+const UNIT_COUNTS := [24, 10, 3]      # танки, дроны, мехи у каждой стороны
+const UNIT_SPEED := [4.0, 11.0, 2.2]  # м/с
+const UNIT_HP := [3, 1, 14]
+const UNIT_RANGE := [18.0, 0.0, 28.0]
+const MAX_BUILDINGS := 170
+# что строится внутри территории (повторы — чаще)
+const BUILD_POOL := [D.SOLAR, D.SOLAR, D.SMELTER, D.CRUSHER, D.COAL_PLANT, D.TURRET, D.TURRET, D.TURRET2,
+	D.WALL, D.WALL, D.LAMP, D.POWER_POLE, D.ASSEMBLER, D.BATTERY, D.CHIP_FACTORY, D.AA_GUN, D.REPAIR,
+	D.MELTER, D.CENTRIFUGE, D.TURRET3, D.NUCLEAR, D.LAUNCH_PAD, D.LOADER, D.UNIT_REPAIR, D.FUEL_SYNTH]
 const ROCKET_CYCLE := 26.0   # с: стоит на площадке + полёт
 const ROCKET_WAIT := 4.0
 const ROCKET_SCALE := 3.0    # ракета крупнее настоящей, чтобы её было видно
@@ -26,13 +35,13 @@ var own := PackedInt32Array()   # чья клетка: -1 ничья, 0 сини
 var frontier: Array = [[], []]
 var owned: Array = [[], []]   # клетки каждой стороны (для спавна)
 var counts := [0, 0]
-var has_bld := PackedByteArray()
-var bld_h := PackedFloat32Array()
 var mm_plates: MultiMesh
-var mm_blds: MultiMesh
-var mm_lights: MultiMesh
-var mm_units: MultiMesh
-var units: Array = []         # {team, dir, target, hp, dead}
+var world: World               # игровой мир без сети — рисует постройки и юнитов как в игре
+var mm_kind: Array = []       # мультимеши танков, дронов, мехов
+var bld_count := 0
+var asm_ids: Array = []
+var turret_acc := 0.0
+var units: Array = []         # {team, kind, dir, target, hp, dead, cell, face}
 var beams: Array = []         # [from, to, team, до какого времени]
 var shells: Array = []        # {a, b, t, team}
 var mm_shells: MultiMesh
@@ -177,7 +186,8 @@ func _up_basis(up: Vector3, s: Vector3) -> Basis:
 
 
 # ---------------------------------------------------------------------
-# Большая луна и война
+# Большая луна и война. Постройки и юниты рисует тот же код, что в игре (world.gd):
+# создаём мир без сети и без обработки кадров и зовём его функции отрисовки.
 # ---------------------------------------------------------------------
 
 func _build_planet() -> void:
@@ -193,40 +203,37 @@ func _build_planet() -> void:
 	terrain.material_override = tmat
 	pnode.add_child(terrain)
 
+	# мир-витрина: только отрисовка
+	world = World.new()
+	add_child(world)
+	world.set_process(false)
+	world.set_process_unhandled_input(false)
+	world.planet = planet
+	world.local_root = pnode
+	world.my_pn = 0
+	world.icon_atlas = Icons.build_atlas()
+	world.sky_state = {"sun": _sun_dir()}
+	var umat := ShaderMaterial.new()
+	umat.shader = UNIT_SHADER
+	world.mm_units = world._make_mm(world._tank_mesh(umat), 128, false)
+	world.mm_drones = world._make_mm(world._drone_mesh(umat), 64, false)
+	world.mm_mechs = world._make_mm(world._mech_mesh(umat), 16, false)
+	mm_kind = [world.mm_units, world.mm_drones, world.mm_mechs]
+
 	var n := planet.count()
 	own.resize(n)
 	own.fill(-1)
-	has_bld.resize(n)
-	bld_h.resize(n)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 99
-	for c in n:
-		var b: bool = rng.randf() < 0.14 and planet.level[c] < D.MAX_LEVEL
-		has_bld[c] = 1 if b else 0
-		bld_h[c] = rng.randf_range(0.6, 2.6)
-
 	var plate := CylinderMesh.new()
 	plate.top_radius = 1.0
 	plate.bottom_radius = 1.0
-	plate.height = 0.08
+	plate.height = 0.03
 	plate.radial_segments = 6
 	plate.rings = 1
 	mm_plates = _mm(plate, n, _vc_material(false))
-	var box := BoxMesh.new()
-	box.size = Vector3(1.4, 1.0, 1.4)
-	mm_blds = _mm(box, n, _vc_material(false))
-	var lb := BoxMesh.new()
-	lb.size = Vector3.ONE * 0.35
-	mm_lights = _mm(lb, n, _vc_material(true))
 	var zero := Transform3D(Basis.from_scale(Vector3.ZERO), Vector3.ZERO)
 	for c in n:
 		mm_plates.set_instance_transform(c, zero)
-		mm_blds.set_instance_transform(c, zero)
-		mm_lights.set_instance_transform(c, zero)
 
-	var ub := BoxMesh.new()
-	ub.size = Vector3(1.3, 0.8, 1.8)
-	mm_units = _mm(ub, UNITS_PER_TEAM * 2, _vc_material(false))
 	var sb := SphereMesh.new()
 	sb.radius = 0.6
 	sb.height = 1.2
@@ -256,16 +263,22 @@ func _build_planet() -> void:
 		pnode.add_child(b)
 		booms.append({"n": b, "t": 0.0, "r": 3.0})
 
-	# стартовые площадки сторон и начальные 15% — дальше дорастают до 40% у тебя на глазах
+	# ядра сторон, вокруг — стартовые 15%; дальше территория и базы дорастают у тебя на глазах
 	var starts := [planet.nearest_cell(axis), planet.nearest_cell(-axis)]
 	for t in 2:
 		_claim(starts[t], t)
+		var r := planet.rings(int(starts[t]), 3)
+		for x in r:
+			_claim(int(x), t)
+		_place(D.CORE, int(starts[t]), 0, t, true)
 	while counts[0] < n * 0.15 or counts[1] < n * 0.15:
 		for t in 2:
 			_grow(t)
 	for t in 2:
-		for i in UNITS_PER_TEAM:
-			units.append({"team": t, "dir": Vector3.ZERO, "target": Vector3.ZERO, "hp": 3, "dead": 0.0})
+		for k in 3:
+			for i in UNIT_COUNTS[k]:
+				units.append({"team": t, "kind": k, "dir": Vector3.ZERO, "target": Vector3.ZERO,
+					"hp": 1, "dead": 0.0, "cell": -1, "face": Vector3.ZERO})
 	for u in units:
 		_respawn(u)
 
@@ -280,16 +293,103 @@ func _claim(c: int, t: int) -> void:
 	owned[t].append(c)
 	frontier[t].append(c)
 	var up: Vector3 = planet.dirs[c]
-	var p := planet.top_pos(c)
 	var col: Color = D.TEAM_COLORS[t]
-	mm_plates.set_instance_transform(c, Transform3D(_up_basis(up, Vector3(0.95, 1, 0.95)), p + up * 0.04))
-	mm_plates.set_instance_color(c, col.darkened(0.45))
-	if has_bld[c] == 1:
-		var h: float = bld_h[c]
-		mm_blds.set_instance_transform(c, Transform3D(_up_basis(up, Vector3(1, h, 1)), p + up * h * 0.5))
-		mm_blds.set_instance_color(c, col.darkened(0.2).lerp(Color(0.5, 0.5, 0.55), 0.4))
-		mm_lights.set_instance_transform(c, Transform3D(_up_basis(up, Vector3.ONE), p + up * (h + 0.2)))
-		mm_lights.set_instance_color(c, col.lightened(0.3))
+	mm_plates.set_instance_transform(c, Transform3D(_up_basis(up, Vector3(0.95, 1, 0.95)), planet.top_pos(c) + up * 0.015))
+	mm_plates.set_instance_color(c, col.darkened(0.55))
+	if bld_count < MAX_BUILDINGS and randf() < 0.045:
+		_try_build(c, t)
+
+
+## Свободно ли место под постройку стороны t (все клетки её, не заняты, не скалы).
+func _fits(type: int, cell: int, dir: int, t: int) -> Array:
+	var foot: Array = world._footprint(type, cell, dir)
+	if foot.size() != world._size_of(type):
+		return []
+	for x in foot:
+		if own[x] != t or world.grid.has(world._k(0, x)) or planet.level[x] >= D.MAX_LEVEL:
+			return []
+	return foot
+
+
+func _place(type: int, cell: int, dir: int, t: int, main := false) -> int:
+	var id: int = world._new_id()
+	world._add_building({"id": id, "type": type, "team": t, "cell": cell, "dir": dir, "pn": 0,
+		"bt": 1.0 if type == D.CORE else 0.0, "main": main, "ukind": randi() % 3})
+	bld_count += 1
+	if type == D.ASSEMBLER:
+		asm_ids.append(id)
+	return id
+
+
+## Что строить на новой клетке: на руде — бур, у края — оборона, внутри — производство и энергия.
+func _try_build(c: int, t: int) -> void:
+	var nb: PackedInt32Array = planet.nbrs[c]
+	var dir := randi() % nb.size()
+	var type: int = BUILD_POOL[randi() % BUILD_POOL.size()]
+	if planet.ore[c] != D.I_NONE:
+		type = [D.DRILL, D.DRILL, D.DRILL2, D.DRILL3][randi() % 4]
+	var foot := _fits(type, c, dir, t)
+	if foot.is_empty():
+		return
+	if world._is_drill(type) and int(world._drill_ore(foot)[0]) == D.I_NONE:
+		return
+	_place(type, c, dir, t)
+	if world._is_drill(type):
+		_belt_from(foot, t)
+	elif type == D.WALL:
+		_wall_line(c, t)
+
+
+## Конвейер от бура: несколько клеток примерно по прямой.
+func _belt_from(foot: Array, t: int) -> void:
+	var start := -1
+	for f in foot:
+		var nb: PackedInt32Array = planet.nbrs[f]
+		for x in nb:
+			if not foot.has(x) and own[x] == t and not world.grid.has(world._k(0, x)):
+				start = x
+				break
+		if start != -1:
+			break
+	if start == -1:
+		return
+	var heading := (planet.dirs[start] - planet.dirs[foot[0]]).normalized()
+	var cur := start
+	for k in randi_range(3, 7):
+		var nb: PackedInt32Array = planet.nbrs[cur]
+		var best := -1
+		var bd := 0.2
+		for i in nb.size():
+			var x: int = nb[i]
+			if own[x] != t or world.grid.has(world._k(0, x)) or planet.level[x] >= D.MAX_LEVEL:
+				continue
+			var dd := (planet.dirs[x] - planet.dirs[cur]).normalized().dot(heading)
+			if dd > bd:
+				bd = dd
+				best = i
+		if best == -1:
+			return
+		_place(D.CONVEYOR, cur, best, t)
+		heading = (planet.dirs[nb[best]] - planet.dirs[cur]).normalized()
+		cur = nb[best]
+
+
+## Забор — сразу несколько секций в ряд.
+func _wall_line(c: int, t: int) -> void:
+	var cur := c
+	var prev := -1
+	for k in randi_range(2, 5):
+		var nb: PackedInt32Array = planet.nbrs[cur]
+		var nxt := -1
+		for x in nb:
+			if x != prev and own[x] == t and not world.grid.has(world._k(0, x)) and planet.level[x] < D.MAX_LEVEL:
+				nxt = x
+				break
+		if nxt == -1:
+			return
+		_place(D.WALL, nxt, 0, t)
+		prev = cur
+		cur = nxt
 
 
 ## Сторона t занимает одну соседнюю свободную клетку от своей границы.
@@ -323,18 +423,19 @@ func _band_target(t: int) -> Vector3:
 	var sgn := 1.0 if t == 0 else -1.0
 	var d := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)).normalized()
 	d = (d - axis * d.dot(axis)).normalized()
-	return (d + axis * sgn * randf_range(0.05, 0.3)).normalized()
+	return (d + axis * sgn * randf_range(-0.05, 0.3)).normalized()
 
 
 func _respawn(u: Dictionary) -> void:
 	var t: int = u.team
-	var fr: Array = frontier[t]
 	var d := _rand_own_dir(t)
-	if not fr.is_empty() and randf() < 0.7:
+	var fr: Array = frontier[t]
+	if not fr.is_empty() and randf() < 0.6:
 		d = planet.dirs[fr[randi() % fr.size()]]
 	u.dir = d
+	u.cell = planet.walk(-1, d)
 	u.target = _band_target(t)
-	u.hp = 3
+	u.hp = UNIT_HP[int(u.kind)]
 	u.dead = 0.0
 
 
@@ -348,8 +449,10 @@ func _boom(at: Vector3, r: float) -> void:
 	n.visible = true
 
 
-func _surface(d: Vector3) -> Vector3:
-	return d * (D.PLANET_R + 1.0)
+func _upos(u: Dictionary) -> Vector3:
+	var d: Vector3 = u.dir
+	var lift := D.DRONE_ALT if int(u.kind) == 1 else 0.0
+	return d * (planet.top_r(int(u.cell)) + 0.3 + lift)
 
 
 func _process(delta: float) -> void:
@@ -358,7 +461,67 @@ func _process(delta: float) -> void:
 		_frame_camera()
 	pnode.rotate(axis, delta * 0.03)
 	_war_step(delta)
+	_buildings_step(delta)
 	_rocket_step(delta)
+
+
+## Стройка, анимации, сборщики и башни турелей — функциями игрового мира.
+func _buildings_step(dt: float) -> void:
+	for id in world.building_set.keys():
+		if not world.buildings.has(id):
+			continue
+		var b: Dictionary = world.buildings[id]
+		if float(b.bt) >= 0.999:
+			b.bt = 1.0
+			world.building_set.erase(id)
+			world._on_build_state(b)
+	# сборщики по кругу собирают юнитов: рука с лазером, юнит растёт на площадке
+	for id in asm_ids:
+		if not world.buildings.has(id) or world._busy(world.buildings[id]):
+			continue
+		var e: Array = world.asm_prog.get(id, [0.0, randi() % 3])
+		var p: float = float(e[0]) + dt / 8.0
+		if p >= 1.0:
+			p = 0.0
+			e[1] = randi() % 3
+		world.asm_prog[id] = [p, e[1]]
+	world._update_construction(dt)
+	# турели смотрят на ближайшего врага и стреляют
+	turret_acc += dt
+	var fire := turret_acc >= 0.25
+	if fire:
+		turret_acc = 0.0
+	for id in world.turret_nodes.keys():
+		if not world.buildings.has(id):
+			continue
+		var b: Dictionary = world.buildings[id]
+		if world._busy(b):
+			continue
+		var tp: Vector3 = planet.top_pos(int(b.cell))
+		var best = null
+		var bd := 45.0
+		for u in units:
+			if int(u.team) == int(b.team) or float(u.dead) > 0.0:
+				continue
+			var dd := tp.distance_to(_upos(u))
+			if dd < bd:
+				bd = dd
+				best = u
+		if best == null:
+			continue
+		var to := _upos(best)
+		world.turret_aim[id] = pnode.global_transform.basis * (to - tp).normalized()
+		if fire and randf() < 0.5:
+			beams.append([tp + tp.normalized() * 1.2, to, int(b.team), now + 0.08])
+			best.hp = int(best.hp) - 1
+			if int(best.hp) <= 0:
+				_kill(best)
+	world._update_turrets(dt)
+
+
+func _kill(u: Dictionary) -> void:
+	u.dead = 3.0
+	_boom(_upos(u), 4.0 if int(u.kind) == 2 else 2.5)
 
 
 func _war_step(dt: float) -> void:
@@ -367,55 +530,67 @@ func _war_step(dt: float) -> void:
 		if counts[t] < n * TARGET:
 			for k in 4:
 				_grow(t)
-	# юниты: идут к полосе, стреляют в ближайшего врага
-	var ui := 0
+	# юниты: танки и мехи идут к полосе и стреляют, дроны ищут цель и таранят её
+	var cnt := [0, 0, 0]
 	for u in units:
+		var kind: int = u.kind
 		if float(u.dead) > 0.0:
 			u.dead = float(u.dead) - dt
 			if float(u.dead) <= 0.0:
 				_respawn(u)
-			mm_units.set_instance_transform(ui, Transform3D(Basis.from_scale(Vector3.ZERO), Vector3.ZERO))
-			ui += 1
 			continue
 		var d: Vector3 = u.dir
 		var tg: Vector3 = u.target
+		if kind == 1:
+			var prey = _nearest_enemy(u, 40.0)
+			if prey != null:
+				tg = Vector3(prey.dir)
+				if _upos(u).distance_to(_upos(prey)) < 3.0:
+					prey.hp = int(prey.hp) - 4
+					if int(prey.hp) <= 0:
+						_kill(prey)
+					_kill(u)
+					continue
 		var ang := d.angle_to(tg)
-		var step := UNIT_SPEED * dt / D.PLANET_R
+		var step: float = float(UNIT_SPEED[kind]) * dt / D.PLANET_R
 		if ang < 0.02:
 			u.target = _band_target(int(u.team))
 		else:
 			d = d.slerp(tg, minf(1.0, step / ang)).normalized()
 			u.dir = d
-		var fwd := (tg - d * tg.dot(d)).normalized()
-		var bas := Basis(fwd.cross(d), d, -fwd) if fwd.length() > 0.01 else _up_basis(d, Vector3.ONE)
-		mm_units.set_instance_transform(ui, Transform3D(bas, d * (D.PLANET_R + 0.9)))
-		mm_units.set_instance_color(ui, D.TEAM_COLORS[int(u.team)])
-		ui += 1
+			u.cell = planet.walk(int(u.cell), d)
+		var f := (tg - d * tg.dot(d))
+		if f.length() > 0.001:
+			u.face = f.normalized()
+		var face: Vector3 = u.face
+		var bas := Basis(face.cross(d), d, -face) if face.length() > 0.5 else _up_basis(d, Vector3.ONE)
+		var mm: MultiMesh = mm_kind[kind]
+		var c: int = cnt[kind]
+		if c < mm.instance_count:
+			mm.set_instance_transform(c, Transform3D(bas, _upos(u) - d * 0.3))
+			var col: Color = D.TEAM_COLORS[int(u.team)]
+			mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, clampf(float(u.hp) / float(UNIT_HP[kind]), 0.3, 1.0)))
+			cnt[kind] = c + 1
+	for k in 3:
+		(mm_kind[k] as MultiMesh).visible_instance_count = cnt[k]
 	fight_acc += dt
-	if fight_acc >= 0.18:
+	if fight_acc >= 0.2:
 		fight_acc = 0.0
 		for u in units:
-			if float(u.dead) > 0.0 or randf() < 0.4:
+			var kind: int = u.kind
+			if float(u.dead) > 0.0 or kind == 1 or randf() < 0.4:
 				continue
-			var best = null
-			var bd := SHOT_RANGE
-			for o in units:
-				if o.team == u.team or float(o.dead) > 0.0:
-					continue
-				var dd := _surface(u.dir).distance_to(_surface(o.dir))
-				if dd < bd:
-					bd = dd
-					best = o
+			var best = _nearest_enemy(u, UNIT_RANGE[kind])
 			if best == null:
 				continue
-			beams.append([_surface(u.dir), _surface(best.dir), int(u.team), now + 0.09])
-			best.hp = int(best.hp) - 1
+			var from := _upos(u) + Vector3(u.dir) * (1.6 if kind == 2 else 0.6)
+			beams.append([from, _upos(best), int(u.team), now + 0.09])
+			best.hp = int(best.hp) - (3 if kind == 2 else 1)
 			if int(best.hp) <= 0:
-				best.dead = 3.0
-				_boom(_surface(best.dir), 3.0)
+				_kill(best)
 	# артиллерия: снаряды навесом из глубины своей территории в полосу у врага
 	shell_acc += dt
-	if shell_acc >= 0.6 and shells.size() < 30:
+	if shell_acc >= 0.7 and shells.size() < 30:
 		shell_acc = 0.0
 		var t := randi() % 2
 		shells.append({"a": _rand_own_dir(t), "b": _band_target(1 - t), "t": 0.0, "team": t})
@@ -460,9 +635,23 @@ func _war_step(dt: float) -> void:
 		bmat.albedo_color = bc
 
 
+func _nearest_enemy(u: Dictionary, rng: float):
+	var best = null
+	var bd := rng
+	var p := _upos(u)
+	for o in units:
+		if int(o.team) == int(u.team) or float(o.dead) > 0.0:
+			continue
+		var dd := p.distance_to(_upos(o))
+		if dd < bd:
+			bd = dd
+			best = o
+	return best
+
+
 ## Снаряд долетел: взрыв. Возвращает false, чтобы фильтр его убрал.
 func _shell_land(s: Dictionary) -> bool:
-	_boom(_surface(s.b), 4.5)
+	_boom(Vector3(s.b) * (D.PLANET_R + 1.0), 4.5)
 	return false
 
 
