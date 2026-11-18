@@ -370,7 +370,8 @@ const PROJ_DT := 0.025         # шаг физики снаряда, с
 # Персонаж
 # ---------------------------------------------------------------------
 const PLAYER_HP := 100
-const RESPAWN_TICKS := 50      # 5 с до респауна
+const RESPAWN_TICKS := 100     # 10 с до респауна
+const CHOOSE_TICKS := 50       # первые 5 с после смерти можно выбрать базу для возрождения
 const GUN_DMG := 15
 const GUN_RANGE := 40.0
 const GUN_CD_MS := 200

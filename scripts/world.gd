@@ -87,6 +87,10 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var death_t := -1.0     # клиент: сколько секунд прошло с гибели (-1 — жив)
+var death_pos := Vector3.ZERO
+var death_pn := 0
+var death_pick := -1    # выбранная база для возрождения
 var bstate := {}        # клиент: id -> состояние ST_* (для скорости анимаций)
 var anim_nodes := {}    # клиент: id -> корневой узел постройки с анимацией (рука сборщика, вертушка разветвителя)
 
@@ -380,6 +384,55 @@ func _spawn_pos(team: int) -> Vector3:
 				c = x
 				break
 	return planet.dirs[c] * (planet.top_r(c) + 1.0)
+
+
+## Где возродиться: выбранная база (если она ещё наша), иначе ближайшая к месту гибели —
+## сначала на той же луне, потом главная, потом любая.
+func _respawn_core(o: Dictionary):
+	var sc: int = int(o.get("spawn_core", -1))
+	if buildings.has(sc) and buildings[sc].type == D.CORE and int(buildings[sc].team) == int(o.team):
+		return buildings[sc]
+	var best = null
+	var best_d := INF
+	var opn: int = int(o.get("pn", -1))
+	var opos: Vector3 = o.get("pos", Vector3.ZERO)
+	for b in buildings.values():
+		if b.type != D.CORE or int(b.team) != int(o.team):
+			continue
+		var d: float = 1.0e6 + (0.0 if b.main else 1.0)
+		if int(b.pn) == opn:
+			d = _bpos(b).distance_to(opos)
+		if d < best_d:
+			best_d = d
+			best = b
+	return best
+
+
+## Точка возрождения у ядра — клетка на втором кольце вокруг него.
+func _spawn_near(core: Dictionary) -> Vector3:
+	var c: int = core.cell
+	var r := planet.rings(c, 2)
+	for x in r:
+		if int(r[x]) == 2:
+			c = x
+			break
+	return planet.dirs[c] * (planet.top_r(c) + 1.0)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_choose_base(core_id: int) -> void:
+	if multiplayer.is_server():
+		server_choose_base(multiplayer.get_remote_sender_id(), core_id)
+
+
+func server_choose_base(pid: int, core_id: int) -> void:
+	if not players.has(pid):
+		return
+	var o: Dictionary = players[pid]
+	if o.hp > 0 or int(o.dead_t) <= D.RESPAWN_TICKS - D.CHOOSE_TICKS:
+		return   # окно выбора закрыто
+	if buildings.has(core_id) and buildings[core_id].type == D.CORE and int(buildings[core_id].team) == int(o.team):
+		o["spawn_core"] = core_id
 
 
 func _is_drill(t: int) -> bool:
@@ -689,6 +742,7 @@ func _damage_player(pid: int, dmg: int) -> void:
 	if o.hp <= 0:
 		o.hp = 0
 		o.dead_t = D.RESPAWN_TICKS
+		o["spawn_core"] = -1   # базу можно выбрать в первые 5 с
 
 
 # =====================================================================
@@ -2599,8 +2653,13 @@ func _players_tick() -> void:
 		o.dead_t -= 1
 		if o.dead_t <= 0:
 			o.hp = D.PLAYER_HP
-			o.pos = _spawn_pos(o.team)
-			o["pn"] = _spawn_pn(o.team)
+			var rc = _respawn_core(o)
+			if rc != null:
+				o.pos = _spawn_near(rc)
+				o["pn"] = int(rc.pn)
+			else:
+				o.pos = _spawn_pos(o.team)
+				o["pn"] = _spawn_pn(o.team)
 			if pid == 1 and not headless:
 				if player:
 					_switch_planet(int(o.pn))
@@ -5000,6 +5059,7 @@ func _update_client(delta: float) -> void:
 	_update_ships(delta)
 	_update_turrets(delta)
 	_update_construction(delta)
+	_update_death(delta)
 
 	# стрельба
 	fire_cd -= delta
@@ -5350,9 +5410,12 @@ func _update_players(delta: float) -> void:
 			others.erase(pid)
 
 	if player:
+		var was_dead := player.dead
 		player.dead = my_hp <= 0
-		if not finished:
-			big_msg.text = "ТЫ ПОГИБ\nреспаун через пару секунд..." if player.dead else ""
+		if player.dead and not was_dead:
+			_on_death()
+		elif was_dead and not player.dead:
+			_on_revive()
 
 
 ## Башня поворачивается к цели (рысканье), ствол поднимается на угол выстрела (тангаж).
@@ -6517,6 +6580,46 @@ func _build_panel(layer: CanvasLayer) -> void:
 	topc.add_child(cap)
 	ui.cap = cap
 
+	# --- гибель: выбор базы для возрождения
+	var dp := PanelContainer.new()
+	var dsb := StyleBoxFlat.new()
+	dsb.bg_color = Color(0.08, 0.02, 0.02, 0.8)
+	dsb.border_color = Color(1.0, 0.3, 0.25, 0.5)
+	dsb.set_border_width_all(2)
+	dsb.set_corner_radius_all(6)
+	dsb.set_content_margin_all(16)
+	dp.add_theme_stylebox_override("panel", dsb)
+	dp.anchor_left = 0.5
+	dp.anchor_right = 0.5
+	dp.anchor_top = 0.5
+	dp.anchor_bottom = 0.5
+	dp.offset_left = -200
+	dp.offset_right = 200
+	dp.offset_top = -150
+	dp.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	dp.visible = false
+	layer.add_child(dp)
+	var dv := VBoxContainer.new()
+	dv.add_theme_constant_override("separation", 8)
+	dp.add_child(dv)
+	var dt := _ui_label(34, Color(1.0, 0.35, 0.3))
+	dt.text = "ТЫ ПОГИБ"
+	dt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	dv.add_child(dt)
+	ui.death_timer = _ui_label(16, Color(1, 1, 1))
+	(ui.death_timer as Label).horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	dv.add_child(ui.death_timer)
+	ui.death_bar = _bar(Color(1.0, 0.35, 0.3), 8)
+	dv.add_child(ui.death_bar)
+	var dl := _ui_label(13, Color(0.8, 0.8, 0.85))
+	dl.text = "Где возродиться (щелчок или цифра):"
+	dv.add_child(dl)
+	var dbases := VBoxContainer.new()
+	dbases.add_theme_constant_override("separation", 4)
+	dv.add_child(dbases)
+	ui.death_bases = dbases
+	ui.death = dp
+
 	# --- снизу по центру: подсказка, что можно сделать сейчас
 	var hint := _ui_label(15, Color(1, 1, 1))
 	hint.anchor_left = 0.0
@@ -6528,6 +6631,97 @@ func _build_panel(layer: CanvasLayer) -> void:
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	layer.add_child(hint)
 	ui.hint = hint
+
+
+## Мои базы для возрождения: главная первой, потом по лунам.
+func _my_cores() -> Array:
+	var out: Array = []
+	for b in buildings.values():
+		if b.type == D.CORE and int(b.team) == my_team:
+			out.append(b)
+	out.sort_custom(_core_order)
+	return out
+
+
+func _core_order(x: Dictionary, y: Dictionary) -> bool:
+	if bool(x.main) != bool(y.main):
+		return bool(x.main)
+	return int(x.pn) < int(y.pn)
+
+
+func _on_death() -> void:
+	death_t = 0.0
+	death_pick = -1
+	death_pos = player.global_position
+	death_pn = my_pn
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	big_msg.text = ""
+	_fill_death_bases()
+
+
+func _on_revive() -> void:
+	death_t = -1.0
+	ui.death.visible = false
+	if fps_mode and piloting == null:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _fill_death_bases() -> void:
+	var box: VBoxContainer = ui.death_bases
+	for ch in box.get_children():
+		ch.queue_free()
+	var cores := _my_cores()
+	for i in mini(cores.size(), 9):
+		var c: Dictionary = cores[i]
+		var btn := Button.new()
+		btn.text = "%d   %s%s" % [i + 1, D.PLANETS[int(c.pn)].name, "  · главная" if c.main else ""]
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.add_theme_font_size_override("font_size", 16)
+		btn.set_meta("core", int(c.id))
+		btn.pressed.connect(_choose_base.bind(int(c.id)))
+		box.add_child(btn)
+
+
+func _choose_base(core_id: int) -> void:
+	if death_t < 0.0 or death_t > D.CHOOSE_TICKS * D.TICK:
+		return
+	death_pick = core_id
+	if is_server:
+		server_choose_base(1, core_id)
+	else:
+		req_choose_base.rpc_id(1, core_id)
+
+
+## Пока мёртв: таймер, кнопки баз (5 с на выбор), какая база будет по умолчанию.
+func _update_death(delta: float) -> void:
+	if death_t < 0.0 or ui.is_empty():
+		return
+	death_t += delta
+	ui.death.visible = not finished
+	var total: float = D.RESPAWN_TICKS * D.TICK
+	var window: float = D.CHOOSE_TICKS * D.TICK
+	var left := maxf(total - death_t, 0.0)
+	var ttxt := "Возрождение через %d с" % int(ceil(left))
+	ui.death_bar.value = 1.0 - left / total
+	var choosing := death_t < window
+	# по умолчанию — ближайшая (то же правило, что на сервере)
+	var auto = _respawn_core({"team": my_team, "pn": death_pn, "pos": death_pos, "spawn_core": death_pick})
+	var auto_id: int = int(auto.id) if auto != null else -1
+	for btn in (ui.death_bases as Control).get_children():
+		var b := btn as Button
+		var cid: int = b.get_meta("core")
+		b.disabled = not choosing
+		var mark := ""
+		if cid == death_pick:
+			mark = "   ◀ выбрано"
+		elif death_pick == -1 and cid == auto_id:
+			mark = "   ◀ ближайшая" if choosing else "   ◀ ближайшая (по умолчанию)"
+		var base_txt: String = b.text.split("   ◀")[0]
+		b.text = base_txt + mark
+	if not choosing:
+		ttxt += "   · выбор закрыт"
+	ui.death_timer.text = ttxt
 
 
 func _set_row(r: Dictionary, frac: float, txt: String) -> void:
@@ -6881,6 +7075,16 @@ H — закрыть"""
 func _unhandled_input(event: InputEvent) -> void:
 	if headless:
 		return
+	# --- мёртв: только выбор базы цифрами (мышь свободна для кнопок) ---
+	if player != null and player.dead and death_t >= 0.0:
+		var kd := event as InputEventKey
+		if kd and kd.pressed and not kd.echo and kd.keycode >= KEY_1 and kd.keycode <= KEY_9:
+			var idx: int = kd.keycode - KEY_1
+			var cores := _my_cores()
+			if idx < cores.size():
+				_choose_base(int(cores[idx].id))
+		if kd == null or kd.keycode != KEY_H:
+			return
 	# --- в корабле: управление у самого корабля, тут только выход ---
 	if piloting:
 		var kp := event as InputEventKey
