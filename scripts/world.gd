@@ -1151,7 +1151,7 @@ func _status(b: Dictionary) -> Array:
 			return [ST_OK, "собирает: %s %d%%" % [nm, int(100.0 * (1.0 - float(b.timer) / D.UNIT_STATS[k].build))]]
 		if _unit_count(b.team, k) >= _unit_limit(b.team, k):
 			return [ST_SLOW, "лимит: %s %d/%d (захвати базы — лимит вырастет)" % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
-		return [ST_IDLE, "%s: на складе не хватает %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
+		return [ST_IDLE, "%s: подай конвейером %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
 	if t == D.LOADER:
 		var total := 0
 		for it in b.buf:
@@ -1909,6 +1909,11 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return false
 	if t == D.DRILL3:
 		return item == D.I_WATER and o.water < D.BUFFER_CAP
+	if t == D.ASSEMBLER:
+		if int(o.ukind) < 0:
+			return false   # тип не выбран — ничего не берёт
+		var need: Dictionary = D.UNIT_RECIPES[o.ukind]
+		return need.has(item) and int(buf.get(item, 0)) < int(need[item]) * 2
 	if t == D.LAUNCH_PAD:
 		return item == D.I_FUEL and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
 	if t == D.AA_GUN:
@@ -2532,7 +2537,7 @@ func _unit_limit(team: int, kind: int) -> int:
 
 
 ## Сборщик: копит рецепт выбранного юнита, собирает, если команда не упёрлась в лимит.
-## Сборщик: пока тип юнита не выбран — стоит. Ресурсы берёт со склада базы (не с конвейеров).
+## Сборщик: пока тип юнита не выбран — стоит. Ресурсы — только с конвейеров (не со склада базы), и в креативе тоже.
 func _assembler_tick(b: Dictionary) -> void:
 	var k: int = b.ukind
 	if b.timer > 0:
@@ -2543,13 +2548,10 @@ func _assembler_tick(b: Dictionary) -> void:
 	if k < 0 or _unit_count(b.team, k) >= _unit_limit(b.team, k):
 		return
 	var need: Dictionary = D.UNIT_RECIPES[k]
-	if not creative:
-		var st: Dictionary = storage[int(b.team)]
-		for it in need:
-			if int(st.get(it, 0)) < int(need[it]):
-				return
-		for it in need:
-			st[it] = int(st.get(it, 0)) - int(need[it])
+	if not _has_inputs(b, need):
+		return
+	for it in need:
+		b.buf[it] = int(b.buf[it]) - int(need[it])
 	b.timer = int(D.UNIT_STATS[k].build)
 
 
