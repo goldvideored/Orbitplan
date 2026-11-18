@@ -2611,7 +2611,7 @@ func _players_tick() -> void:
 
 ## Юниты. Поведение: агрессия — ищет врагов по всей луне; охрана — бьёт врагов возле точки охраны
 ## и возвращается к ней; стоять — не двигается, стреляет в радиусе оружия.
-## Дрон-камикадзе таранит цель и снимает половину её максимальной прочности.
+## Дрон-камикадзе таранит цель и снимает четверть её максимальной прочности.
 func _units_tick() -> void:
 	for u in units:
 		if int(u.get("poison", 0)) > 0:
@@ -2685,7 +2685,7 @@ func _units_tick() -> void:
 			if mode != D.MODE_HOLD:
 				_unit_step(u, tpos, st.speed, reach)
 		elif u.kind == D.U_DRONE:
-			# таран: половина максимальной прочности цели, дрон погибает
+			# таран: четверть максимальной прочности цели, дрон погибает
 			if target_player != -1:
 				_damage_player(target_player, int(D.PLAYER_HP * D.KAMIKAZE_FRAC))
 			elif target_unit != null:
@@ -7107,7 +7107,7 @@ func _unit_info(k: int) -> Array:
 		lim = "   |   Сейчас: %d / %d" % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + 3])]
 	var desc := ""
 	if k == D.U_DRONE:
-		desc = "очень быстрый, таранит цель: −50% её прочности, сам погибает"
+		desc = "очень быстрый, таранит цель: −25% её прочности, сам погибает"
 	else:
 		var dps := int(float(st.dmg) * 10.0 / maxf(float(st.cd), 1.0))
 		desc = "%d прочности, бьёт на %d клеток, %d урона/с" % [int(st.hp), int(float(st.range) / D.CELL_M), dps]

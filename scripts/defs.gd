@@ -308,7 +308,7 @@ const UNIT_NAMES := ["Мини-танк", "Дрон-камикадзе", "Бое
 # hp — прочность, speed — м за тик, range — дальность атаки, dmg/cd — урон и тиков между выстрелами,
 # aggro — с какого расстояния замечает врага, build — тиков сборки, slots — мест в транспорте
 const UNIT_STATS := [
-	{"hp": 120, "speed": 0.3, "range": 9.0, "dmg": 5, "cd": 5, "aggro": 14.0, "build": 30, "slots": 1},
+	{"hp": 120, "speed": 0.3, "range": 9.0, "dmg": 5, "cd": 10, "aggro": 14.0, "build": 30, "slots": 1},
 	{"hp": 30, "speed": 1.2, "range": 1.4, "dmg": 0, "cd": 0, "aggro": 30.0, "build": 25, "slots": 1},
 	{"hp": 1500, "speed": 0.18, "range": 19.0, "dmg": 9, "cd": 2, "aggro": 24.0, "build": 120, "slots": 4},
 ]
@@ -318,7 +318,7 @@ const UNIT_RECIPES := [
 	{I_IRON: 150, I_LEAD: 50, I_SILICON: 40, I_CHIP: 25},
 ]
 const UNIT_LIMIT := [20, 10, 3]     # на одно ядро команды: захватил базу — лимит вырос
-const KAMIKAZE_FRAC := 0.5          # дрон снимает половину максимальной прочности цели
+const KAMIKAZE_FRAC := 0.25         # дрон снимает четверть максимальной прочности цели
 const GUARD_RADIUS := 15.0          # охрана: бьёт врагов в этом радиусе от точки охраны
 const MODE_AGGRO := 0
 const MODE_GUARD := 1
@@ -327,12 +327,12 @@ const MODE_NAMES := ["агрессия", "охрана", "стоять"]
 
 const CELL_M := 1.9            # примерная ширина клетки, м (для дальностей «в клетках»)
 const TURRET_RANGE := 6 * CELL_M
-const TURRET_DMG := 7
+const TURRET_DMG := 5
 const TURRET_CD := 5           # тиков между выстрелами
 
 # II — пулемёт: пули с баллистикой
 const T2_RANGE := 10 * CELL_M
-const T2_DMG := 9
+const T2_DMG := 12
 const T2_CD := 2
 const T2_SPEED := 45.0         # м/с
 const T2_SHOTS_PER_COPPER := 4
