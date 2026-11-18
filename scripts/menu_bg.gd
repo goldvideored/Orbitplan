@@ -1,0 +1,623 @@
+extends Node3D
+## Фон главного меню: справа — луна, на которой идёт война (две стороны занимают по 40% поверхности,
+## между ними — нейтральная полоса, где дерутся юниты и рвутся снаряды); слева внизу — маленькая луна
+## с площадкой, с которой взлетает разведчик, облетает большую луну и садится обратно.
+
+const D = preload("res://scripts/defs.gd")
+const Planet = preload("res://scripts/planet.gd")
+const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
+const MOON_SHADER = preload("res://shaders/moon_far.gdshader")
+
+const CAM_DIST := 300.0
+const FOV := 50.0
+const TARGET := 0.4          # доля планеты у каждой стороны
+const UNITS_PER_TEAM := 40
+const UNIT_SPEED := 5.0      # м/с
+const SHOT_RANGE := 22.0
+const ROCKET_CYCLE := 26.0   # с: стоит на площадке + полёт
+const ROCKET_WAIT := 4.0
+const ROCKET_SCALE := 3.0    # ракета крупнее настоящей, чтобы её было видно
+
+var planet: Planet
+var pnode: Node3D            # всё, что на большой луне (вращается вместе с ней)
+var cam: Camera3D
+var axis := Vector3(1.0, 0.25, 0.0).normalized()   # ось «синие — красные»
+var own := PackedInt32Array()   # чья клетка: -1 ничья, 0 синие, 1 красные
+var frontier: Array = [[], []]
+var owned: Array = [[], []]   # клетки каждой стороны (для спавна)
+var counts := [0, 0]
+var has_bld := PackedByteArray()
+var bld_h := PackedFloat32Array()
+var mm_plates: MultiMesh
+var mm_blds: MultiMesh
+var mm_lights: MultiMesh
+var mm_units: MultiMesh
+var units: Array = []         # {team, dir, target, hp, dead}
+var beams: Array = []         # [from, to, team, до какого времени]
+var shells: Array = []        # {a, b, t, team}
+var mm_shells: MultiMesh
+var beam_mesh: ImmediateMesh
+var booms: Array = []         # пул вспышек
+var boom_i := 0
+var fight_acc := 0.0
+var shell_acc := 0.0
+var now := 0.0
+
+# ракета
+var moon_c := Vector3.ZERO
+var moon_r := 40.0
+var pad := Vector3.ZERO
+var pad_up := Vector3.UP
+var rocket: Node3D
+var flame: MeshInstance3D
+var path: Curve3D
+var path_len := 1.0
+var rocket_t := 0.0
+var last_size := Vector2.ZERO
+
+
+func _ready() -> void:
+	_set_globals()
+	var env := WorldEnvironment.new()
+	var e := Environment.new()
+	e.background_mode = Environment.BG_COLOR
+	e.background_color = Color(0.01, 0.01, 0.025)
+	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	e.ambient_light_color = Color(0.25, 0.27, 0.35)
+	e.ambient_light_energy = 0.6
+	env.environment = e
+	add_child(env)
+	var sun := DirectionalLight3D.new()
+	add_child(sun)
+	sun.look_at_from_position(Vector3.ZERO, -_sun_dir(), Vector3.UP)
+	sun.light_energy = 1.3
+
+	cam = Camera3D.new()
+	cam.fov = FOV
+	cam.far = 8000.0
+	cam.position = Vector3(0, 0, CAM_DIST)
+	add_child(cam)
+	cam.current = true
+	_frame_camera()
+
+	_build_stars()
+	_build_planet()
+	_build_moon_and_rocket()
+
+
+func _set_globals() -> void:
+	RenderingServer.global_shader_parameter_set("sun_dir", _sun_dir())
+	RenderingServer.global_shader_parameter_set("sun_level", 1.0)
+	RenderingServer.global_shader_parameter_set("giant_dir", Vector3(-0.3, 0.8, -0.5).normalized())
+	RenderingServer.global_shader_parameter_set("giant_level", 0.6)
+	RenderingServer.global_shader_parameter_set("flash_on", 0.0)
+	RenderingServer.global_shader_parameter_set("land_on", 0.0)
+	RenderingServer.global_shader_parameter_set("space_mode", 0.0)
+	RenderingServer.global_shader_parameter_set("lamp_count", 0)
+
+
+func _sun_dir() -> Vector3:
+	return Vector3(0.35, 0.45, 0.82).normalized()   # спереди-сверху-справа: видимая сторона освещена
+
+
+## Камера смотрит на центр большой луны, а сдвигом кадра луна уезжает в правую часть экрана.
+func _frame_camera() -> void:
+	var sz := get_viewport().get_visible_rect().size
+	last_size = sz
+	var f := (sz.y * 0.5) / tan(deg_to_rad(FOV * 0.5))
+	cam.h_offset = -(0.25 * sz.x) * CAM_DIST / f
+	cam.v_offset = (0.03 * sz.y) * CAM_DIST / f
+
+
+func _build_stars() -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.instance_count = 700
+	var bm := BoxMesh.new()
+	bm.size = Vector3.ONE * 5.0
+	mm.mesh = bm
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	for i in mm.instance_count:
+		var d := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)).normalized()
+		var s := rng.randf_range(0.4, 1.4)
+		mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * s), d * 4000.0))
+	var mi := MultiMeshInstance3D.new()
+	mi.multimesh = mm
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = Color(0.85, 0.88, 1.0)
+	mi.material_override = m
+	add_child(mi)
+
+
+func _unshaded(col: Color, alpha := 1.0) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.albedo_color = Color(col.r, col.g, col.b, alpha)
+	if alpha < 1.0:
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	return m
+
+
+func _shaded(col: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = col
+	m.roughness = 0.9
+	return m
+
+
+func _vc_material(unshaded: bool) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.vertex_color_use_as_albedo = true
+	m.roughness = 0.9
+	if unshaded:
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return m
+
+
+func _mm(mesh: Mesh, count: int, mat: Material) -> MultiMesh:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.instance_count = count
+	mm.mesh = mesh
+	var mi := MultiMeshInstance3D.new()
+	mi.multimesh = mm
+	mi.material_override = mat
+	pnode.add_child(mi)
+	return mm
+
+
+func _up_basis(up: Vector3, s: Vector3) -> Basis:
+	var h := Vector3.UP if absf(up.y) < 0.9 else Vector3.RIGHT
+	var x := up.cross(h).normalized()
+	var z := x.cross(up)
+	return Basis(x * s.x, up * s.y, z * s.z)
+
+
+# ---------------------------------------------------------------------
+# Большая луна и война
+# ---------------------------------------------------------------------
+
+func _build_planet() -> void:
+	planet = Planet.new()
+	planet.generate(20260)
+	pnode = Node3D.new()
+	add_child(pnode)
+	var built: Array = planet.build_mesh()
+	var terrain := MeshInstance3D.new()
+	terrain.mesh = built[0]
+	var tmat := ShaderMaterial.new()
+	tmat.shader = TERRAIN_SHADER
+	terrain.material_override = tmat
+	pnode.add_child(terrain)
+
+	var n := planet.count()
+	own.resize(n)
+	own.fill(-1)
+	has_bld.resize(n)
+	bld_h.resize(n)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99
+	for c in n:
+		var b: bool = rng.randf() < 0.14 and planet.level[c] < D.MAX_LEVEL
+		has_bld[c] = 1 if b else 0
+		bld_h[c] = rng.randf_range(0.6, 2.6)
+
+	var plate := CylinderMesh.new()
+	plate.top_radius = 1.0
+	plate.bottom_radius = 1.0
+	plate.height = 0.08
+	plate.radial_segments = 6
+	plate.rings = 1
+	mm_plates = _mm(plate, n, _vc_material(false))
+	var box := BoxMesh.new()
+	box.size = Vector3(1.4, 1.0, 1.4)
+	mm_blds = _mm(box, n, _vc_material(false))
+	var lb := BoxMesh.new()
+	lb.size = Vector3.ONE * 0.35
+	mm_lights = _mm(lb, n, _vc_material(true))
+	var zero := Transform3D(Basis.from_scale(Vector3.ZERO), Vector3.ZERO)
+	for c in n:
+		mm_plates.set_instance_transform(c, zero)
+		mm_blds.set_instance_transform(c, zero)
+		mm_lights.set_instance_transform(c, zero)
+
+	var ub := BoxMesh.new()
+	ub.size = Vector3(1.3, 0.8, 1.8)
+	mm_units = _mm(ub, UNITS_PER_TEAM * 2, _vc_material(false))
+	var sb := SphereMesh.new()
+	sb.radius = 0.6
+	sb.height = 1.2
+	sb.radial_segments = 6
+	sb.rings = 3
+	mm_shells = _mm(sb, 32, _vc_material(true))
+
+	beam_mesh = ImmediateMesh.new()
+	var bmi := MeshInstance3D.new()
+	bmi.mesh = beam_mesh
+	var bm := StandardMaterial3D.new()
+	bm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bm.vertex_color_use_as_albedo = true
+	bmi.material_override = bm
+	pnode.add_child(bmi)
+
+	for i in 24:
+		var b := MeshInstance3D.new()
+		var s := SphereMesh.new()
+		s.radius = 1.0
+		s.height = 2.0
+		s.radial_segments = 8
+		s.rings = 4
+		b.mesh = s
+		b.material_override = _unshaded(Color(1.0, 0.6, 0.2), 0.8)
+		b.visible = false
+		pnode.add_child(b)
+		booms.append({"n": b, "t": 0.0, "r": 3.0})
+
+	# стартовые площадки сторон и начальные 15% — дальше дорастают до 40% у тебя на глазах
+	var starts := [planet.nearest_cell(axis), planet.nearest_cell(-axis)]
+	for t in 2:
+		_claim(starts[t], t)
+	while counts[0] < n * 0.15 or counts[1] < n * 0.15:
+		for t in 2:
+			_grow(t)
+	for t in 2:
+		for i in UNITS_PER_TEAM:
+			units.append({"team": t, "dir": Vector3.ZERO, "target": Vector3.ZERO, "hp": 3, "dead": 0.0})
+	for u in units:
+		_respawn(u)
+
+
+func _claim(c: int, t: int) -> void:
+	if own[c] == t:
+		return
+	if own[c] >= 0:
+		counts[own[c]] -= 1
+	own[c] = t
+	counts[t] += 1
+	owned[t].append(c)
+	frontier[t].append(c)
+	var up: Vector3 = planet.dirs[c]
+	var p := planet.top_pos(c)
+	var col: Color = D.TEAM_COLORS[t]
+	mm_plates.set_instance_transform(c, Transform3D(_up_basis(up, Vector3(0.95, 1, 0.95)), p + up * 0.04))
+	mm_plates.set_instance_color(c, col.darkened(0.45))
+	if has_bld[c] == 1:
+		var h: float = bld_h[c]
+		mm_blds.set_instance_transform(c, Transform3D(_up_basis(up, Vector3(1, h, 1)), p + up * h * 0.5))
+		mm_blds.set_instance_color(c, col.darkened(0.2).lerp(Color(0.5, 0.5, 0.55), 0.4))
+		mm_lights.set_instance_transform(c, Transform3D(_up_basis(up, Vector3.ONE), p + up * (h + 0.2)))
+		mm_lights.set_instance_color(c, col.lightened(0.3))
+
+
+## Сторона t занимает одну соседнюю свободную клетку от своей границы.
+func _grow(t: int) -> void:
+	var fr: Array = frontier[t]
+	for _try in 6:
+		if fr.is_empty():
+			return
+		var i := randi() % fr.size()
+		var c: int = fr[i]
+		var open_nb: Array = []
+		var nb: PackedInt32Array = planet.nbrs[c]
+		for x in nb:
+			if own[x] == -1:
+				open_nb.append(x)
+		if open_nb.is_empty():
+			fr[i] = fr[fr.size() - 1]
+			fr.pop_back()
+			continue
+		_claim(open_nb[randi() % open_nb.size()], t)
+		return
+
+
+func _rand_own_dir(t: int) -> Vector3:
+	var o: Array = owned[t]
+	return planet.dirs[o[randi() % o.size()]]
+
+
+## Цель юнита — нейтральная полоса между сторонами, ближе к своему краю.
+func _band_target(t: int) -> Vector3:
+	var sgn := 1.0 if t == 0 else -1.0
+	var d := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)).normalized()
+	d = (d - axis * d.dot(axis)).normalized()
+	return (d + axis * sgn * randf_range(0.05, 0.3)).normalized()
+
+
+func _respawn(u: Dictionary) -> void:
+	var t: int = u.team
+	var fr: Array = frontier[t]
+	var d := _rand_own_dir(t)
+	if not fr.is_empty() and randf() < 0.7:
+		d = planet.dirs[fr[randi() % fr.size()]]
+	u.dir = d
+	u.target = _band_target(t)
+	u.hp = 3
+	u.dead = 0.0
+
+
+func _boom(at: Vector3, r: float) -> void:
+	var b: Dictionary = booms[boom_i]
+	boom_i = (boom_i + 1) % booms.size()
+	b.t = 0.0
+	b.r = r
+	var n: MeshInstance3D = b.n
+	n.position = at
+	n.visible = true
+
+
+func _surface(d: Vector3) -> Vector3:
+	return d * (D.PLANET_R + 1.0)
+
+
+func _process(delta: float) -> void:
+	now += delta
+	if get_viewport().get_visible_rect().size != last_size:
+		_frame_camera()
+	pnode.rotate(axis, delta * 0.03)
+	_war_step(delta)
+	_rocket_step(delta)
+
+
+func _war_step(dt: float) -> void:
+	var n := planet.count()
+	for t in 2:
+		if counts[t] < n * TARGET:
+			for k in 4:
+				_grow(t)
+	# юниты: идут к полосе, стреляют в ближайшего врага
+	var ui := 0
+	for u in units:
+		if float(u.dead) > 0.0:
+			u.dead = float(u.dead) - dt
+			if float(u.dead) <= 0.0:
+				_respawn(u)
+			mm_units.set_instance_transform(ui, Transform3D(Basis.from_scale(Vector3.ZERO), Vector3.ZERO))
+			ui += 1
+			continue
+		var d: Vector3 = u.dir
+		var tg: Vector3 = u.target
+		var ang := d.angle_to(tg)
+		var step := UNIT_SPEED * dt / D.PLANET_R
+		if ang < 0.02:
+			u.target = _band_target(int(u.team))
+		else:
+			d = d.slerp(tg, minf(1.0, step / ang)).normalized()
+			u.dir = d
+		var fwd := (tg - d * tg.dot(d)).normalized()
+		var bas := Basis(fwd.cross(d), d, -fwd) if fwd.length() > 0.01 else _up_basis(d, Vector3.ONE)
+		mm_units.set_instance_transform(ui, Transform3D(bas, d * (D.PLANET_R + 0.9)))
+		mm_units.set_instance_color(ui, D.TEAM_COLORS[int(u.team)])
+		ui += 1
+	fight_acc += dt
+	if fight_acc >= 0.18:
+		fight_acc = 0.0
+		for u in units:
+			if float(u.dead) > 0.0 or randf() < 0.4:
+				continue
+			var best = null
+			var bd := SHOT_RANGE
+			for o in units:
+				if o.team == u.team or float(o.dead) > 0.0:
+					continue
+				var dd := _surface(u.dir).distance_to(_surface(o.dir))
+				if dd < bd:
+					bd = dd
+					best = o
+			if best == null:
+				continue
+			beams.append([_surface(u.dir), _surface(best.dir), int(u.team), now + 0.09])
+			best.hp = int(best.hp) - 1
+			if int(best.hp) <= 0:
+				best.dead = 3.0
+				_boom(_surface(best.dir), 3.0)
+	# артиллерия: снаряды навесом из глубины своей территории в полосу у врага
+	shell_acc += dt
+	if shell_acc >= 0.6 and shells.size() < 30:
+		shell_acc = 0.0
+		var t := randi() % 2
+		shells.append({"a": _rand_own_dir(t), "b": _band_target(1 - t), "t": 0.0, "team": t})
+	var si := 0
+	for s in shells:
+		s.t = float(s.t) + dt / 2.5
+	shells = shells.filter(func(sh): return float(sh.t) < 1.0 or _shell_land(sh))
+	for s in shells:
+		var k: float = s.t
+		var a: Vector3 = s.a
+		var p := a.slerp(s.b, k).normalized() * (D.PLANET_R + 1.0 + 35.0 * sin(PI * k))
+		mm_shells.set_instance_transform(si, Transform3D(Basis.IDENTITY, p))
+		mm_shells.set_instance_color(si, D.TEAM_COLORS[int(s.team)].lightened(0.5))
+		si += 1
+	mm_shells.visible_instance_count = si
+	# лучи выстрелов
+	beam_mesh.clear_surfaces()
+	beams = beams.filter(func(bm): return float(bm[3]) > now)
+	if not beams.is_empty():
+		beam_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+		for b in beams:
+			var col: Color = D.TEAM_COLORS[int(b[2])].lightened(0.5)
+			beam_mesh.surface_set_color(col)
+			beam_mesh.surface_add_vertex(b[0])
+			beam_mesh.surface_set_color(col)
+			beam_mesh.surface_add_vertex(b[1])
+		beam_mesh.surface_end()
+	# вспышки
+	for b in booms:
+		var n3: MeshInstance3D = b.n
+		if not n3.visible:
+			continue
+		b.t = float(b.t) + dt
+		var k2: float = float(b.t) / 0.6
+		if k2 >= 1.0:
+			n3.visible = false
+			continue
+		n3.scale = Vector3.ONE * float(b.r) * (0.3 + k2)
+		var bmat: StandardMaterial3D = n3.material_override
+		var bc := bmat.albedo_color
+		bc.a = 0.85 * (1.0 - k2)
+		bmat.albedo_color = bc
+
+
+## Снаряд долетел: взрыв. Возвращает false, чтобы фильтр его убрал.
+func _shell_land(s: Dictionary) -> bool:
+	_boom(_surface(s.b), 4.5)
+	return false
+
+
+# ---------------------------------------------------------------------
+# Маленькая луна слева и ракета-разведчик
+# ---------------------------------------------------------------------
+
+func _build_moon_and_rocket() -> void:
+	var sz := get_viewport().get_visible_rect().size
+	moon_c = cam.project_position(Vector2(sz.x * 0.07, sz.y * 1.02), CAM_DIST + 40.0)
+	var moon := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = moon_r
+	sm.height = moon_r * 2.0
+	sm.radial_segments = 48
+	sm.rings = 24
+	moon.mesh = sm
+	var mmat := ShaderMaterial.new()
+	mmat.shader = MOON_SHADER
+	moon.material_override = mmat
+	moon.position = moon_c
+	add_child(moon)
+	# площадка — сверху-справа на маленькой луне
+	pad_up = Vector3(0.45, 1.0, 0.25).normalized()
+	pad = moon_c + pad_up * moon_r
+	var pn := Node3D.new()
+	pn.transform = Transform3D(_up_basis(pad_up, Vector3.ONE), pad)
+	add_child(pn)
+	var deck := MeshInstance3D.new()
+	var dm := BoxMesh.new()
+	dm.size = Vector3(9, 0.6, 9)
+	deck.mesh = dm
+	deck.material_override = _shaded(Color(0.32, 0.32, 0.36))
+	deck.position = Vector3(0, 0.3, 0)
+	pn.add_child(deck)
+	for c in [Vector3(4, 0.7, 4), Vector3(-4, 0.7, 4), Vector3(4, 0.7, -4), Vector3(-4, 0.7, -4)]:
+		var l := MeshInstance3D.new()
+		var lm := BoxMesh.new()
+		lm.size = Vector3.ONE * 0.6
+		l.mesh = lm
+		l.material_override = _unshaded(Color(1.0, 0.3, 0.2))
+		l.position = c
+		pn.add_child(l)
+	var tower := MeshInstance3D.new()
+	var tm := BoxMesh.new()
+	tm.size = Vector3(0.8, 14, 0.8)
+	tower.mesh = tm
+	tower.material_override = _shaded(Color(0.75, 0.35, 0.15))
+	tower.position = Vector3(3.6, 7, 3.6)
+	pn.add_child(tower)
+
+	rocket = _make_rocket()
+	add_child(rocket)
+	_build_path()
+
+
+func _make_rocket() -> Node3D:
+	var r := Node3D.new()
+	var inner := Node3D.new()
+	inner.scale = Vector3.ONE * ROCKET_SCALE
+	r.add_child(inner)
+	var body := MeshInstance3D.new()
+	var bm := CylinderMesh.new()
+	bm.top_radius = 0.7
+	bm.bottom_radius = 0.7
+	bm.height = 3.0
+	body.mesh = bm
+	body.position = Vector3(0, 2.1, 0)
+	body.material_override = _shaded(Color(0.88, 0.88, 0.9))
+	inner.add_child(body)
+	var nose := MeshInstance3D.new()
+	var nm := CylinderMesh.new()
+	nm.top_radius = 0.0
+	nm.bottom_radius = 0.7
+	nm.height = 1.3
+	nose.mesh = nm
+	nose.position = Vector3(0, 4.25, 0)
+	nose.material_override = _shaded(D.TEAM_COLORS[0])
+	inner.add_child(nose)
+	var win := MeshInstance3D.new()
+	var wm := BoxMesh.new()
+	wm.size = Vector3(0.4, 0.4, 0.1)
+	win.mesh = wm
+	win.position = Vector3(0, 3.0, 0.68)
+	win.material_override = _unshaded(Color(0.4, 0.85, 1.0))
+	inner.add_child(win)
+	for i in 3:
+		var a := TAU * i / 3.0
+		var fin := MeshInstance3D.new()
+		var fm := BoxMesh.new()
+		fm.size = Vector3(0.08, 1.0, 0.6)
+		fin.mesh = fm
+		fin.position = Vector3(cos(a) * 0.85, 1.0, sin(a) * 0.85)
+		fin.rotation.y = -a
+		fin.material_override = _shaded(Color(0.25, 0.25, 0.28))
+		inner.add_child(fin)
+	flame = MeshInstance3D.new()
+	var flm := CylinderMesh.new()
+	flm.top_radius = 0.45
+	flm.bottom_radius = 0.0
+	flm.height = 2.4
+	flame.mesh = flm
+	flame.position = Vector3(0, -0.6, 0)
+	flame.material_override = _unshaded(Color(1.0, 0.6, 0.2))
+	inner.add_child(flame)
+	return r
+
+
+## Маршрут: вертикальный взлёт с площадки, виток вокруг большой луны, возвращение и посадка.
+func _build_path() -> void:
+	var pts: Array = []
+	pts.append(pad)
+	pts.append(pad + pad_up * 15.0)
+	pts.append(pad + pad_up * 55.0 + (-pad).normalized() * 25.0)
+	# виток по наклонённой окружности вокруг большой луны
+	var r := 150.0
+	var e1 := (pad + pad_up * 60.0).normalized()
+	var e2 := e1.cross(Vector3(0.2, 0.3, 1.0).normalized()).normalized()
+	e1 = e2.cross(e1.cross(e2)).normalized()
+	for k in 9:
+		var a := TAU * (k + 0.5) / 9.0
+		pts.append((e1 * cos(a) + e2 * sin(a)) * r)
+	pts.append(pad + pad_up * 60.0 + (-pad).normalized() * 10.0)
+	pts.append(pad + pad_up * 18.0)
+	pts.append(pad + pad_up * 3.0)
+	pts.append(pad)
+	path = Curve3D.new()
+	path.bake_interval = 1.0
+	for i in pts.size():
+		var p: Vector3 = pts[i]
+		var tg := Vector3.ZERO
+		if i > 0 and i < pts.size() - 1:
+			tg = (Vector3(pts[i + 1]) - Vector3(pts[i - 1])) / 6.0
+		path.add_point(p, -tg, tg)
+	path_len = path.get_baked_length()
+
+
+func _rocket_step(dt: float) -> void:
+	rocket_t = fmod(rocket_t + dt, ROCKET_CYCLE)
+	if rocket_t < ROCKET_WAIT:
+		rocket.transform = Transform3D(_up_basis(pad_up, Vector3.ONE), pad)
+		flame.visible = false
+		return
+	var u := (rocket_t - ROCKET_WAIT) / (ROCKET_CYCLE - ROCKET_WAIT)
+	var off := path_len * (u - sin(TAU * u) / TAU)   # плавный разгон и плавное торможение у площадки
+	var p := path.sample_baked(off)
+	var ahead := path.sample_baked(minf(off + 2.0, path_len))
+	var vel := ahead - p
+	var nose := vel.normalized() if vel.length() > 0.01 else pad_up
+	var dpad := p.distance_to(pad)
+	if u > 0.5:
+		# заход на посадку: разворот хвостом вниз, тормозит двигателем
+		nose = pad_up.slerp(nose, clampf((dpad - 25.0) / 60.0, 0.0, 1.0))
+	else:
+		nose = pad_up.slerp(nose, clampf((dpad - 10.0) / 40.0, 0.0, 1.0))
+	rocket.transform = Transform3D(_up_basis(nose, Vector3.ONE), p)
+	flame.visible = true
+	flame.scale = Vector3(1.0, randf_range(0.7, 1.3), 1.0)
