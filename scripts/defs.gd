@@ -310,9 +310,9 @@ const UNIT_STATS := [
 const UNIT_RECIPES := [
 	{I_IRON: 8, I_COPPER: 4},
 	{I_COPPER: 6, I_SILICON: 4, I_CHIP: 1},
-	{I_IRON: 60, I_LEAD: 20, I_CHIP: 10},
+	{I_IRON: 150, I_LEAD: 50, I_SILICON: 40, I_CHIP: 25},
 ]
-const UNIT_LIMIT := [20, 10, 6]     # на одно ядро команды: захватил базу — лимит вырос
+const UNIT_LIMIT := [20, 10, 3]     # на одно ядро команды: захватил базу — лимит вырос
 const KAMIKAZE_FRAC := 0.5          # дрон снимает половину максимальной прочности цели
 const GUARD_RADIUS := 15.0          # охрана: бьёт врагов в этом радиусе от точки охраны
 const MODE_AGGRO := 0

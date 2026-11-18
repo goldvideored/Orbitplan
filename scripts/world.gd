@@ -86,6 +86,7 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var anim_nodes := {}    # клиент: id -> корневой узел постройки с анимацией (рука сборщика, вертушка разветвителя)
 
 # --- только клиент ---
 var bnodes := {}
@@ -2481,7 +2482,7 @@ func _assembler_tick(b: Dictionary) -> void:
 	if b.timer > 0:
 		b.timer -= 1
 		if b.timer == 0:
-			_spawn_unit(b.team, b.cell, b.pn, k)
+			_spawn_unit(b.team, _bay_cell(b), b.pn, k)
 		return
 	if _unit_count(b.team, k) >= _unit_limit(b.team, k):
 		return
@@ -2492,6 +2493,25 @@ func _assembler_tick(b: Dictionary) -> void:
 		for it in need:
 			b.buf[it] = int(b.buf[it]) - int(need[it])
 	b.timer = int(D.UNIT_STATS[k].build)
+
+
+## Площадка сборки юнита — клетка рядом со сборщиком, со стороны, куда он смотрит.
+func _bay_cell(b: Dictionary) -> int:
+	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var toward: int = nb[int(b.dir) % nb.size()]
+	var c := _foot_center(b.cells)
+	var up := c.normalized()
+	var f := planet.top_pos(toward) - planet.top_pos(b.cell)
+	f = (f - up * f.dot(up)).normalized()
+	var best: int = b.cell
+	var best_d := -INF
+	for x in b.outs:
+		var v := planet.top_pos(x) - c
+		var d := (v - up * v.dot(up)).normalized().dot(f)
+		if d > best_d:
+			best_d = d
+			best = x
+	return best
 
 
 func _spawn_unit(team: int, cell: int, pn: int, kind := 0, hp := -1) -> void:
@@ -3624,6 +3644,8 @@ func _vis_add(b: Dictionary) -> void:
 		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
 	_vis_links(n, root, b)
+	if n.has_meta("arm") or n.has_meta("spin"):
+		anim_nodes[b.id] = root
 	root.set_meta("deco", n)
 	root.set_meta("deco_xf", n.transform)
 	root.set_meta("deco_h", _deco_height(n))
@@ -3640,7 +3662,16 @@ func _vis_add(b: Dictionary) -> void:
 # Соединения: конвейеры и трубы стыкуются с соседями, заборы — в сплошную стену, столбы — проводами
 # ---------------------------------------------------------------------
 
-const LINK_TYPES := [D.CONVEYOR, D.PIPE, D.WALL, D.POWER_POLE]
+const LINK_TYPES := [D.CONVEYOR, D.PIPE, D.WALL, D.POWER_POLE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
+const BELT_TYPES := [D.CONVEYOR, D.PIPE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
+
+
+## Постройка сама выдаёт продукт в соседние клетки (к ней пристыкуется лента).
+func _is_producer(o: Dictionary, pipe: bool) -> bool:
+	var t: int = o.type
+	if pipe:
+		return t == D.MELTER
+	return _is_drill(t) or (D.RECIPES.has(t) and t != D.MELTER) or t == D.UNLOADER
 
 
 ## Направление на соседнюю клетку в локальных координатах декора (в плоскости клетки) и расстояние до неё.
@@ -3679,12 +3710,23 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 				feeders.append(x)
 			elif o.type == D.SPLITTER or o.type == D.JUNCTION or o.type == D.BRIDGE:
 				feeders.append(x)
-		_belt_half(n, out[0], half, false, t == D.PIPE, col)
+			elif _is_producer(o, t == D.PIPE):
+				feeders.append(x)
+		# лента заходит внутрь машины, в которую смотрит, — без зазора у стенки
+		var oc := _out_cell(b)
+		var into := 0.0
+		if grid.has(_k(pn, oc)) and not BELT_TYPES.has(int(buildings[grid[_k(pn, oc)]].type)):
+			into = 0.35
+			_intake(n, out[0], half, t == D.PIPE)
+		_belt_half(n, out[0], half + into, false, t == D.PIPE, col)
 		if feeders.is_empty():
 			_belt_half(n, -Vector3(out[0]), half, true, t == D.PIPE, col)   # начало ленты — прямой кусок
 		for x in feeders:
 			var fd := _local_dir(n, cell, x)
-			_belt_half(n, fd[0], float(fd[1]) * 0.5, true, t == D.PIPE, col)
+			var ext := 0.0 if BELT_TYPES.has(int(buildings[grid[_k(pn, x)]].type)) else 0.35
+			_belt_half(n, fd[0], float(fd[1]) * 0.5 + ext, true, t == D.PIPE, col)
+			if ext > 0.0:
+				_intake(n, fd[0], float(fd[1]) * 0.5, t == D.PIPE)
 		if t == D.CONVEYOR:
 			# стык в центре: барабан-ролик под лентой и стрелка направления
 			_cyl(n, 0.36, 0.07, Vector3(0, 0.135, 0), Color(0.16, 0.16, 0.18), 8).material_override = \
@@ -3696,6 +3738,8 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 		else:
 			_box(n, Vector3(0.42, 0.42, 0.42), Vector3(0, 0.3, 0), Color(0.42, 0.45, 0.5)).material_override = \
 					_pmat(Color(0.42, 0.45, 0.5), 1)
+	elif t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
+		_vis_logistic(n, root, b)
 	elif t == D.WALL:
 		var stone := _pmat(Color(0.45, 0.45, 0.48), 1)
 		var post := _cyl(n, 0.45, 2.7, Vector3(0, 1.35, 0), Color(0.4, 0.4, 0.43), 6)
@@ -3747,6 +3791,123 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 		near.sort_custom(func(a, c): return a[0] < c[0])
 		for i in mini(2, near.size()):
 			_wire(root, cell, int(near[i][1]))
+
+
+## Приёмный короб там, где лента входит в машину или выходит из неё.
+func _intake(n: Node3D, v: Vector3, at: float, pipe: bool) -> void:
+	var seg := _seg_node(n, v)
+	if pipe:
+		_box(seg, Vector3(0.12, 0.42, 0.42), Vector3(at, 0.3, 0), Color(0.45, 0.48, 0.52))
+		return
+	_box(seg, Vector3(0.14, 0.42, 0.86), Vector3(at, 0.21, 0), Color(0.3, 0.3, 0.33)).material_override = \
+			_pmat(Color(0.3, 0.3, 0.33), 1)
+	for sz in [-0.3, -0.1, 0.1, 0.3]:
+		_box(seg, Vector3(0.16, 0.08, 0.1), Vector3(at, 0.36, sz), Color(0.9, 0.75, 0.15) if sz < 0.0 or sz > 0.2 \
+				else Color(0.1, 0.1, 0.1))
+
+
+## Разветвитель, перекрёсток, мост: ступица + стыки лент/труб ко всем соседям-лентам.
+func _vis_logistic(n: Node3D, root: Node3D, b: Dictionary) -> void:
+	var t: int = b.type
+	var pn: int = b.pn
+	var cell: int = b.cell
+	var col: Color = D.TEAM_COLORS[b.team]
+	var nb: PackedInt32Array = planet.nbrs[cell]
+	var steel := _pmat(Color(0.5, 0.5, 0.55), 1)
+	var hazard := Color(0.9, 0.75, 0.15)
+	if t != D.BRIDGE:
+		for x in nb:
+			if not grid.has(_k(pn, x)):
+				continue
+			var o: Dictionary = buildings[grid[_k(pn, x)]]
+			var ot: int = o.type
+			if not BELT_TYPES.has(ot) and not _is_producer(o, false) and not _is_producer(o, true):
+				continue
+			var ld := _local_dir(n, cell, x)
+			var inward: bool = (ot == D.CONVEYOR or ot == D.PIPE) and _out_cell(o) == cell
+			if not BELT_TYPES.has(ot):
+				inward = true
+			_belt_half(n, ld[0], float(ld[1]) * 0.5, inward, ot == D.PIPE or (ot == D.MELTER), col)
+	if t == D.SPLITTER:
+		# ступица с вращающимся распределителем
+		_cyl(n, 0.62, 0.22, Vector3(0, 0.11, 0), Color(0.3, 0.3, 0.33), 8).material_override = steel
+		_cyl(n, 0.66, 0.05, Vector3(0, 0.23, 0), hazard, 8)
+		var spin := Node3D.new()
+		spin.position = Vector3(0, 0.27, 0)
+		n.add_child(spin)
+		_cyl(spin, 0.2, 0.1, Vector3.ZERO, Color(0.25, 0.25, 0.28), 8)
+		for a in 3:
+			var vane := Node3D.new()
+			vane.rotation.y = TAU * a / 3.0
+			spin.add_child(vane)
+			_box(vane, Vector3(0.42, 0.08, 0.08), Vector3(0.3, 0, 0), Color(0.75, 0.75, 0.8))
+			_box(vane, Vector3(0.08, 0.1, 0.1), Vector3(0.5, 0, 0), col, true)
+		n.set_meta("spin", spin)
+	elif t == D.JUNCTION:
+		# крестовина: нижний проход и мостик над ним, рамка с жёлто-чёрной разметкой
+		_box(n, Vector3(1.0, 0.2, 1.0), Vector3(0, 0.1, 0), Color(0.3, 0.3, 0.33)).material_override = steel
+		for k in 4:
+			var c := Vector3(0.45 if k % 2 == 0 else -0.45, 0.25, 0.45 if k < 2 else -0.45)
+			_box(n, Vector3(0.14, 0.1, 0.14), c, hazard)
+		_box(n, Vector3(1.0, 0.05, 0.5), Vector3(0, 0.23, 0), Color.WHITE).material_override = \
+				_pmat(Color(0.2, 0.2, 0.22), 2)
+		var top := Node3D.new()
+		top.position = Vector3(0, 0.42, 0)
+		top.rotation.y = PI / 2.0
+		n.add_child(top)
+		_box(top, Vector3(1.0, 0.05, 0.5), Vector3.ZERO, Color.WHITE).material_override = _pmat(Color(0.2, 0.2, 0.22), 2)
+		for sz in [-0.3, 0.3]:
+			_box(top, Vector3(1.0, 0.12, 0.06), Vector3(0, 0.03, sz), Color(0.58, 0.56, 0.5))
+			_box(n, Vector3(0.08, 0.4, 0.08), Vector3(sz, 0.2, sz), Color(0.4, 0.4, 0.44))
+			_box(n, Vector3(0.08, 0.4, 0.08), Vector3(sz, 0.2, -sz), Color(0.4, 0.4, 0.44))
+	else:
+		# мост: въездной пандус сзади, опора, площадка наверху; есть дальний мост — пролёт-ферма до него
+		var out := _local_dir(n, cell, _out_cell(b))
+		var fwd: Vector3 = out[0]
+		var half: float = float(out[1]) * 0.5
+		var ramp := _seg_node(n, fwd)
+		var ang := atan2(0.95, half)
+		var rp := Node3D.new()
+		rp.position = Vector3(-half * 0.5, 0.55, 0)
+		rp.rotation.z = ang
+		ramp.add_child(rp)
+		var rl := sqrt(half * half + 0.95 * 0.95)
+		_box(rp, Vector3(rl, 0.05, 0.6), Vector3.ZERO, Color.WHITE).material_override = _pmat(Color(0.2, 0.2, 0.22), 2)
+		for sz in [-0.34, 0.34]:
+			_box(rp, Vector3(rl, 0.14, 0.07), Vector3(0, 0.02, sz), Color(0.58, 0.56, 0.5))
+		for sz in [-0.3, 0.3]:
+			_box(ramp, Vector3(0.12, 1.1, 0.12), Vector3(0.1, 0.55, sz), Color(0.4, 0.4, 0.45)).material_override = steel
+		_box(ramp, Vector3(0.6, 0.14, 0.8), Vector3(0.15, 1.1, 0), Color(0.32, 0.32, 0.36)).material_override = steel
+		_box(ramp, Vector3(0.62, 0.04, 0.5), Vector3(0.15, 1.19, 0), col, true)
+		var tgt = _bridge_target(b)
+		if tgt == null:
+			_belt_half(n, fwd, half, false, false, col)   # дальнего моста нет — выдаёт вперёд
+		else:
+			_span(root, b, tgt, col)
+
+
+## Пролёт моста: лента по воздуху между площадками двух мостов.
+func _span(root: Node3D, a: Dictionary, c: Dictionary, col: Color) -> void:
+	var pa := planet.top_pos(a.cell) + planet.dirs[a.cell] * 1.2
+	var pc := planet.top_pos(c.cell) + planet.dirs[c.cell] * 1.2
+	var d := pc - pa
+	var dir := d.normalized()
+	var up := ((pa + pc) * 0.5).normalized()
+	var side := up.cross(dir).normalized()
+	var bas := Basis(dir, side.cross(dir), side)   # +X — вдоль пролёта
+	var holder := Node3D.new()
+	holder.transform = Transform3D(bas, (pa + pc) * 0.5)
+	root.add_child(holder)
+	var ln := d.length()
+	_box(holder, Vector3(ln, 0.05, 0.5), Vector3.ZERO, Color.WHITE).material_override = _pmat(Color(0.2, 0.2, 0.22), 2)
+	for sz in [-0.3, 0.3]:
+		_box(holder, Vector3(ln, 0.08, 0.06), Vector3(0, -0.06, sz), Color(0.5, 0.5, 0.55))
+		_box(holder, Vector3(ln, 0.05, 0.05), Vector3(0, 0.28, sz), col.darkened(0.2))
+	var k := int(ln / 0.8)
+	for i in k:
+		var x := -ln * 0.5 + (i + 0.5) * ln / k
+		for sz in [-0.3, 0.3]:
+			_box(holder, Vector3(0.04, 0.34, 0.04), Vector3(x, 0.11, sz), Color(0.5, 0.5, 0.55))
 
 
 ## Половина ленты/трубы: от центра клетки до края в сторону v. inward — груз едет к центру.
@@ -3814,6 +3975,12 @@ func _refresh_links(b: Dictionary) -> void:
 		for x in nb:
 			var id: int = grid.get(_k(pn, x), -1)
 			if id != -1 and id != b.id and LINK_TYPES.has(int(buildings[id].type)):
+				ids[id] = true
+	if b.type == D.BRIDGE:
+		var rb := planet.rings(b.cell, D.BRIDGE_RANGE + 1)
+		for x in rb:
+			var id: int = grid.get(_k(pn, x), -1)
+			if id != -1 and id != b.id and int(buildings[id].type) == D.BRIDGE:
 				ids[id] = true
 	if b.type == D.POWER_POLE:
 		var r := planet.rings(b.cell, D.POLE_RING)
@@ -3948,31 +4115,73 @@ func _update_beam(root: Node3D, b: Dictionary, target: Vector3) -> void:
 		var o: Node3D = others[by]
 		if o.visible:
 			from = o.global_position + o.global_position.normalized() * 1.2
-	var beam: MeshInstance3D = root.get_meta("beam") if root.has_meta("beam") else null
 	if from == null or Vector3(from).distance_to(target) > 40.0:
-		if beam != null:
-			beam.visible = false
+		_laser_off(root, "beam")
 		return
-	if beam == null:
-		beam = MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = Vector3(0.05, 0.05, 1.0)
-		beam.mesh = bm
-		var col: Color = Color(1.0, 0.55, 0.15) if b.decon else D.TEAM_COLORS[b.team].lightened(0.4)
-		beam.material_override = _glow_mat(col, 0.8)
-		root.add_child(beam)
-		root.set_meta("beam", beam)
+	var col: Color = Color(1.0, 0.55, 0.15) if b.decon else D.TEAM_COLORS[b.team].lightened(0.4)
 	var jitter := Vector3(randf_range(-0.3, 0.3), 0.0, randf_range(-0.3, 0.3))
-	var to := target + jitter
-	var f: Vector3 = from
-	var d := to - f
-	var dir := d.normalized()
+	_laser(root, "beam", from, target + jitter, col)
+
+
+## Лазерный луч: яркая сердцевина + полупрозрачное свечение + искры в точке попадания.
+## holder — узел в мировых координатах (без поворота), key — имя луча в его meta.
+func _laser(holder: Node3D, key: String, from: Vector3, to: Vector3, col: Color) -> void:
+	var ln: Node3D = holder.get_meta(key) if holder.has_meta(key) else null
+	if ln == null:
+		ln = Node3D.new()
+		holder.add_child(ln)
+		holder.set_meta(key, ln)
+		var core := MeshInstance3D.new()
+		var cm := BoxMesh.new()
+		cm.size = Vector3(0.035, 0.035, 1.0)
+		core.mesh = cm
+		core.material_override = _mat(col.lerp(Color.WHITE, 0.6), true)
+		ln.add_child(core)
+		var glow := MeshInstance3D.new()
+		var gm := BoxMesh.new()
+		gm.size = Vector3(0.13, 0.13, 1.0)
+		glow.mesh = gm
+		glow.material_override = _glow_mat(col, 0.3)
+		ln.add_child(glow)
+		var spark := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.12
+		sm.height = 0.24
+		sm.radial_segments = 6
+		sm.rings = 3
+		spark.mesh = sm
+		spark.material_override = _mat(col.lerp(Color.WHITE, 0.4), true)
+		ln.add_child(spark)
+		for k in 4:
+			var bit := MeshInstance3D.new()
+			var bm := BoxMesh.new()
+			bm.size = Vector3(0.04, 0.04, 0.04)
+			bit.mesh = bm
+			bit.material_override = _mat(Color(1.0, 0.85, 0.4), true)
+			ln.add_child(bit)
+	ln.visible = true
+	var d := to - from
+	var dist := maxf(d.length(), 0.01)
+	var dir := d / dist
 	var side := dir.cross(Vector3.UP)
 	if side.length() < 0.01:
 		side = dir.cross(Vector3.RIGHT)
 	side = side.normalized()
-	beam.visible = true
-	beam.transform = Transform3D(Basis(side, dir.cross(side), dir * d.length()), (f + to) * 0.5)
+	var flick := randf_range(0.7, 1.3)
+	var bas := Basis(side * flick, dir.cross(side) * flick, dir * dist)
+	var mid := (from + to) * 0.5
+	(ln.get_child(0) as Node3D).transform = Transform3D(bas, mid)
+	(ln.get_child(1) as Node3D).transform = Transform3D(bas, mid)
+	(ln.get_child(2) as Node3D).transform = Transform3D(Basis.from_scale(Vector3.ONE * randf_range(0.5, 1.4)), to)
+	var up := to.normalized()
+	for k in 4:
+		var rnd := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)).normalized()
+		(ln.get_child(3 + k) as Node3D).position = to + (rnd + up) * randf_range(0.1, 0.45)
+
+
+func _laser_off(holder: Node3D, key: String) -> void:
+	if holder.has_meta(key):
+		(holder.get_meta(key) as Node3D).visible = false
 
 
 ## Стройка/снос начались или закончились — пересобрать каркас.
@@ -4008,7 +4217,8 @@ func _update_construction(delta: float) -> void:
 	_update_assembly()
 
 
-## Юнит собирается на крыше сборщика: растёт снизу вверх в каркасе.
+## Юнит собирается на площадке рядом со сборщиком: растёт снизу вверх в каркасе,
+## робот-рука на крыше сборщика водит по нему лазером.
 func _update_assembly() -> void:
 	for id in asm_nodes.keys():
 		var hv = asm_nodes[id]
@@ -4031,12 +4241,17 @@ func _update_assembly() -> void:
 			holder.queue_free()
 			holder = null
 		if holder == null:
-			var xf: Transform3D = root.get_meta("deco_xf")
-			var top: Vector3 = xf.origin + xf.basis.y * float(root.get_meta("deco_h"))
+			var bay := _bay_cell(b)
+			var up: Vector3 = planet.dirs[bay]
+			var away := planet.top_pos(bay) - _foot_center(b.cells)
+			away = (away - up * away.dot(up)).normalized()
 			holder = Node3D.new()
-			holder.transform = Transform3D(xf.basis.orthonormalized(), top)
+			holder.transform = Transform3D(Basis(up.cross(-away), up, -away).orthonormalized(), planet.top_pos(bay))
 			holder.set_meta("kind", kind)
 			root.add_child(holder)
+			# площадка сборки: плита с разметкой
+			_cyl(holder, 0.85, 0.06, Vector3(0, 0.03, 0), Color(0.3, 0.3, 0.33), 6)
+			_cyl(holder, 0.9, 0.03, Vector3(0, 0.07, 0), Color(0.9, 0.75, 0.15), 6)
 			var mm := MultiMesh.new()
 			mm.transform_format = MultiMesh.TRANSFORM_3D
 			mm.use_custom_data = true
@@ -4050,14 +4265,62 @@ func _update_assembly() -> void:
 			holder.set_meta("mm", mm)
 			var ch := 2.8 if kind == D.U_MECH else 1.1
 			var cw := 1.3 if kind == D.U_MECH else 0.7
-			var cage := _make_cage(holder, Transform3D.IDENTITY, cw, ch, D.TEAM_COLORS[b.team].lightened(0.3))
+			var cage := _make_cage(holder, Transform3D(Basis.IDENTITY, Vector3(0, 0.08, 0)), cw, ch,
+				D.TEAM_COLORS[b.team].lightened(0.3))
 			holder.set_meta("cage", cage)
 			asm_nodes[id] = holder
 		var mmh: MultiMesh = holder.get_meta("mm")
-		mmh.set_instance_transform(0, Transform3D(Basis.from_scale(Vector3(1.0, maxf(p, 0.03), 1.0)), Vector3.ZERO))
+		var lift := D.DRONE_ALT * 0.5 if kind == D.U_DRONE else 0.0
+		mmh.set_instance_transform(0, Transform3D(Basis.from_scale(Vector3(1.0, maxf(p, 0.03), 1.0)),
+			Vector3(0, 0.08 + lift * p, 0)))
 		var cg: Node3D = holder.get_meta("cage")
 		var plate: Node3D = cg.get_meta("plate")
 		plate.position.y = float(cg.get_meta("h")) * p
+	_update_anim()
+
+
+## Анимации построек: рука сборщика (работает — лазер по собираемому юниту), вертушка разветвителя.
+func _update_anim() -> void:
+	var tm := Time.get_ticks_msec() / 1000.0
+	for id in anim_nodes.keys():
+		var rv = anim_nodes[id]
+		if not is_instance_valid(rv) or not buildings.has(id):
+			anim_nodes.erase(id)
+			continue
+		var root: Node3D = rv
+		var n: Node3D = root.get_meta("deco")
+		var b: Dictionary = buildings[id]
+		if n.has_meta("spin"):
+			var busy_spin := not _busy(b) and b.item != D.I_NONE
+			(n.get_meta("spin") as Node3D).rotation.y = tm * (6.0 if busy_spin else 1.5)
+			continue
+		if not n.has_meta("arm"):
+			continue
+		var arm: Array = n.get_meta("arm")
+		var yaw: Node3D = arm[0]
+		var sh: Node3D = arm[1]
+		var el: Node3D = arm[2]
+		var tip: Node3D = arm[3]
+		var working := asm_prog.has(id) and asm_nodes.has(id) and not _busy(b)
+		var ph := float(id) * 1.7
+		if working:
+			var holder: Node3D = asm_nodes[id]
+			var e: Array = asm_prog[id]
+			var p := clampf(float(e[0]), 0.0, 1.0)
+			var cg: Node3D = holder.get_meta("cage")
+			var hgt: float = float(cg.get_meta("h")) * p
+			# куда тянуться: на площадку, в текущую высоту сборки
+			var aim := holder.global_transform * Vector3(sin(tm * 2.3 + ph) * 0.35, 0.1 + hgt, cos(tm * 1.7 + ph) * 0.35)
+			var lv := n.global_transform.affine_inverse() * aim - yaw.position
+			yaw.rotation.y = lerp_angle(yaw.rotation.y, atan2(-lv.z, lv.x), 0.2)
+			sh.rotation.z = 0.35 + 0.15 * sin(tm * 3.1 + ph)
+			el.rotation.z = -0.9 + 0.2 * sin(tm * 2.2 + ph)
+			_laser(root, "arm_laser", tip.global_position, aim, Color(1.0, 0.3, 0.2))
+		else:
+			yaw.rotation.y = lerp_angle(yaw.rotation.y, 0.6 * sin(tm * 0.4 + ph), 0.05)
+			sh.rotation.z = 0.9 + 0.08 * sin(tm * 0.7 + ph)
+			el.rotation.z = -1.7 + 0.08 * sin(tm * 0.9 + ph)
+			_laser_off(root, "arm_laser")
 
 
 ## Поворотная часть турели: head крутится вокруг вертикали, pitch внутри неё поднимает ствол.
@@ -4078,7 +4341,7 @@ func _turret_head(n: Node3D, head_pos: Vector3, pitch_pos: Vector3) -> Node3D:
 func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	var dark := col.darkened(0.45)
 	var metal := Color(0.6, 0.6, 0.65)
-	if t == D.CONVEYOR or t == D.PIPE or t == D.WALL or t == D.POWER_POLE:
+	if LINK_TYPES.has(t):
 		pass   # форма зависит от соседей — строит _vis_links
 	elif t == D.DRILL:
 		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), dark)
@@ -4143,8 +4406,35 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(n, Vector3(0.7, 0.12, 0.7), Vector3(0, 0.96, 0), Color(0.3, 1.0, 0.45), true)
 		_box(n, Vector3(0.12, 0.3, 0.12), Vector3(0.45, 1.05, 0.45), Color(0.95, 0.8, 0.3))
 	elif t == D.ASSEMBLER:
-		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), col.darkened(0.25))
-		_box(n, Vector3(0.7, 0.25, 0.7), Vector3(0, 1.32, 0), col, true)
+		# цех: корпус с полосами, на крыше — робот-рука с лазером (поворот, плечо, локоть, излучатель)
+		_box(n, Vector3(1.35, 0.75, 1.35), Vector3(0, 0.375, 0), col.darkened(0.3)).material_override = \
+				_pmat(col.darkened(0.3), 1)
+		_box(n, Vector3(1.4, 0.08, 1.4), Vector3(0, 0.79, 0), Color(0.85, 0.7, 0.15))
+		for sx in [-0.45, 0.45]:
+			_box(n, Vector3(0.2, 0.06, 1.37), Vector3(sx, 0.5, 0), Color(0.15, 0.15, 0.17))
+		var yaw := Node3D.new()
+		yaw.position = Vector3(-0.2, 0.83, 0)
+		n.add_child(yaw)
+		_cyl(yaw, 0.26, 0.2, Vector3(0, 0.1, 0), Color(0.55, 0.56, 0.6), 10).material_override = \
+				_pmat(Color(0.55, 0.56, 0.6), 1)
+		var sh := Node3D.new()
+		sh.position = Vector3(0, 0.28, 0)
+		yaw.add_child(sh)
+		_box(sh, Vector3(0.24, 0.24, 0.3), Vector3.ZERO, Color(0.9, 0.6, 0.15))   # плечевой сустав
+		_box(sh, Vector3(0.75, 0.14, 0.16), Vector3(0.37, 0, 0), Color(0.92, 0.65, 0.18)).material_override = \
+				_pmat(Color(0.92, 0.65, 0.18), 1)
+		var el := Node3D.new()
+		el.position = Vector3(0.75, 0, 0)
+		sh.add_child(el)
+		_cyl(el, 0.1, 0.24, Vector3.ZERO, Color(0.3, 0.3, 0.33), 8).rotation = Vector3(PI / 2.0, 0, 0)
+		_box(el, Vector3(0.6, 0.11, 0.12), Vector3(0.3, 0, 0), Color(0.92, 0.65, 0.18)).material_override = \
+				_pmat(Color(0.92, 0.65, 0.18), 1)
+		var tip := Node3D.new()
+		tip.position = Vector3(0.62, 0, 0)
+		el.add_child(tip)
+		_box(tip, Vector3(0.14, 0.16, 0.16), Vector3.ZERO, Color(0.25, 0.25, 0.28))
+		_box(tip, Vector3(0.05, 0.08, 0.08), Vector3(0.09, 0, 0), Color(1.0, 0.25, 0.2), true)   # линза
+		n.set_meta("arm", [yaw, sh, el, tip])
 	elif t == D.TURRET:
 		_cyl(n, 0.55, 0.6, Vector3(0, 0.3, 0), col.darkened(0.35))
 		var pitch := _turret_head(n, Vector3(0, 0.75, 0), Vector3.ZERO)
@@ -4159,20 +4449,6 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.9, 0.5, 0.22))   # короб с медными патронами
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
-	elif t == D.SPLITTER:
-		_cyl(n, 0.8, 0.14, Vector3(0, 0.07, 0), Color(0.32, 0.32, 0.35), 6)
-		for a in 3:
-			var arm := _box(n, Vector3(0.5, 0.1, 0.14), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
-			arm.rotation.y = TAU * a / 3.0
-			arm.position = Vector3(cos(arm.rotation.y), 0, -sin(arm.rotation.y)) * 0.3 + Vector3(0, 0.17, 0)
-	elif t == D.JUNCTION:
-		_cyl(n, 0.8, 0.14, Vector3(0, 0.07, 0), Color(0.32, 0.32, 0.35), 6)
-		_box(n, Vector3(1.2, 0.1, 0.18), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
-		_box(n, Vector3(0.18, 0.1, 1.2), Vector3(0, 0.17, 0), Color(0.9, 0.75, 0.2), true)
-	elif t == D.BRIDGE:
-		_box(n, Vector3(0.2, 0.9, 0.9), Vector3(-0.35, 0.45, 0), Color(0.45, 0.45, 0.5))
-		_box(n, Vector3(1.0, 0.14, 0.9), Vector3(0.05, 0.95, 0), Color(0.35, 0.35, 0.4))
-		_box(n, Vector3(0.6, 0.1, 0.18), Vector3(0.2, 1.06, 0), col, true)
 	elif t == D.REPAIR:
 		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78))
 		_box(n, Vector3(0.5, 0.14, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
@@ -5560,15 +5836,20 @@ func _bar(col: Color, h := 10) -> ProgressBar:
 	pb.max_value = 1.0
 	pb.step = 0.001
 	pb.custom_minimum_size = Vector2(40, h)
+	pb.add_theme_font_size_override("font_size", 1)   # высоту задаём сами, а не по шрифту
 	pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pb.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	pb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var bg := StyleBoxFlat.new()
-	bg.bg_color = Color(0, 0, 0, 0.6)
-	bg.border_color = Color(1, 1, 1, 0.12)
+	bg.bg_color = Color(0.0, 0.0, 0.0, 0.65)
+	bg.border_color = Color(1, 1, 1, 0.18)
 	bg.set_border_width_all(1)
+	bg.set_content_margin_all(0)
 	var fg := StyleBoxFlat.new()
 	fg.bg_color = col
+	fg.border_color = Color(0, 0, 0, 0.0)
+	fg.set_border_width_all(1)   # заливка внутри рамки, а не поверх
+	fg.set_content_margin_all(0)
 	pb.add_theme_stylebox_override("background", bg)
 	pb.add_theme_stylebox_override("fill", fg)
 	return pb
@@ -5603,12 +5884,26 @@ func _ui_section(parent: Control) -> VBoxContainer:
 	return v
 
 
-func _ui_sep(parent: Control) -> void:
+func _ui_sep(parent: Control) -> ColorRect:
 	var r := ColorRect.new()
 	r.color = Color(1, 1, 1, 0.12)
 	r.custom_minimum_size = Vector2(0, 1)
 	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	parent.add_child(r)
+	return r
+
+
+## Строка без полоски — для величин без предела (высота, скорость): [значок][число].
+func _ui_stat(parent: Control, icon_id: int) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(_icon_rect(icon_id))
+	var num := _ui_label(14, Color(1, 1, 1))
+	num.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(num)
+	parent.add_child(row)
+	return {"row": row, "num": num}
 
 
 func _build_panel(layer: CanvasLayer) -> void:
@@ -5673,7 +5968,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.bases = bases
 
 	# --- склад
-	_ui_sep(root)
+	ui.seps = [_ui_sep(root)]
 	var store := GridContainer.new()
 	store.columns = 3
 	store.add_theme_constant_override("h_separation", 8)
@@ -5704,14 +5999,14 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.creative = cr
 
 	# --- юниты: количество / лимит
-	_ui_sep(root)
+	ui.seps.append(_ui_sep(root))
 	var us := _ui_section(root)
 	ui.units_box = us
 	ui.units = [_ui_row(us, Icons.UI_TANK, Color(0.55, 0.8, 0.6)), _ui_row(us, Icons.UI_DRONE, Color(0.55, 0.8, 0.6)),
 		_ui_row(us, Icons.UI_MECH, Color(0.55, 0.8, 0.6))]
 
 	# --- в руках: название и цена (значки ресурсов, красным — не хватает)
-	_ui_sep(root)
+	ui.seps.append(_ui_sep(root))
 	var held := _ui_section(root)
 	ui.held_box = held
 	ui.held_name = _ui_label(15, Color(1, 1, 1))
@@ -5767,10 +6062,10 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.s_hull = _ui_row(ship, Icons.UI_HULL, Color(0.6, 0.7, 0.85))
 	ui.s_cargo = _ui_row(ship, Icons.UI_CARGO, Color(0.8, 0.65, 0.35))
 	_ui_sep(ship)
-	ui.s_alt = _ui_row(ship, Icons.UI_ALT, Color(0.4, 0.85, 0.45))
-	ui.s_speed = _ui_row(ship, Icons.UI_SPEED, Color(0.35, 0.8, 1.0))
-	ui.s_ap = _ui_row(ship, Icons.UI_CLOCK, Color(0.45, 0.6, 1.0))
-	ui.s_pe = _ui_row(ship, Icons.UI_CLOCK, Color(1.0, 0.75, 0.3))
+	ui.s_alt = _ui_stat(ship, Icons.UI_ALT)
+	ui.s_speed = _ui_stat(ship, Icons.UI_SPEED)
+	ui.s_ap = _ui_stat(ship, Icons.UI_CLOCK)
+	ui.s_pe = _ui_stat(ship, Icons.UI_CLOCK)
 	var stx := _ui_label(12, Color(0.75, 0.78, 0.82))
 	stx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	stx.custom_minimum_size = Vector2(250, 0)
@@ -5826,6 +6121,8 @@ func _update_hud() -> void:
 	var flying := piloting != null
 	for k in ["top", "store_box", "units_box", "held_box"]:
 		(ui[k] as Control).visible = not flying
+	for sp in ui.seps:
+		(sp as Control).visible = not flying
 	ui.ship.visible = flying
 	ui.creative.visible = creative and not flying
 	var hints := PackedStringArray()
@@ -6026,20 +6323,19 @@ func _update_ship_panel() -> void:
 	var cargo: int = D.SHIP_KINDS[1].cargo
 	_set_row(ui.s_cargo, float(used) / float(cargo), "%d / %d" % [used, cargo])
 	var soi: float = SkyCalc.soi(sh.pn) if sh.pn >= 0 else 1.0
-	_set_row(ui.s_alt, sh.altitude() / soi if sh.pn >= 0 else 0.0, "%d м" % int(sh.altitude()))
+	ui.s_alt.num.text = "высота %d м" % int(sh.altitude())
 	var vv := sh.vel.dot(up)
-	_set_row(ui.s_speed, sh.vel.length() / 60.0, "%d  %s%d" % [int(sh.vel.length()), "↑" if vv >= 0.0 else "↓", absi(int(vv))])
+	ui.s_speed.num.text = "%d м/с   верт. %+d" % [int(sh.vel.length()), int(vv)]
 	var orb := sh.orbit()
 	var oi := sh.orbit_info()
 	var has_orb := not orb.is_empty() and not sh.landed
 	(ui.s_ap.row as Control).visible = has_orb
 	(ui.s_pe.row as Control).visible = has_orb
 	if has_orb:
-		var ref := soi if sh.pn >= 0 else 8000.0
-		var tap := ("  %dс" % int(oi.t_ap)) if not oi.is_empty() else ""
-		var tpe := ("  %dс" % int(oi.t_pe)) if not oi.is_empty() else ""
-		_set_row(ui.s_ap, float(orb[0]) / ref, "Ап %d%s" % [int(orb[0]), tap])
-		_set_row(ui.s_pe, maxf(float(orb[1]), 0.0) / ref, "Пе %d%s" % [int(orb[1]), tpe])
+		var tap := ("   через %d с" % int(oi.t_ap)) if not oi.is_empty() else ""
+		var tpe := ("   через %d с" % int(oi.t_pe)) if not oi.is_empty() else ""
+		ui.s_ap.num.text = "Ап %d м%s" % [int(orb[0]), tap]
+		ui.s_pe.num.text = "Пе %d м%s" % [int(orb[1]), tpe]
 	var lines := PackedStringArray()
 	if sh.landed:
 		lines.append("На поверхности")
