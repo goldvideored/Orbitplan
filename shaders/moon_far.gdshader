@@ -15,5 +15,5 @@ void vertex() {
 void fragment() {
 	float l = max(dot(normalize(n_w), sun_dir), 0.0);
 	l = floor(l * 16.0 + 0.5) / 16.0;
-	ALBEDO = albedo.rgb * max(l, 0.03);
+	ALBEDO = albedo.rgb * max(l, 0.12);   // ночная сторона тёмная, но силуэт виден
 }

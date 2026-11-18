@@ -41,7 +41,7 @@ const ST_STOP := 3    # стоит (некуда отдавать, нет эне
 const STATE_COLORS := [Color(0.55, 0.55, 0.6), Color(0.2, 1.0, 0.3), Color(1.0, 0.8, 0.15), Color(1.0, 0.15, 0.1)]
 # высота огонька над постройкой (в локальных координатах декора)
 const IND_H := {
-	D.CORE: 2.4, D.DRILL: 1.75, D.DRILL2: 2.3, D.DRILL3: 2.6, D.SOLAR: 0.95,
+	D.CORE: 2.4, D.DRILL: 2.15, D.DRILL2: 1.95, D.DRILL3: 3.3, D.SOLAR: 1.5,
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
@@ -86,6 +86,7 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var bstate := {}        # клиент: id -> состояние ST_* (для скорости анимаций)
 var anim_nodes := {}    # клиент: id -> корневой узел постройки с анимацией (рука сборщика, вертушка разветвителя)
 
 # --- только клиент ---
@@ -1187,6 +1188,7 @@ func states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
 
 func _apply_states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
 	for i in ids.size():
+		bstate[ids[i]] = sts[i]
 		var root = bnodes.get(ids[i])
 		if root == null or not root.has_meta("ind"):
 			continue
@@ -3582,7 +3584,19 @@ func _vis_add(b: Dictionary) -> void:
 		root.add_child(pbody)
 	if t == D.CORE:
 		_cyl(n, 0.9, 0.5, Vector3(0, 0.25, 0), col.darkened(0.2), 6)
-		_box(n, Vector3(1.1, 1.6, 1.1), Vector3(0, 1.3, 0), col, true)
+		var crystal := Node3D.new()
+		crystal.position = Vector3(0, 1.3, 0)
+		n.add_child(crystal)
+		_box(crystal, Vector3(1.1, 1.6, 1.1), Vector3.ZERO, col, true)
+		_anim(n, crystal, "spin", 0.4, 1.0, true)
+		_anim(n, crystal, "bob", 0.1, 1.0, true)
+		var orbit := Node3D.new()
+		orbit.position = Vector3(0, 1.3, 0)
+		n.add_child(orbit)
+		for k in 3:
+			var a := TAU * k / 3.0
+			_box(orbit, Vector3(0.18, 0.18, 0.18), Vector3(cos(a) * 1.1, 0.4 * sin(a * 2.0), sin(a) * 1.1), col.lightened(0.3), true)
+		_anim(n, orbit, "spin", -1.2, 1.0, true)
 	else:
 		_vis_shape(n, t, col)
 	if n.has_meta("bulb"):
@@ -3644,7 +3658,7 @@ func _vis_add(b: Dictionary) -> void:
 		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
 	_vis_links(n, root, b)
-	if n.has_meta("arm") or n.has_meta("spin"):
+	if n.has_meta("arm") or n.has_meta("spin") or n.has_meta("anim"):
 		anim_nodes[b.id] = root
 	root.set_meta("deco", n)
 	root.set_meta("deco_xf", n.transform)
@@ -3778,7 +3792,8 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 		var wood := Color(0.5, 0.45, 0.35)
 		_cyl(n, 0.08, 2.6, Vector3(0, 1.3, 0), wood)
 		_box(n, Vector3(0.9, 0.08, 0.08), Vector3(0, 2.4, 0), wood)
-		_box(n, Vector3(0.14, 0.14, 0.14), Vector3(0, 2.65, 0), Color(1.0, 0.85, 0.3), true)
+		var pl := _box(n, Vector3(0.14, 0.14, 0.14), Vector3(0, 2.65, 0), Color(1.0, 0.85, 0.3), true)
+		_anim(n, pl, "blink", 1.0, 0.7, true)
 		# провода — к двум ближайшим столбам своей команды, поставленным раньше
 		var near: Array = []
 		var r := planet.rings(cell, D.POLE_RING)
@@ -4279,6 +4294,66 @@ func _update_assembly() -> void:
 	_update_anim()
 
 
+## Деталь декора по описанию из _anim. Скорость зависит от того, работает ли постройка.
+func _run_anim(n: Node3D, b: Dictionary, id: int) -> void:
+	var dt := get_process_delta_time()
+	var st: int = bstate.get(id, ST_OK)
+	var act: float = 0.0 if _busy(b) else [0.0, 1.0, 0.5, 0.0][clampi(st, 0, 3)]
+	for spec in n.get_meta("anim"):
+		var node: Node3D = spec.n
+		if not is_instance_valid(node):
+			continue
+		var a: float = 1.0 if (bool(spec.always) and not _busy(b)) else act
+		var v: float = spec.v
+		var w: float = spec.w
+		var base: Vector3 = spec.base
+		spec.ph = float(spec.ph) + dt * w * TAU * a
+		var ph: float = spec.ph
+		match String(spec.k):
+			"spin":
+				var r := node.rotation
+				if spec.ax == "x":
+					r.x += dt * v * a
+				elif spec.ax == "z":
+					r.z += dt * v * a
+				else:
+					r.y += dt * v * a
+				node.rotation = r
+			"bob":
+				node.position = base + Vector3(0, sin(ph) * v, 0)
+			"slide":
+				node.position = base + Vector3(0, 0, sin(ph) * v)
+			"swing":
+				node.rotation = base + Vector3(0, sin(ph) * v, 0)
+			"pulse":
+				node.scale = base * (1.0 + v * sin(ph))
+			"blink":
+				node.visible = a > 0.0 and fmod(ph / TAU, 1.0) < 0.55
+			"smoke":
+				node.visible = a > 0.0
+				var cnt := node.get_child_count()
+				for i in cnt:
+					var puff: Node3D = node.get_child(i)
+					var k := fmod(ph / TAU + float(i) / cnt, 1.0)
+					puff.position = Vector3(sin(k * 5.0 + i) * 0.12, k * v, cos(k * 4.0 + i) * 0.12)
+					puff.scale = Vector3.ONE * (0.5 + k * 1.3) * (1.0 - k * 0.6)
+			"sun":
+				var sun: Vector3 = sky_state.get("sun", Vector3.ZERO)
+				var par := node.get_parent() as Node3D
+				var up := par.global_transform.basis.y.normalized()
+				var tgt := up
+				if sun.dot(up) > 0.05:
+					tgt = (up * 0.35 + sun.normalized()).normalized()
+				var lt := (par.global_transform.basis.inverse() * tgt).normalized()
+				var cur := node.transform.basis.y.normalized()
+				var nt := cur.slerp(lt, minf(1.0, dt * 2.0)).normalized()
+				var x := Vector3.RIGHT - nt * nt.x
+				if x.length() < 0.01:
+					x = Vector3.FORWARD
+				x = x.normalized()
+				node.transform = Transform3D(Basis(x, nt, x.cross(nt)), node.position)
+
+
 ## Анимации построек: рука сборщика (работает — лазер по собираемому юниту), вертушка разветвителя.
 func _update_anim() -> void:
 	var tm := Time.get_ticks_msec() / 1000.0
@@ -4290,6 +4365,8 @@ func _update_anim() -> void:
 		var root: Node3D = rv
 		var n: Node3D = root.get_meta("deco")
 		var b: Dictionary = buildings[id]
+		if n.has_meta("anim"):
+			_run_anim(n, b, id)
 		if n.has_meta("spin"):
 			var busy_spin: bool = not _busy(b) and int(b.item) != D.I_NONE
 			(n.get_meta("spin") as Node3D).rotation.y = tm * (6.0 if busy_spin else 1.5)
@@ -4323,6 +4400,74 @@ func _update_anim() -> void:
 			_laser_off(root, "arm_laser")
 
 
+## Добавить анимацию детали декора. kind: spin (вращение по оси ax), bob (вверх-вниз), slide (вперёд-назад),
+## pulse (дышит размером), blink (мигает), swing (качается по Y), sun (панель за солнцем), smoke (дым).
+## v — скорость/размах, w — частота; always — анимировать даже когда постройка простаивает.
+func _anim(n: Node3D, node: Node3D, kind: String, v: float, w := 1.0, always := false, ax := "y") -> void:
+	var list: Array = n.get_meta("anim") if n.has_meta("anim") else []
+	var base: Vector3 = node.rotation
+	if kind == "bob" or kind == "slide" or kind == "smoke":
+		base = node.position
+	elif kind == "pulse":
+		base = node.scale
+	list.append({"n": node, "k": kind, "v": v, "w": w, "always": always, "ax": ax, "base": base,
+		"ph": randf() * TAU})
+	n.set_meta("anim", list)
+
+
+## Брус между двумя точками (в координатах parent).
+func _beam(parent: Node3D, a: Vector3, b: Vector3, th: float, col: Color) -> MeshInstance3D:
+	var m := _box(parent, Vector3(th, th, maxf(a.distance_to(b), 0.01)), (a + b) * 0.5, col)
+	var dir := (b - a).normalized()
+	var side := dir.cross(Vector3.UP)
+	if side.length() < 0.01:
+		side = dir.cross(Vector3.RIGHT)
+	side = side.normalized()
+	m.transform = Transform3D(Basis(side, dir.cross(side), dir), (a + b) * 0.5)
+	return m
+
+
+## Буровая штанга с коронкой: узел, внизу которого — конус бура (вращать и двигать узел целиком).
+func _drill_bit(n: Node3D, length: float, r: float, col: Color) -> Node3D:
+	var bit := Node3D.new()
+	n.add_child(bit)
+	_cyl(bit, r, length, Vector3(0, length * 0.5 + 0.2, 0), Color(0.5, 0.5, 0.55), 6)
+	var cone := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = r * 2.4
+	cm.bottom_radius = 0.01
+	cm.height = 0.32
+	cm.radial_segments = 6
+	cone.mesh = cm
+	cone.position = Vector3(0, 0.1, 0)
+	cone.material_override = _pmat(col, 1)
+	bit.add_child(cone)
+	for k in 3:
+		var a := TAU * k / 3.0
+		_box(bit, Vector3(0.05, 0.25, 0.05), Vector3(cos(a) * r * 1.6, 0.2, sin(a) * r * 1.6), col.darkened(0.3))
+	return bit
+
+
+## Кучка выбранной породы у бура.
+func _debris(n: Node3D, r: float) -> void:
+	for k in 5:
+		var a := TAU * k / 5.0 + 0.4
+		var sz := 0.08 + 0.05 * (k % 3)
+		var rock := _box(n, Vector3(sz, sz, sz), Vector3(cos(a) * r, sz * 0.5, sin(a) * r), Color(0.35, 0.32, 0.3))
+		rock.rotation = Vector3(0, a, 0)
+
+
+## Дым из трубы: несколько клубов, поднимаются и тают.
+func _smoke(n: Node3D, at: Vector3, col: Color) -> void:
+	var sm := Node3D.new()
+	sm.position = at
+	n.add_child(sm)
+	for k in 5:
+		var puff := _box(sm, Vector3(0.22, 0.22, 0.22), Vector3.ZERO, col)
+		puff.material_override = _glow_mat(col, 0.45)
+	_anim(n, sm, "smoke", 1.2, 0.6)
+
+
 ## Поворотная часть турели: head крутится вокруг вертикали, pitch внутри неё поднимает ствол.
 ## Ствол строится вдоль локальной +X внутри pitch. Возвращает pitch.
 func _turret_head(n: Node3D, head_pos: Vector3, pitch_pos: Vector3) -> Node3D:
@@ -4344,67 +4489,221 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 	if LINK_TYPES.has(t):
 		pass   # форма зависит от соседей — строит _vis_links
 	elif t == D.DRILL:
-		_box(n, Vector3(1.1, 0.7, 1.1), Vector3(0, 0.35, 0), dark)
-		_cyl(n, 0.28, 0.8, Vector3(0, 1.1, 0), Color(0.85, 0.6, 0.3))
+		# бур I — тренога: три ноги, лебёдка на вершине, вращающийся бур ходит вверх-вниз
+		var wood := Color(0.55, 0.42, 0.28)
+		var apex := Vector3(0, 1.75, 0)
+		for k in 3:
+			var a := TAU * k / 3.0 + 0.3
+			_beam(n, Vector3(cos(a) * 0.7, 0.0, sin(a) * 0.7), apex, 0.09, wood)
+		_box(n, Vector3(0.36, 0.26, 0.3), apex + Vector3(0, 0.05, 0), dark).material_override = _pmat(dark, 1)
+		var wheel := Node3D.new()
+		wheel.position = apex + Vector3(0, 0.05, 0.2)
+		n.add_child(wheel)
+		_box(wheel, Vector3(0.36, 0.06, 0.04), Vector3.ZERO, Color(0.8, 0.55, 0.25))
+		_box(wheel, Vector3(0.06, 0.36, 0.04), Vector3.ZERO, Color(0.8, 0.55, 0.25))
+		_anim(n, wheel, "spin", 5.0, 1.0, false, "z")
+		var bit := _drill_bit(n, 1.25, 0.07, Color(0.85, 0.6, 0.3))
+		bit.position = Vector3(0, 0.25, 0)
+		_anim(n, bit, "spin", 9.0)
+		_anim(n, bit, "bob", 0.15, 3.0)
+		_debris(n, 0.45)
 	elif t == D.DRILL2:
-		_box(n, Vector3(1.2, 0.8, 1.2), Vector3(0, 0.4, 0), dark)
-		_cyl(n, 0.32, 1.1, Vector3(0, 1.35, 0), metal)
-		_box(n, Vector3(0.3, 0.15, 0.3), Vector3(0, 2.0, 0), Color(1.0, 0.9, 0.3), true)
+		# бур II — на сваях: платформа на четырёх опорах, мотор с приводом, вал уходит в грунт
+		for c in [Vector2(0.55, 0.55), Vector2(-0.55, 0.55), Vector2(0.55, -0.55), Vector2(-0.55, -0.55)]:
+			_cyl(n, 0.07, 1.0, Vector3(c.x, 0.5, c.y), Color(0.35, 0.36, 0.4), 6)
+			_beam(n, Vector3(c.x, 0.1, c.y), Vector3(c.x * 0.2, 0.9, c.y * 0.2), 0.04, Color(0.35, 0.36, 0.4))
+		_box(n, Vector3(1.35, 0.1, 1.35), Vector3(0, 1.0, 0), dark).material_override = _pmat(dark, 1)
+		for c in [Vector3(0, 1.17, 0.66), Vector3(0, 1.17, -0.66)]:
+			_box(n, Vector3(1.35, 0.04, 0.04), c, Color(0.9, 0.75, 0.15))   # перила
+		_box(n, Vector3(0.6, 0.5, 0.55), Vector3(0.25, 1.3, 0), metal).material_override = _pmat(metal, 1)
+		var drive := Node3D.new()
+		drive.position = Vector3(0.25, 1.3, 0.3)
+		n.add_child(drive)
+		for k in 3:
+			var sp := _box(drive, Vector3(0.44, 0.06, 0.05), Vector3.ZERO, Color(0.25, 0.25, 0.28))
+			sp.rotation.z = PI * k / 3.0
+		_anim(n, drive, "spin", 7.0, 1.0, false, "z")
+		var bit := _drill_bit(n, 1.1, 0.09, metal)
+		bit.position = Vector3(-0.25, 0.05, 0)
+		_anim(n, bit, "spin", 12.0)
+		_anim(n, bit, "bob", 0.08, 5.0)
+		var lamp := _box(n, Vector3(0.18, 0.12, 0.18), Vector3(0.25, 1.62, 0), Color(1.0, 0.9, 0.3), true)
+		_anim(n, lamp, "blink", 1.0, 1.5)
+		_debris(n, 0.6)
 	elif t == D.DRILL3:
-		_box(n, Vector3(1.3, 0.9, 1.3), Vector3(0, 0.45, 0), dark)
-		_cyl(n, 0.38, 1.3, Vector3(0, 1.55, 0), metal)
-		_cyl(n, 0.2, 0.9, Vector3(0.45, 1.3, 0.0), Color(0.25, 0.55, 1.0))
-		_box(n, Vector3(0.35, 0.15, 0.35), Vector3(0, 2.3, 0), Color(0.4, 0.8, 1.0), true)
+		# бур III — буровая вышка: решётчатая башня, талевый блок ходит вверх-вниз, ротор крутит трубу
+		var steel := Color(0.75, 0.3, 0.2)
+		_box(n, Vector3(1.45, 0.16, 1.45), Vector3(0, 0.08, 0), dark).material_override = _pmat(dark, 1)
+		var top := 2.8
+		var bw := 0.6
+		var tw := 0.13
+		var corners := [Vector2(1, 1), Vector2(-1, 1), Vector2(-1, -1), Vector2(1, -1)]
+		for c in corners:
+			_beam(n, Vector3(c.x * bw, 0.16, c.y * bw), Vector3(c.x * tw, top, c.y * tw), 0.06, steel)
+		for lv in 5:
+			var y0 := 0.16 + (top - 0.16) * lv / 5.0
+			var y1 := 0.16 + (top - 0.16) * (lv + 1) / 5.0
+			var w0 := lerpf(bw, tw, float(lv) / 5.0)
+			var w1 := lerpf(bw, tw, float(lv + 1) / 5.0)
+			for k in 4:
+				var c0: Vector2 = corners[k]
+				var c1: Vector2 = corners[(k + 1) % 4]
+				_beam(n, Vector3(c0.x * w0, y0, c0.y * w0), Vector3(c1.x * w1, y1, c1.y * w1), 0.025, steel)
+				_beam(n, Vector3(c0.x * w1, y1, c0.y * w1), Vector3(c1.x * w1, y1, c1.y * w1), 0.025, steel)
+		_box(n, Vector3(0.36, 0.14, 0.36), Vector3(0, top + 0.07, 0), Color(0.3, 0.3, 0.33))   # кронблок
+		var block := Node3D.new()
+		block.position = Vector3(0, 1.7, 0)
+		n.add_child(block)
+		_box(block, Vector3(0.18, 0.24, 0.14), Vector3.ZERO, Color(0.95, 0.75, 0.15))
+		_box(block, Vector3(0.02, 2.0, 0.02), Vector3(-0.05, 1.1, 0), Color(0.15, 0.15, 0.15))   # тросы
+		_box(block, Vector3(0.02, 2.0, 0.02), Vector3(0.05, 1.1, 0), Color(0.15, 0.15, 0.15))
+		_anim(n, block, "bob", 0.6, 1.2)
+		var pipe := Node3D.new()
+		pipe.position = Vector3(0, 0.16, 0)
+		n.add_child(pipe)
+		_cyl(pipe, 0.045, 1.4, Vector3(0, 0.7, 0), Color(0.55, 0.56, 0.6), 6)
+		_box(pipe, Vector3(0.34, 0.08, 0.08), Vector3(0, 0.12, 0), Color(0.2, 0.2, 0.22))   # ротор
+		_anim(n, pipe, "spin", 6.0)
+		_box(n, Vector3(0.45, 0.4, 0.35), Vector3(0.45, 0.36, -0.45), Color(0.85, 0.85, 0.8))   # будка бурильщика
+		_cyl(n, 0.2, 0.55, Vector3(-0.45, 0.43, 0.45), Color(0.25, 0.55, 1.0))   # бак воды
+		var beacon := _box(n, Vector3(0.1, 0.1, 0.1), Vector3(0, top + 0.2, 0), Color(1.0, 0.2, 0.15), true)
+		_anim(n, beacon, "blink", 1.0, 1.0, true)
 	elif t == D.SOLAR:
 		_cyl(n, 0.08, 0.6, Vector3(0, 0.3, 0), metal)
-		_box(n, Vector3(1.5, 0.06, 1.5), Vector3(0, 0.65, 0), Color(0.12, 0.18, 0.4))
+		var panel := Node3D.new()
+		panel.position = Vector3(0, 0.65, 0)
+		n.add_child(panel)
+		_box(panel, Vector3(1.5, 0.06, 1.5), Vector3.ZERO, Color(0.12, 0.18, 0.4)).material_override = \
+				_pmat(Color(0.14, 0.2, 0.45), 1)
+		_box(panel, Vector3(1.54, 0.04, 0.05), Vector3(0, 0.01, 0), metal)
+		_anim(n, panel, "sun", 1.0, 1.0, true)   # панель поворачивается за солнцем
 	elif t == D.COAL_PLANT:
-		_box(n, Vector3(1.4, 1.0, 1.4), Vector3(0, 0.5, 0), Color(0.3, 0.28, 0.27))
+		_box(n, Vector3(1.4, 1.0, 1.4), Vector3(0, 0.5, 0), Color(0.3, 0.28, 0.27)).material_override = \
+				_pmat(Color(0.3, 0.28, 0.27), 1)
 		_cyl(n, 0.22, 1.4, Vector3(0.35, 1.7, 0.35), Color(0.4, 0.38, 0.36))
-		_box(n, Vector3(0.5, 0.2, 0.1), Vector3(0, 0.5, 0.71), Color(1.0, 0.45, 0.15), true)
+		var fire := _box(n, Vector3(0.5, 0.2, 0.1), Vector3(0, 0.5, 0.71), Color(1.0, 0.45, 0.15), true)
+		_anim(n, fire, "pulse", 0.25, 9.0)
+		_smoke(n, Vector3(0.35, 2.4, 0.35), Color(0.35, 0.33, 0.32))
 	elif t == D.NUCLEAR:
-		_cyl(n, 0.85, 1.8, Vector3(0, 0.9, 0), Color(0.75, 0.75, 0.72), 6)
+		_cyl(n, 0.85, 1.8, Vector3(0, 0.9, 0), Color(0.75, 0.75, 0.72), 6).material_override = \
+				_pmat(Color(0.75, 0.75, 0.72), 1)
 		_cyl(n, 0.4, 0.15, Vector3(0, 1.85, 0), Color(0.4, 1.0, 0.3))
-		_box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 2.0, 0), Color(0.4, 1.0, 0.3), true)
+		var core := _box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 2.05, 0), Color(0.4, 1.0, 0.3), true)
+		_anim(n, core, "spin", 1.5)
+		_anim(n, core, "pulse", 0.2, 4.0)
+		var ring := Node3D.new()
+		ring.position = Vector3(0, 1.2, 0)
+		n.add_child(ring)
+		for k in 6:
+			var a := TAU * k / 6.0
+			var pod := _box(ring, Vector3(0.12, 0.12, 0.12), Vector3(cos(a) * 0.9, 0, sin(a) * 0.9), Color(0.4, 1.0, 0.3), true)
+			pod.rotation.y = -a
+		_anim(n, ring, "spin", 0.8)
+		_smoke(n, Vector3(0, 2.3, 0), Color(0.85, 0.88, 0.9))   # пар охлаждения
 	elif t == D.SMELTER:
-		_box(n, Vector3(1.3, 1.0, 1.3), Vector3(0, 0.5, 0), Color(0.35, 0.3, 0.28))
-		_box(n, Vector3(0.7, 0.2, 0.7), Vector3(0, 1.1, 0), Color(1.0, 0.5, 0.15), true)
+		_box(n, Vector3(1.3, 1.0, 1.3), Vector3(0, 0.5, 0), Color(0.35, 0.3, 0.28)).material_override = \
+				_pmat(Color(0.35, 0.3, 0.28), 1)
+		var melt := _box(n, Vector3(0.7, 0.2, 0.7), Vector3(0, 1.1, 0), Color(1.0, 0.5, 0.15), true)
+		_anim(n, melt, "pulse", 0.12, 3.0)
+		_cyl(n, 0.12, 0.6, Vector3(-0.45, 1.3, -0.45), Color(0.3, 0.28, 0.27))
+		_smoke(n, Vector3(-0.45, 1.6, -0.45), Color(0.4, 0.36, 0.33))
 	elif t == D.CRUSHER:
-		_box(n, Vector3(1.3, 0.8, 1.3), Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.42))
-		_cyl(n, 0.3, 0.5, Vector3(0.3, 1.0, 0), metal)
-		_cyl(n, 0.3, 0.5, Vector3(-0.3, 1.0, 0), metal)
+		_box(n, Vector3(1.3, 0.8, 1.3), Vector3(0, 0.4, 0), Color(0.4, 0.4, 0.42)).material_override = \
+				_pmat(Color(0.4, 0.4, 0.42), 1)
+		for sx in [0.3, -0.3]:
+			var roll := Node3D.new()
+			roll.position = Vector3(sx, 0.95, 0)
+			n.add_child(roll)
+			_cyl(roll, 0.28, 0.9, Vector3.ZERO, metal, 8).rotation = Vector3(PI / 2.0, 0, 0)
+			for k in 4:
+				var tooth := _box(roll, Vector3(0.62, 0.08, 0.9), Vector3.ZERO, Color(0.35, 0.35, 0.38))
+				tooth.rotation.z = PI * k / 4.0
+			_anim(n, roll, "spin", 6.0 if sx > 0.0 else -6.0, 1.0, false, "z")
 	elif t == D.MELTER:
-		_cyl(n, 0.6, 1.0, Vector3(0, 0.5, 0), Color(0.45, 0.5, 0.55))
+		_cyl(n, 0.6, 1.0, Vector3(0, 0.5, 0), Color(0.45, 0.5, 0.55)).material_override = _pmat(Color(0.45, 0.5, 0.55), 1)
 		_cyl(n, 0.4, 0.15, Vector3(0, 1.05, 0), Color(0.5, 0.8, 1.0))
-		_box(n, Vector3(0.25, 0.25, 0.25), Vector3(0, 1.2, 0), Color(0.4, 0.75, 1.0), true)
+		for k in 3:
+			var bub := _box(n, Vector3(0.12, 0.12, 0.12), Vector3(-0.15 + 0.15 * k, 1.15, 0.1 * (k - 1)),
+				Color(0.6, 0.85, 1.0), true)
+			_anim(n, bub, "bob", 0.12, 4.0 + k)
+		_smoke(n, Vector3(0, 1.3, 0), Color(0.85, 0.9, 1.0))   # пар
 	elif t == D.CENTRIFUGE:
-		_cyl(n, 0.55, 1.6, Vector3(0, 0.8, 0), Color(0.5, 0.55, 0.5))
-		_box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 1.75, 0), Color(0.45, 1.0, 0.3), true)
+		_cyl(n, 0.55, 0.5, Vector3(0, 0.25, 0), Color(0.5, 0.55, 0.5))
+		var rotor := Node3D.new()
+		rotor.position = Vector3(0, 0.95, 0)
+		n.add_child(rotor)
+		_cyl(rotor, 0.12, 0.9, Vector3.ZERO, Color(0.4, 0.42, 0.4))
+		for k in 4:
+			var a := TAU * k / 4.0
+			_cyl(rotor, 0.12, 0.7, Vector3(cos(a) * 0.38, 0, sin(a) * 0.38), Color(0.55, 0.6, 0.55))
+			_box(rotor, Vector3(0.1, 0.1, 0.1), Vector3(cos(a) * 0.38, 0.4, sin(a) * 0.38), Color(0.45, 1.0, 0.3), true)
+		_anim(n, rotor, "spin", 14.0)
+		_box(n, Vector3(0.3, 0.3, 0.3), Vector3(0, 1.55, 0), Color(0.45, 1.0, 0.3), true)
 	elif t == D.FUEL_SYNTH:
-		_box(n, Vector3(1.3, 1.2, 1.3), Vector3(0, 0.6, 0), Color(0.3, 0.25, 0.4))
-		_box(n, Vector3(0.6, 0.25, 0.6), Vector3(0, 1.32, 0), Color(0.85, 0.45, 1.0), true)
+		_box(n, Vector3(1.3, 1.0, 1.3), Vector3(0, 0.5, 0), Color(0.3, 0.25, 0.4)).material_override = \
+				_pmat(Color(0.3, 0.25, 0.4), 1)
+		for c in [Vector2(0.5, 0.5), Vector2(-0.5, 0.5), Vector2(0.5, -0.5), Vector2(-0.5, -0.5)]:
+			_cyl(n, 0.05, 0.6, Vector3(c.x, 1.3, c.y), Color(0.6, 0.6, 0.65), 6)
+		var orb := Node3D.new()
+		orb.position = Vector3(0, 1.4, 0)
+		n.add_child(orb)
+		_box(orb, Vector3(0.4, 0.4, 0.4), Vector3.ZERO, Color(0.85, 0.45, 1.0), true).rotation = Vector3(0.6, 0, 0.6)
+		_anim(n, orb, "spin", 2.5)
+		_anim(n, orb, "bob", 0.1, 2.0)
+		_anim(n, orb, "pulse", 0.15, 5.0)
 	elif t == D.LAUNCH_PAD:
-		_box(n, Vector3(1.5, 0.08, 1.5), Vector3(0, 0.04, 0), Color(0.3, 0.3, 0.33))
+		_box(n, Vector3(1.5, 0.08, 1.5), Vector3(0, 0.04, 0), Color(0.3, 0.3, 0.33)).material_override = \
+				_pmat(Color(0.3, 0.3, 0.33), 1)
 		_box(n, Vector3(1.1, 0.09, 0.08), Vector3(0, 0.05, 0), Color(0.9, 0.75, 0.15))
 		_box(n, Vector3(0.08, 0.09, 1.1), Vector3(0, 0.05, 0), Color(0.9, 0.75, 0.15))
 		_box(n, Vector3(0.1, 2.2, 0.1), Vector3(0.62, 1.1, 0.62), Color(0.75, 0.35, 0.15))   # башня обслуживания
-		_box(n, Vector3(0.45, 0.06, 0.06), Vector3(0.4, 1.7, 0.62), Color(0.75, 0.35, 0.15))
+		var boom := Node3D.new()
+		boom.position = Vector3(0.62, 1.7, 0.62)
+		n.add_child(boom)
+		_box(boom, Vector3(0.45, 0.06, 0.06), Vector3(-0.22, 0, 0), Color(0.75, 0.35, 0.15))
+		_anim(n, boom, "swing", 0.5, 0.5)
 		for c in [Vector3(0.7, 0.1, -0.7), Vector3(-0.7, 0.1, 0.7), Vector3(-0.7, 0.1, -0.7)]:
-			_box(n, Vector3(0.06, 0.06, 0.06), c, Color(1.0, 0.3, 0.2), true)   # огни
+			var lt := _box(n, Vector3(0.06, 0.06, 0.06), c, Color(1.0, 0.3, 0.2), true)   # огни
+			_anim(n, lt, "blink", 1.0, 1.2, true)
 	elif t == D.LOADER:
 		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.85, 0.7, 0.15))
-		_box(n, Vector3(1.0, 0.5, 1.0), Vector3(0, 0.4, 0), Color(0.35, 0.36, 0.4))
+		_box(n, Vector3(1.0, 0.5, 1.0), Vector3(0, 0.4, 0), Color(0.35, 0.36, 0.4)).material_override = \
+				_pmat(Color(0.35, 0.36, 0.4), 1)
 		_box(n, Vector3(0.12, 1.2, 0.12), Vector3(0.55, 0.6, 0.55), Color(0.85, 0.7, 0.15))
-		_box(n, Vector3(0.9, 0.12, 0.12), Vector3(0.15, 1.2, 0.55), Color(0.85, 0.7, 0.15))
+		var crane := Node3D.new()
+		crane.position = Vector3(0.55, 1.2, 0.55)
+		n.add_child(crane)
+		_box(crane, Vector3(0.9, 0.12, 0.12), Vector3(-0.4, 0, 0), Color(0.85, 0.7, 0.15))
+		var hook := Node3D.new()
+		hook.position = Vector3(-0.75, -0.25, 0)
+		crane.add_child(hook)
+		_box(hook, Vector3(0.02, 0.4, 0.02), Vector3(0, 0.05, 0), Color(0.15, 0.15, 0.15))
+		_box(hook, Vector3(0.2, 0.14, 0.2), Vector3(0, -0.18, 0), Color(0.6, 0.45, 0.25))   # ящик на крюке
+		_anim(n, crane, "swing", 0.9, 0.6)
+		_anim(n, hook, "bob", 0.12, 1.2)
 		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.66, -0.51), Color(1.0, 0.85, 0.2), true)
 	elif t == D.UNLOADER:
 		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.2, 0.45, 0.8))
-		_box(n, Vector3(0.9, 0.6, 0.9), Vector3(0, 0.45, 0), Color(0.4, 0.42, 0.46))
+		_box(n, Vector3(0.9, 0.6, 0.9), Vector3(0, 0.45, 0), Color(0.4, 0.42, 0.46)).material_override = \
+				_pmat(Color(0.4, 0.42, 0.46), 1)
+		var lift := Node3D.new()
+		lift.position = Vector3(0, 0.85, 0)
+		n.add_child(lift)
+		_box(lift, Vector3(0.7, 0.06, 0.7), Vector3.ZERO, Color(0.85, 0.7, 0.15))
+		_box(lift, Vector3(0.3, 0.25, 0.3), Vector3(0, 0.15, 0), Color(0.6, 0.45, 0.25))
+		_anim(n, lift, "bob", 0.15, 1.0)
 		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.6, -0.46), Color(0.3, 0.7, 1.0), true)
 	elif t == D.CHIP_FACTORY:
-		_box(n, Vector3(1.3, 0.9, 1.3), Vector3(0, 0.45, 0), Color(0.15, 0.32, 0.2))
-		_box(n, Vector3(0.7, 0.12, 0.7), Vector3(0, 0.96, 0), Color(0.3, 1.0, 0.45), true)
-		_box(n, Vector3(0.12, 0.3, 0.12), Vector3(0.45, 1.05, 0.45), Color(0.95, 0.8, 0.3))
+		_box(n, Vector3(1.3, 0.9, 1.3), Vector3(0, 0.45, 0), Color(0.15, 0.32, 0.2)).material_override = \
+				_pmat(Color(0.15, 0.32, 0.2), 1)
+		_box(n, Vector3(0.7, 0.06, 0.7), Vector3(0, 0.93, 0), Color(0.1, 0.2, 0.12))
+		var scan := _box(n, Vector3(0.7, 0.05, 0.08), Vector3(0, 0.98, 0), Color(0.3, 1.0, 0.45), true)
+		_anim(n, scan, "slide", 0.3, 2.0)   # сканирующая полоса над кристаллом
+		var head := Node3D.new()
+		head.position = Vector3(0.45, 1.05, 0.45)
+		n.add_child(head)
+		_box(head, Vector3(0.12, 0.3, 0.12), Vector3.ZERO, Color(0.95, 0.8, 0.3))
+		_anim(n, head, "bob", 0.08, 6.0)
 	elif t == D.ASSEMBLER:
 		# цех: корпус с полосами, на крыше — робот-рука с лазером (поворот, плечо, локоть, излучатель)
 		_box(n, Vector3(1.35, 0.75, 1.35), Vector3(0, 0.375, 0), col.darkened(0.3)).material_override = \
@@ -4450,14 +4749,22 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
 	elif t == D.REPAIR:
-		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78))
-		_box(n, Vector3(0.5, 0.14, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
-		_box(n, Vector3(0.14, 0.5, 0.14), Vector3(0, 1.75, 0), Color(0.3, 1.0, 0.4), true)
+		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78)).material_override = _pmat(Color(0.75, 0.75, 0.78), 1)
+		var cross := Node3D.new()
+		cross.position = Vector3(0, 1.85, 0)
+		n.add_child(cross)
+		_box(cross, Vector3(0.5, 0.14, 0.14), Vector3.ZERO, Color(0.3, 1.0, 0.4), true)
+		_box(cross, Vector3(0.14, 0.5, 0.14), Vector3.ZERO, Color(0.3, 1.0, 0.4), true)
+		_anim(n, cross, "spin", 1.5)
+		_anim(n, cross, "pulse", 0.12, 3.0)
 	elif t == D.UNIT_REPAIR:
 		_cyl(n, 0.8, 0.2, Vector3(0, 0.1, 0), Color(0.35, 0.4, 0.45), 6)
-		_box(n, Vector3(0.15, 1.2, 0.15), Vector3(0.6, 0.6, 0), Color(0.6, 0.62, 0.66))
-		_box(n, Vector3(0.6, 0.12, 0.12), Vector3(0.35, 1.2, 0), Color(0.6, 0.62, 0.66))
-		_box(n, Vector3(0.2, 0.2, 0.2), Vector3(0.05, 1.1, 0), Color(0.3, 1.0, 0.4), true)
+		var gantry := Node3D.new()
+		n.add_child(gantry)
+		_box(gantry, Vector3(0.15, 1.2, 0.15), Vector3(0.6, 0.6, 0), Color(0.6, 0.62, 0.66))
+		_box(gantry, Vector3(0.6, 0.12, 0.12), Vector3(0.35, 1.2, 0), Color(0.6, 0.62, 0.66))
+		_box(gantry, Vector3(0.2, 0.2, 0.2), Vector3(0.05, 1.1, 0), Color(0.3, 1.0, 0.4), true)
+		_anim(n, gantry, "spin", 0.7)
 	elif t == D.LAMP:
 		_cyl(n, 0.07, 2.0, Vector3(0, 1.0, 0), Color(0.35, 0.35, 0.38))
 		_cyl(n, 0.28, 0.08, Vector3(0, 2.05, 0), Color(0.3, 0.3, 0.32))
@@ -5167,8 +5474,7 @@ func _ribbon_surface(am: ArrayMesh, pts: PackedVector3Array, from: int, to: int,
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
 	m.albedo_color = col
-	m.no_depth_test = true
-	am.surface_set_material(am.get_surface_count() - 1, m)
+	am.surface_set_material(am.get_surface_count() - 1, m)   # с проверкой глубины: за луной и внутри неё не видно
 
 
 ## Камера карты: 1 — вид сверху на орбиту вокруг луны, 2 — вся система сверху.
