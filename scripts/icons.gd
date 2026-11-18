@@ -23,6 +23,7 @@ const UI_ALT := 109
 const UI_SPEED := 110
 const UI_CLOCK := 111
 const UI_CARGO := 112
+const UI_BATTERY := 113
 
 const SHAPES := {
 	"ore": [
@@ -235,6 +236,16 @@ const SHAPES := {
 		"oo..oo..",
 		"o...o...",
 	],
+	"battery": [
+		"..oooo..",
+		".oolloo.",
+		".olllbo.",
+		".obbbbo.",
+		".osssso.",
+		".osssso.",
+		".osssso.",
+		".oooooo.",
+	],
 	"clock": [
 		"..oooo..",
 		".olllbo.",
@@ -279,6 +290,7 @@ const ICONS := {
 	UI_SPEED: ["speed", Color(0.35, 0.8, 1.0), Color(1, 1, 1)],
 	UI_CLOCK: ["clock", Color(0.75, 0.75, 0.8), Color(0.2, 0.2, 0.25)],
 	UI_CARGO: ["cube", Color(0.75, 0.6, 0.35), Color(1, 1, 1)],
+	UI_BATTERY: ["battery", Color(0.45, 0.47, 0.52), Color(0.3, 1.0, 0.5)],
 }
 
 

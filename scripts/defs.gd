@@ -94,6 +94,7 @@ const REPAIR := 27        # ремонтная башня: чинит постр
 const UNIT_REPAIR := 28   # ремонтная станция: чинит юнитов рядом
 const WALL := 29          # забор: высокий, юниты упираются
 const LAMP := 30          # лампа: светит вокруг, выключается (маскировка)
+const BATTERY := 31       # аккумулятор: копит излишек энергии сети и отдаёт при нехватке
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -105,7 +106,7 @@ const NAMES := {
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
 	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	SPLITTER: "Разветвитель", JUNCTION: "Перекрёсток", BRIDGE: "Мост", POWER_POLE: "Энергостолб",
-	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа",
+	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
@@ -135,7 +136,8 @@ const DESC := {
 	AA_GUN: "бьёт летающие цели на 90 м. Снаряды — любой ресурс (уран облучает), вода по трубе — стрельба вдвое чаще",
 	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
-	ASSEMBLER: "железо -> боевой юнит",
+	ASSEMBLER: "собирает юнитов из ресурсов склада базы. Держи E — выбрать тип (пока не выбран, стоит)",
+	BATTERY: "копит излишек энергии сети (до 5000) и отдаёт при нехватке — ночью кормит сеть от солнечных панелей",
 	LOADER: "принимает грузы с конвейеров, ровер развозит их по точкам выгрузки",
 	UNLOADER: "ровер привозит сюда выбранный груз (E — выбрать), выдаёт на конвейеры",
 	CHIP_FACTORY: "1 кремний + 1 медь -> микросхема. 80 энергии",
@@ -164,6 +166,7 @@ const COST := {
 	REPAIR: {I_IRON: 30, I_SILICON: 10, I_CHIP: 5}, UNIT_REPAIR: {I_IRON: 40, I_CHIP: 8},
 	WALL: {I_IRON: 3},
 	LAMP: {I_COPPER: 3, I_SILICON: 1},
+	BATTERY: {I_COPPER: 25, I_IRON: 15, I_SILICON: 10},
 	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
 	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
@@ -175,7 +178,7 @@ const HP := {
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
 	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
-	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60,
+	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60, BATTERY: 200,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
@@ -203,7 +206,7 @@ const POWER_RING := 4          # генератор питает клетки в
 const CATEGORIES := [
 	["Транспорт", [CONVEYOR, PIPE, SPLITTER, JUNCTION, BRIDGE]],
 	["Добыча", [DRILL, DRILL2, DRILL3]],
-	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, POWER_POLE, LAMP]],
+	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, BATTERY, POWER_POLE, LAMP]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER]],
 	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
@@ -230,6 +233,8 @@ const REPAIR_RADIUS := 10.0
 const REPAIR_RATE := 3             # прочности за тик каждой постройке рядом
 const UNIT_REPAIR_RATE := 4        # прочности за тик каждому юниту рядом
 const ALERT_COOLDOWN := 3.0        # не чаще раза в 3 с на луну — тревога «постройка разрушена»
+const BATTERY_CAP := 5000.0             # запас аккумулятора (энергия × секунды)
+const BATTERY_RATE := 400.0             # сколько энергии в секунду он берёт или отдаёт
 const SOLAR_POWER := 100.0             # при свете 16/16
 const COAL_POWER := 500.0
 const COAL_BURN_TICKS := 20            # 1 уголь = 2 с работы

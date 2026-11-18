@@ -27,6 +27,7 @@ const GIANT_SHADER = preload("res://shaders/giant.gdshader")
 const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
 const RINGS_SHADER = preload("res://shaders/rings.gdshader")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
+const ORBIT_SHADER = preload("res://shaders/orbit.gdshader")
 const NO_CELL := -1
 # цвета орбит лун на карте (и подписи того же цвета)
 const PLANET_COLORS := [Color(1.0, 0.6, 0.3), Color(0.35, 0.8, 1.0), Color(0.45, 1.0, 0.45),
@@ -45,7 +46,7 @@ const IND_H := {
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
-	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9,
+	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9, D.BATTERY: 1.55,
 }
 
 var my_team := 0
@@ -441,7 +442,8 @@ func _add_building(d: Dictionary) -> void:
 		"buf": {}, "cur": -1, "out_item": D.I_NONE, "out_n": 0,
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
-		"ukind": int(d.get("ukind", D.U_TANK)), "lit": bool(d.get("lit", true)),
+		"ukind": int(d.get("ukind", -1)), "lit": bool(d.get("lit", true)),
+		"charge": 0.0, "bflow": 0.0,
 		# стройка: bt — готовность 0..1, decon — идёт снос, by — кто строит/сносит (peer)
 		"bt": float(d.get("bt", 1.0)), "decon": bool(d.get("decon", false)), "by": int(d.get("by", 0)),
 		"refund_full": false,
@@ -1003,6 +1005,8 @@ func _inspect_info(cell: int, pn: int) -> Array:
 		prog = float(b.prog) / float(D.RECIPES[t][b.cur]["t"])
 	elif t == D.ASSEMBLER and int(b.timer) > 0:
 		prog = 1.0 - float(b.timer) / float(D.UNIT_STATS[b.ukind].build)
+	elif t == D.BATTERY:
+		prog = float(b.charge) / D.BATTERY_CAP
 	elif t == D.LAUNCH_PAD and int(b.timer) > 0:
 		prog = 1.0 - float(b.timer) / float(D.SHIP_KINDS[int(b.get("ship_kind", 0))].build)
 	var items := PackedInt32Array()
@@ -1044,7 +1048,9 @@ func _status(b: Dictionary) -> Array:
 				full.append(D.ITEM_NAMES[it])
 		if full.is_empty():
 			return [ST_OK, "склад принимает всё переработанное"]
-		return [ST_SLOW, "склад полон: " + ", ".join(full)]
+		if int(b.get("burn_t", 0)) > 0:
+			return [ST_SLOW, "склад полон, лишнее сжигается: " + ", ".join(full)]
+		return [ST_OK, "склад полон: " + ", ".join(full)]
 	if t == D.TURRET:
 		return [ST_OK, "в строю, лазер %d клеток" % int(round(D.TURRET_RANGE / D.CELL_M))]
 	if t == D.LAUNCH_PAD:
@@ -1074,6 +1080,14 @@ func _status(b: Dictionary) -> Array:
 		return [ST_OK, "забор"]
 	if t == D.LAMP:
 		return [ST_OK, "горит"] if b.lit else [ST_IDLE, "выключена (маскировка)"]
+	if t == D.BATTERY:
+		var ch := float(b.charge)
+		var ctxt := "заряд %d / %d" % [int(ch), int(D.BATTERY_CAP)]
+		if float(b.bflow) < -0.001:
+			return [ST_SLOW, ctxt + ", отдаёт в сеть"]
+		if ch < 1.0:
+			return [ST_IDLE, ctxt + " — нет излишка энергии"]
+		return [ST_OK, ctxt + (", заряжается" if float(b.bflow) > 0.001 else "")]
 	if t == D.REPAIR or t == D.UNIT_REPAIR:
 		return _power_state(b, "чинит %s в %d м" % ["постройки" if t == D.REPAIR else "юнитов", int(D.REPAIR_RADIUS)])
 	if t == D.AA_GUN:
@@ -1128,6 +1142,8 @@ func _status(b: Dictionary) -> Array:
 		if b.pout > 0.0:
 			return [ST_OK, "%d энергии, урана %d" % [int(b.pout), int(b.buf.get(D.I_URANIUM, 0))]]
 		return [ST_IDLE, "нет урана"]
+	if t == D.ASSEMBLER and int(b.ukind) < 0:
+		return [ST_IDLE, "тип юнита не выбран — держи E"]
 	if t == D.ASSEMBLER:
 		var k: int = b.ukind
 		var nm: String = D.UNIT_NAMES[k]
@@ -1135,7 +1151,7 @@ func _status(b: Dictionary) -> Array:
 			return [ST_OK, "собирает: %s %d%%" % [nm, int(100.0 * (1.0 - float(b.timer) / D.UNIT_STATS[k].build))]]
 		if _unit_count(b.team, k) >= _unit_limit(b.team, k):
 			return [ST_SLOW, "лимит: %s %d/%d (захвати базы — лимит вырастет)" % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
-		return [ST_IDLE, "%s: ждёт %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
+		return [ST_IDLE, "%s: на складе не хватает %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
 	if t == D.LOADER:
 		var total := 0
 		for it in b.buf:
@@ -1276,7 +1292,7 @@ func _rebuild_power() -> void:
 	for b in buildings.values():
 		if _busy(b):
 			continue
-		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type) or b.type == D.POWER_POLE:
+		if D.GENERATORS.has(b.type) or D.POWER_USE.has(b.type) or b.type == D.POWER_POLE or b.type == D.BATTERY:
 			parent[b.id] = b.id
 	# генераторы и энергостолбы связывают в одну сеть всё вокруг себя; столбы — цепочкой
 	for b in buildings.values():
@@ -1304,8 +1320,8 @@ func _rebuild_power() -> void:
 	for id in parent:
 		var root := _uf_find(parent, id)
 		power_root[id] = root
-		if D.GENERATORS.has(buildings[id].type):
-			power_has_gen[root] = true
+		if D.GENERATORS.has(buildings[id].type) or buildings[id].type == D.BATTERY:
+			power_has_gen[root] = true   # аккумулятор тоже источник
 
 
 func _uf_find(parent: Dictionary, x: int) -> int:
@@ -1369,12 +1385,48 @@ func _sim_tick() -> void:
 			demand[team] += D.POWER_USE[t]
 			gdem[root] = float(gdem.get(root, 0.0)) + float(D.POWER_USE[t])
 
+	# аккумуляторы: излишек сети заряжает их, нехватку они покрывают
+	var bats := {}   # корень сети -> аккумуляторы
+	var stored := [0.0, 0.0]
+	var cap := [0.0, 0.0]
+	for b in list:
+		if b.type == D.BATTERY and not _busy(b):
+			var broot: int = power_root.get(b.id, b.id)
+			if not bats.has(broot):
+				bats[broot] = []
+			bats[broot].append(b)
+	for root in bats:
+		var surplus: float = float(gprod.get(root, 0.0)) - float(gdem.get(root, 0.0))
+		var arr: Array = bats[root]
+		var step: float = D.BATTERY_RATE * D.TICK
+		if surplus > 0.0:
+			var e: float = surplus * D.TICK
+			for bt in arr:
+				var take: float = minf(minf(D.BATTERY_CAP - float(bt.charge), step), e)
+				bt.charge = float(bt.charge) + take
+				bt.bflow = take
+				e -= take
+		else:
+			var need: float = -surplus * D.TICK
+			var got := 0.0
+			for bt in arr:
+				var give: float = minf(minf(float(bt.charge), step), need - got)
+				bt.charge = float(bt.charge) - give
+				bt.bflow = -give
+				got += give
+			gprod[root] = float(gprod.get(root, 0.0)) + got / D.TICK
+		for bt in arr:
+			var tm: int = bt.team
+			if tm < 2:
+				stored[tm] += float(bt.charge)
+				cap[tm] += D.BATTERY_CAP
+
 	# в каждой сети: не хватает энергии — все её машины работают медленнее
 	var gratio := {}
 	for root in gdem:
 		gratio[root] = minf(1.0, float(gprod.get(root, 0.0)) / float(gdem[root]))
 	for team in 2:
-		power_stats[team] = [prod[team], demand[team]]
+		power_stats[team] = [prod[team], demand[team], stored[team], cap[team]]
 
 	# проход 2: работа (стройка и снос — вместо работы)
 	for b in list:
@@ -1389,7 +1441,10 @@ func _sim_tick() -> void:
 			var root: int = power_root.get(b.id, b.id)
 			r = float(gratio.get(root, 1.0 if power_has_gen.has(root) else 0.0))
 			b.pr = r
-		if _is_drill(t):
+		if t == D.CORE:
+			if int(b.get("burn_t", 0)) > 0:
+				b.burn_t = int(b.burn_t) - 1
+		elif _is_drill(t):
 			_drill_tick(b, r)
 		elif t == D.CONVEYOR or t == D.PIPE:
 			_belt_tick(b)
@@ -1854,9 +1909,6 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return false
 	if t == D.DRILL3:
 		return item == D.I_WATER and o.water < D.BUFFER_CAP
-	if t == D.ASSEMBLER:
-		var need: Dictionary = D.UNIT_RECIPES[o.ukind]
-		return need.has(item) and int(buf.get(item, 0)) < int(need[item]) * 2
 	if t == D.LAUNCH_PAD:
 		return item == D.I_FUEL and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
 	if t == D.AA_GUN:
@@ -1921,7 +1973,8 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 			return false
 		var st: Dictionary = storage[team]
 		if int(st.get(item, 0)) >= D.CORE_CAP:
-			return false   # склад полон — лента встаёт
+			o["burn_t"] = 10   # склад полон — лишнее сжигается, лента не встаёт
+			return true
 		st[item] = int(st.get(item, 0)) + 1
 		return true
 	if not _accepts(o, item):
@@ -2479,6 +2532,7 @@ func _unit_limit(team: int, kind: int) -> int:
 
 
 ## Сборщик: копит рецепт выбранного юнита, собирает, если команда не упёрлась в лимит.
+## Сборщик: пока тип юнита не выбран — стоит. Ресурсы берёт со склада базы (не с конвейеров).
 func _assembler_tick(b: Dictionary) -> void:
 	var k: int = b.ukind
 	if b.timer > 0:
@@ -2486,14 +2540,16 @@ func _assembler_tick(b: Dictionary) -> void:
 		if b.timer == 0:
 			_spawn_unit(b.team, _bay_cell(b), b.pn, k)
 		return
-	if _unit_count(b.team, k) >= _unit_limit(b.team, k):
+	if k < 0 or _unit_count(b.team, k) >= _unit_limit(b.team, k):
 		return
 	var need: Dictionary = D.UNIT_RECIPES[k]
 	if not creative:
-		if not _has_inputs(b, need):
-			return
+		var st: Dictionary = storage[int(b.team)]
 		for it in need:
-			b.buf[it] = int(b.buf[it]) - int(need[it])
+			if int(st.get(it, 0)) < int(need[it]):
+				return
+		for it in need:
+			st[it] = int(st.get(it, 0)) - int(need[it])
 	b.timer = int(D.UNIT_STATS[k].build)
 
 
@@ -3253,12 +3309,10 @@ func _build_space() -> void:
 		space_moons.append(node)
 		# орбита луны — лента её цвета
 		var rib := MeshInstance3D.new()
-		var rmat := StandardMaterial3D.new()
-		rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		rmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var rmat := ShaderMaterial.new()
+		rmat.shader = ORBIT_SHADER
 		var oc: Color = PLANET_COLORS[j]
-		rmat.albedo_color = Color(oc.r, oc.g, oc.b, 0.8)
+		rmat.set_shader_parameter("albedo", Color(oc.r, oc.g, oc.b, 0.8))
 		rib.material_override = rmat
 		space_root.add_child(rib)
 		orbit_ribbons.append(rib)
@@ -3597,6 +3651,13 @@ func _vis_add(b: Dictionary) -> void:
 			var a := TAU * k / 3.0
 			_box(orbit, Vector3(0.18, 0.18, 0.18), Vector3(cos(a) * 1.1, 0.4 * sin(a * 2.0), sin(a) * 1.1), col.lightened(0.3), true)
 		_anim(n, orbit, "spin", -1.2, 1.0, true)
+		var fire := Node3D.new()   # склад полон — лишнее горит
+		fire.position = Vector3(0, 0.55, 0)
+		n.add_child(fire)
+		for k in 4:
+			var a := TAU * k / 4.0
+			_box(fire, Vector3(0.2, 0.35, 0.2), Vector3(cos(a) * 0.7, 0, sin(a) * 0.7), Color(1.0, 0.45, 0.1), true)
+		_anim(n, fire, "burn", 0.3, 6.0, true)
 	else:
 		_vis_shape(n, t, col)
 	if n.has_meta("bulb"):
@@ -4329,6 +4390,18 @@ func _run_anim(n: Node3D, b: Dictionary, id: int) -> void:
 				node.scale = base * (1.0 + v * sin(ph))
 			"blink":
 				node.visible = a > 0.0 and fmod(ph / TAU, 1.0) < 0.55
+			"burn":
+				node.visible = st == ST_SLOW
+				node.scale = Vector3.ONE * (1.0 + v * sin(ph))
+			"charge":
+				# деления заряда: заряжается — бегут снизу вверх, отдаёт — мигают, пусто — гаснут
+				var lvl := int(v)
+				if st == ST_IDLE or _busy(b):
+					node.visible = false
+				elif st == ST_SLOW:
+					node.visible = fmod(ph / TAU * 2.0, 1.0) < 0.6
+				else:
+					node.visible = int(fmod(ph / TAU * 1.5, 1.0) * 5.0) >= lvl
 			"smoke":
 				node.visible = a > 0.0
 				var cnt := node.get_child_count()
@@ -4748,6 +4821,19 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(head, Vector3(0.1, 0.1, 0.3), Vector3(-0.32, -0.08, 0), Color(0.9, 0.5, 0.22))   # короб с медными патронами
 		for sz in [-0.12, 0.12]:
 			_box(pitch, Vector3(0.75, 0.08, 0.08), Vector3(0.5, 0, sz), Color(0.25, 0.25, 0.28))
+	elif t == D.BATTERY:
+		# корпус с банками, светящиеся деления заряда
+		_box(n, Vector3(1.2, 0.2, 1.0), Vector3(0, 0.1, 0), Color(0.3, 0.3, 0.33)).material_override = \
+				_pmat(Color(0.3, 0.3, 0.33), 1)
+		for k in 3:
+			var x := -0.38 + 0.38 * k
+			_box(n, Vector3(0.3, 1.0, 0.7), Vector3(x, 0.7, 0), Color(0.2, 0.22, 0.26)).material_override = \
+					_pmat(Color(0.2, 0.22, 0.26), 1)
+			_box(n, Vector3(0.12, 0.08, 0.12), Vector3(x, 1.24, 0.15), Color(0.85, 0.3, 0.2))   # клеммы
+			_box(n, Vector3(0.12, 0.08, 0.12), Vector3(x, 1.24, -0.15), Color(0.3, 0.3, 0.33))
+			for lv in 4:
+				var seg := _box(n, Vector3(0.22, 0.14, 0.04), Vector3(x, 0.35 + lv * 0.2, 0.36), Color(0.3, 1.0, 0.5), true)
+				_anim(n, seg, "charge", float(lv), 1.0, true)
 	elif t == D.REPAIR:
 		_cyl(n, 0.4, 1.6, Vector3(0, 0.8, 0), Color(0.75, 0.75, 0.78)).material_override = _pmat(Color(0.75, 0.75, 0.78), 1)
 		var cross := Node3D.new()
@@ -4980,6 +5066,10 @@ func _update_sky() -> void:
 		var now := Time.get_ticks_msec() / 1000.0
 		for j in space_moons.size():
 			space_moons[j].position = SkyCalc.planet_pos(j, world_time)
+			if j < orbit_ribbons.size():
+				var om: ShaderMaterial = orbit_ribbons[j].material_override
+				om.set_shader_parameter("hole", space_moons[j].global_position)
+				om.set_shader_parameter("hole_r", D.PLANET_R * 1.6 + orbit_width)
 			alert_labels[j].visible = float(alert_marks.get(j, 0.0)) > now
 		return
 	var st := SkyCalc.state(world_time, my_pn)
@@ -6263,6 +6353,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	top.add_child(lrow)
 	ui.light = seg_list
 	ui.power = _ui_row(top, Icons.UI_BOLT, Color(1.0, 0.85, 0.2))
+	ui.battery = _ui_row(top, Icons.UI_BATTERY, Color(0.3, 1.0, 0.5))
 	var brow := HBoxContainer.new()
 	brow.add_theme_constant_override("separation", 3)
 	brow.add_child(_icon_rect(Icons.UI_CORE))
@@ -6323,10 +6414,34 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.held_cost = cost
 	ui.held_key = -2
 
-	# --- под прицелом
-	var insp := _ui_section(root)
+	# --- под прицелом: карточка слева от прицела
+	var ipanel := PanelContainer.new()
+	var isb := StyleBoxFlat.new()
+	isb.bg_color = Color(0.05, 0.06, 0.09, 0.72)
+	isb.border_color = Color(1, 1, 1, 0.1)
+	isb.set_border_width_all(1)
+	isb.set_corner_radius_all(4)
+	isb.set_content_margin_all(8)
+	ipanel.add_theme_stylebox_override("panel", isb)
+	ipanel.anchor_left = 0.5
+	ipanel.anchor_right = 0.5
+	ipanel.anchor_top = 0.5
+	ipanel.anchor_bottom = 0.5
+	ipanel.offset_left = -330
+	ipanel.offset_right = -36
+	ipanel.offset_top = -40
+	ipanel.offset_bottom = -40
+	ipanel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	ipanel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	ipanel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(ipanel)
+	ui.ipanel = ipanel
+	var iroot := VBoxContainer.new()
+	iroot.add_theme_constant_override("separation", 4)
+	iroot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ipanel.add_child(iroot)
+	var insp := _ui_section(iroot)
 	ui.insp = insp
-	_ui_sep(insp)
 	var head := HBoxContainer.new()
 	head.add_theme_constant_override("separation", 6)
 	var dot := ColorRect.new()
@@ -6355,7 +6470,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ore.add_child(ui.ore_icon)
 	ui.ore_text = _ui_label(13)
 	ore.add_child(ui.ore_text)
-	root.add_child(ore)
+	iroot.add_child(ore)
 	ui.ore = ore
 
 	# --- корабль
@@ -6435,6 +6550,7 @@ func _update_hud() -> void:
 	if flying:
 		ui.insp.visible = false
 		ui.ore.visible = false
+		ui.ipanel.visible = false
 		ui.cap.visible = false
 		_update_ship_panel()
 		if map_mode != 0:
@@ -6456,6 +6572,10 @@ func _update_hud() -> void:
 	var dem := float(pw[1])
 	_set_row(ui.power, 1.0 if dem <= 0.0 else prod / dem, "%d / %d" % [int(prod), int(dem)])
 	_bar_color(ui.power.bar, Color(1.0, 0.85, 0.2) if prod >= dem else Color(1.0, 0.35, 0.2))
+	var bcap: float = float(pw[3]) if pw.size() > 3 else 0.0
+	(ui.battery.row as Control).visible = bcap > 0.0
+	if bcap > 0.0:
+		_set_row(ui.battery, float(pw[2]) / bcap, "%d / %d" % [int(pw[2]), int(bcap)])
 	# базы: квадратики своего цвета, затем врага
 	var want := int(base_count[my_team]) + int(base_count[1 - my_team])
 	var box: HBoxContainer = ui.bases
@@ -6553,6 +6673,7 @@ func _update_hud() -> void:
 				_set_icon(ui.ore_icon, dep)
 				ui.ore_text.text = String(D.ITEM_NAMES[dep]) + ("  · Бур II+" if D.RARE_ORES.has(dep) else "")
 	ui.insp.visible = show_insp
+	ui.ipanel.visible = show_insp or ui.ore.visible
 
 	if not fps_mode:
 		if selected.is_empty():
@@ -6848,7 +6969,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				cur = buildings[grid[_k(my_pn, hover_cell)]].filter
 			elif _hover_own(D.ASSEMBLER):
 				menu = unit_radial
-				cur = buildings[grid[_k(my_pn, hover_cell)]].ukind
+				cur = maxi(int(buildings[grid[_k(my_pn, hover_cell)]].ukind), 0)
 			elif _hover_own(D.LAUNCH_PAD):
 				menu = ship_radial
 			if menu:
