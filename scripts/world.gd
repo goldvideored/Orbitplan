@@ -87,6 +87,7 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var threat_pns := PackedInt32Array()   # клиент: луны, где сейчас вражеский корабль у нас (баннер тревоги)
 var nav_target := -1    # помощник перелёта: луна-цель (-1 — выключен)
 var plan := {}          # расчёт перелёта к цели
 var plan_traj: MeshInstance3D
@@ -2958,6 +2959,9 @@ func ev_alert(text: String, pn: int, kind: int) -> void:
 func _on_alert(text: String, pn: int, kind: int) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
 	alerts.append([text, now + 6.0])
+	if kind == 2:
+		ui.banner_until = now + 8.0
+		ui.banner_msg = "⚠ ВНИМАНИЕ! " + text.trim_prefix("⚠ ")
 	if alerts.size() > 4:
 		alerts.pop_front()
 	if pn >= 0:
@@ -3128,8 +3132,22 @@ func _send_snapshot() -> void:
 		for k in 3:
 			row.append(_unit_limit(t, k))
 		ustat.append(row)
+	# угроза: вражеский корабль в полёте внутри сферы притяжения луны, где у команды ядро или игрок
+	var threat := [[], []]
+	for sh in ships.values():
+		var spn: int = int(sh.pn)
+		if int(sh.state) != 1 or spn < 0:
+			continue
+		var enemy: int = 1 - int(sh.team)
+		if enemy < 0 or enemy > 1 or (threat[enemy] as Array).has(spn):
+			continue
+		if _team_present(enemy, spn):
+			(threat[enemy] as Array).append(spn)
 	var cache := {}
 	for p in Net.ready_peers:
+		var tm: int = Net.team_of(p)
+		if tm == 0 or tm == 1:
+			threat_snap.rpc_id(p, PackedInt32Array(threat[tm]))
 		var pn := _peer_pn(p)
 		if not cache.has(pn):
 			cache[pn] = _snap_data(pn)
@@ -3146,10 +3164,29 @@ func _send_snapshot() -> void:
 		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv)
 		cur_caps = sd.caps
 		unit_stat = ustat
+		if my_team == 0 or my_team == 1:
+			threat_pns = PackedInt32Array(threat[my_team])
 		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
 		_apply_aims(sd.aim_ids, sd.aim_dirs)
 		_apply_asm(sd.asm)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func threat_snap(pns: PackedInt32Array) -> void:
+	threat_pns = pns
+
+
+## Есть ли у команды на луне ядро или живой игрок (тогда вражеский корабль там — угроза).
+func _team_present(team: int, pn: int) -> bool:
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if int(o.team) == team and int(o.get("pn", -9)) == pn and int(o.hp) > 0:
+			return true
+	for b in buildings.values():
+		if b.type == D.CORE and int(b.team) == team and int(b.pn) == pn:
+			return true
+	return false
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -6863,6 +6900,33 @@ func _build_panel(layer: CanvasLayer) -> void:
 	topc.add_child(cap)
 	ui.cap = cap
 
+	# --- баннер тревоги: вражеский корабль в зоне притяжения нашей луны
+	var ban := PanelContainer.new()
+	var bsb := StyleBoxFlat.new()
+	bsb.bg_color = Color(0.55, 0.05, 0.03, 0.85)
+	bsb.border_color = Color(1.0, 0.85, 0.2)
+	bsb.set_border_width_all(3)
+	bsb.set_corner_radius_all(4)
+	bsb.set_content_margin_all(12)
+	ban.add_theme_stylebox_override("panel", bsb)
+	ban.anchor_left = 0.5
+	ban.anchor_right = 0.5
+	ban.offset_left = -330
+	ban.offset_right = 330
+	ban.offset_top = 120
+	ban.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	ban.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ban.visible = false
+	layer.add_child(ban)
+	var bl := _ui_label(24, Color(1.0, 0.95, 0.8))
+	bl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ban.add_child(bl)
+	ui.banner = ban
+	ui.banner_text = bl
+	ui.banner_until = 0.0
+	ui.banner_msg = ""
+
 	# --- гибель: выбор базы для возрождения
 	var dp := PanelContainer.new()
 	var dsb := StyleBoxFlat.new()
@@ -7015,6 +7079,7 @@ func _set_row(r: Dictionary, frac: float, txt: String) -> void:
 func _update_hud() -> void:
 	if my_team < 0 or ui.is_empty():
 		return
+	_update_banner()
 	var alert_txt := "\n".join(_alert_lines())
 	ui.alerts.text = alert_txt
 	ui.alerts.visible = alert_txt != ""
@@ -7168,6 +7233,26 @@ func _update_hud() -> void:
 	if _near_ship() != -1:
 		hints.append("E — сесть в корабль")
 	ui.hint.text = "\n".join(hints)
+
+
+## Баннер «ВНИМАНИЕ»: пока вражеский корабль в сфере притяжения луны, где наша база или мы сами,
+## и ещё 8 с после тревоги о входе в атмосферу. Мигает.
+func _update_banner() -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	var names := PackedStringArray()
+	for pn in threat_pns:
+		if pn >= 0 and pn < D.PLANETS.size():
+			names.append(String(D.PLANETS[pn].name))
+	var txt := ""
+	if not names.is_empty():
+		txt = "⚠ ВНИМАНИЕ! ПРОТИВНИК В ЗОНЕ ПРИТЯЖЕНИЯ: " + ", ".join(names)
+	elif float(ui.banner_until) > now:
+		txt = String(ui.banner_msg)
+	var ban: Control = ui.banner
+	ban.visible = txt != "" and not finished
+	if ban.visible:
+		ui.banner_text.text = txt
+		ban.modulate.a = 0.65 + 0.35 * absf(sin(now * 4.0))
 
 
 ## Карточка постройки под прицелом. info от сервера может опаздывать — тогда только то, что знаем сами.
