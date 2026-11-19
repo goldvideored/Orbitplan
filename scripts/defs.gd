@@ -99,6 +99,8 @@ const WALL := 29          # забор: высокий, юниты упираю�
 const LAMP := 30          # лампа: светит вокруг, выключается (маскировка)
 const BATTERY := 31       # аккумулятор: копит излишек энергии сети и отдаёт при нехватке
 const FUEL_DEPOT := 32    # заправочная станция: топливо из труб, заправщик развозит его по площадкам
+const SORTER := 33        # сортировщик: конвейер, который берёт только один выбранный груз (E — выбрать)
+const SPACE_DOCK := 34    # космопорт: космический курьер возит грузы между планетами сам
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -110,12 +112,14 @@ const NAMES := {
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
 	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	SPLITTER: "Разветвитель", JUNCTION: "Перекрёсток", BRIDGE: "Мост", POWER_POLE: "Энергостолб",
-	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор", FUEL_DEPOT: "Заправочная станция",
+	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор", FUEL_DEPOT: "Заправочная станция", SORTER: "Сортировщик", SPACE_DOCK: "Космопорт курьера",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
 	CONVEYOR: "везёт твёрдые предметы; воду и топливо He-3 не берёт — только трубы",
 	PIPE: "вода и топливо He-3",
+	SORTER: "конвейер, который берёт на вход только один груз (держи E — выбрать). Например, забирать нужное из космопорта",
+	SPACE_DOCK: "космический курьер (1 на команду) сам летает между космопортами: грузы с конвейеров, топливо по трубе. Полный бак + 1 мин ожидания — вылет. Держи E — куда лететь",
 	DRILL: "медленно, без энергии, редкие руды не берёт",
 	DRILL2: "быстро, 50 энергии, берёт любые руды",
 	DRILL3: "очень быстро, 150 энергии + вода по трубе",
@@ -177,24 +181,26 @@ const COST := {
 	LOADER: {I_IRON: 20, I_CHIP: 10},
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
 	FUEL_DEPOT: {I_IRON: 30, I_SILICON: 10, I_CHIP: 10},
+	SORTER: {I_COPPER: 3, I_IRON: 2},
+	SPACE_DOCK: {I_IRON: 160, I_SILICON: 60, I_CHIP: 40, I_LEAD: 30},
 	CHIP_FACTORY: {I_COPPER: 80, I_IRON: 60, I_SILICON: 20},
 }
 const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, FUEL_DEPOT: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
+	LOADER: 250, UNLOADER: 250, FUEL_DEPOT: 250, SORTER: 60, SPACE_DOCK: 1200, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
 	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60, BATTERY: 200,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
-	CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9, AA_GUN: 3,
+	SPACE_DOCK: 3, CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9, AA_GUN: 3,
 }
 # время стройки, сек (снос — столько же); не указано — по размеру: 1 клетка 2.5 с, 3 — 6 с, 9 — 14 с
 const BUILD_TIME := {
 	CONVEYOR: 0.4, PIPE: 0.4, WALL: 1.0, POWER_POLE: 0.8, LAMP: 0.8,
-	SPLITTER: 0.8, JUNCTION: 0.8, BRIDGE: 1.2, TURRET3: 20.0, NUCLEAR: 20.0, LAUNCH_PAD: 20.0,
+	SORTER: 0.6, SPLITTER: 0.8, JUNCTION: 0.8, BRIDGE: 1.2, TURRET3: 20.0, NUCLEAR: 20.0, LAUNCH_PAD: 20.0,
 }
 
 
@@ -218,13 +224,13 @@ const POWER_RING := 4          # генератор питает клетки в
 
 # группы для клавиш 1–5 (повторное нажатие листает внутри группы), 6 — бластер
 const CATEGORIES := [
-	["Транспорт", [CONVEYOR, PIPE, SPLITTER, JUNCTION, BRIDGE]],
+	["Транспорт", [CONVEYOR, SORTER, PIPE, SPLITTER, JUNCTION, BRIDGE]],
 	["Добыча", [DRILL, DRILL2, DRILL3]],
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, BATTERY, POWER_POLE, LAMP]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
 	["Логистика", [LOADER, UNLOADER, FUEL_DEPOT]],
 	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
-	["Космос", [LAUNCH_PAD]],
+	["Космос", [LAUNCH_PAD, SPACE_DOCK]],
 ]
 
 # ---------------------------------------------------------------------
@@ -284,6 +290,13 @@ const ROVER_RESPAWN_TICKS := 600   # новый — через 1 мин
 const TANKER_CAP := 20         # заправщик везёт до 20 топлива
 const DEPOT_CAP := 60          # сколько топлива держит заправочная станция
 const FLUIDS := [I_WATER, I_FUEL]  # текут только по трубам
+# космический курьер
+const COURIER_FUEL := 30           # бак: вылетает только с полным
+const COURIER_CARGO := 100         # мест под груз
+const COURIER_WAIT_TICKS := 600    # после полной заправки ждёт 1 мин (догружается) и улетает
+const COURIER_RESPAWN_TICKS := 600 # потерян (космопорт разрушен) — новый через 1 мин
+const DOCK_CAP := 200              # сколько груза держит космопорт на отправку
+const DOCK_RECV_CAP := 200         # и сколько принятого (выдаёт на конвейеры)
 const ROVER_SPEED := 0.5       # м за тик (5 м/с)
 const ROVER_REACH := 2.5       # с какого расстояния ровер грузится/выгружается
 const LOADER_CAP := 100        # сколько всего держит точка погрузки
@@ -298,7 +311,7 @@ const FILTER_GROUPS := [
 	["Уран", [I_URANIUM_ORE, I_URANIUM]],
 	["Топливо", [I_HELIUM_ORE, I_FUEL]],
 	["Лёд", [I_ICE]],
-	["Микросхемы", [I_CHIP]],
+	["Микросхемы", [I_CHIP, I_ALLOY]],
 ]
 
 const T_NEUTRAL := 2               # команда нейтральных баз

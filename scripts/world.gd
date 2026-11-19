@@ -46,7 +46,7 @@ const IND_H := {
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
-	D.LAUNCH_PAD: 0.4, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9, D.BATTERY: 1.55,
+	D.LAUNCH_PAD: 0.4, D.SPACE_DOCK: 1.5, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9, D.BATTERY: 1.55,
 }
 
 var my_team := 0
@@ -134,6 +134,11 @@ var icon_atlas: ImageTexture
 var item_radial: RadialMenu    # меню выбора груза для точки выгрузки (держать E)
 var unit_radial: RadialMenu    # меню выбора юнита для сборщика (держать E)
 var ship_radial: RadialMenu    # меню выбора корабля для площадки (держать E)
+var dock_radial: RadialMenu    # куда летит космический курьер (держать E на космопорте)
+var couriers := {}             # сервер: команда -> космический курьер
+var courier_respawn := [0, 0]
+var cur_couriers: Array = []   # клиент: снимок курьеров
+var courier_nodes := {}        # клиент: команда -> [модель, метка на карте системы]
 var e_menu: RadialMenu = null  # какое меню сейчас открыто по E
 var mm_drones: MultiMesh
 var mm_mechs: MultiMesh
@@ -1103,10 +1108,11 @@ func server_set_filter(team: int, cell: int, item: int, pn: int) -> void:
 	if not grid.has(_k(pn, cell)) or not D.ITEM_NAMES.has(item):
 		return
 	var b: Dictionary = buildings[grid[_k(pn, cell)]]
-	if b.type != D.UNLOADER or b.team != team:
+	if (b.type != D.UNLOADER and b.type != D.SORTER) or b.team != team:
 		return
 	b.filter = item
-	b.buf = {}   # старый груз выбрасываем
+	if b.type == D.UNLOADER:
+		b.buf = {}   # старый груз выбрасываем
 	for p in Net.ready_peers:
 		ev_filter.rpc_id(p, b.id, item)
 	if not headless:
@@ -1266,7 +1272,9 @@ func _status(b: Dictionary) -> Array:
 		if not creative and lead + ur <= 0:
 			return [ST_STOP, "нет снарядов (свинец или уран)"]
 		return [ST_OK, "снаряды: свинец %d, уран %d" % [lead, ur] if not creative else "боеприпасы бесконечны"]
-	if t == D.CONVEYOR or t == D.PIPE:
+	if t == D.SORTER and int(b.filter) == D.I_NONE:
+		return [ST_IDLE, "груз не выбран — держи E"]
+	if t == D.CONVEYOR or t == D.PIPE or t == D.SORTER:
 		return [ST_OK, "везёт: " + D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"]
 	if _is_drill(t):
 		if b.blocked:
@@ -1310,6 +1318,8 @@ func _status(b: Dictionary) -> Array:
 	if (t == D.LOADER or t == D.FUEL_DEPOT) and int(b.get("rover_t", 0)) > 0:
 		return [ST_STOP, "%s уничтожен — новый через %d с" % ["Заправщик" if t == D.FUEL_DEPOT else "Курьер",
 			int(ceil(float(b.rover_t) * D.TICK))]]
+	if t == D.SPACE_DOCK:
+		return _dock_status(b)
 	if t == D.FUEL_DEPOT:
 		var fu := int(b.buf.get(D.I_FUEL, 0))
 		if fu == 0:
@@ -1351,7 +1361,7 @@ func _send_states() -> void:
 	var sts := PackedByteArray()
 	for b in buildings.values():
 		ids.append(b.id)
-		if b.type == D.CONVEYOR or b.type == D.PIPE or b.type == D.SPLITTER or b.type == D.JUNCTION or b.type == D.BRIDGE:
+		if BELT_TYPES.has(int(b.type)):
 			# лента крутится, только пока по ней недавно что-то ехало
 			sts.append(ST_OK if sim_n - int(b.get("flow_t", -100)) < 12 else ST_IDLE)
 		else:
@@ -1616,7 +1626,7 @@ func _sim_tick() -> void:
 				b.burn_t = int(b.burn_t) - 1
 		elif _is_drill(t):
 			_drill_tick(b, r)
-		elif t == D.CONVEYOR or t == D.PIPE:
+		elif t == D.CONVEYOR or t == D.PIPE or t == D.SORTER:
 			_belt_tick(b)
 		elif D.RECIPES.has(t):
 			_factory_tick(b, r * float(D.UPG_SPEED[int(b.lvl) - 1]))
@@ -1638,8 +1648,11 @@ func _sim_tick() -> void:
 			_unloader_tick(b)
 		elif t == D.LOADER or t == D.FUEL_DEPOT:
 			_depot_tick(b)
+		elif t == D.SPACE_DOCK:
+			_dock_tick(b)
 		elif t == D.LAUNCH_PAD:
 			_pad_tick(b)
+	_couriers_tick()
 	_players_tick()
 	_units_tick()
 	_rovers_tick()
@@ -1986,6 +1999,278 @@ func _rovers_tick() -> void:
 				r.state = 0
 
 
+# ---------------------------------------------------------------------
+# Космический курьер: один на команду, сам летает между космопортами.
+# В порту: выгружает привезённое, догружает груз с конвейеров, заправляется по трубе.
+# Полный бак + 1 мин ожидания — вылет в порт на планете, которую назначил игрок (держи E),
+# иначе — обратно, откуда прилетел.
+# ---------------------------------------------------------------------
+
+func _any_dock(team: int):
+	for b in buildings.values():
+		if b.type == D.SPACE_DOCK and int(b.team) == team and not _busy(b):
+			return b
+	return null
+
+
+func _dock_on(team: int, pn: int):
+	for b in buildings.values():
+		if b.type == D.SPACE_DOCK and int(b.team) == team and int(b.pn) == pn and not _busy(b):
+			return b
+	return null
+
+
+func _cargo_total(c: Dictionary) -> int:
+	var n := 0
+	for it in c.cargo:
+		n += int(c.cargo[it])
+	return n
+
+
+func _courier_dur(a: int, b: int) -> float:
+	if a == b:
+		return 30.0
+	var r1: float = D.PLANETS[a].a
+	var r2: float = D.PLANETS[b].a
+	var at := (r1 + r2) * 0.5
+	return maxf(40.0, PI * sqrt(at * at * at / D.GIANT_MU) * 0.5 + 16.0)   # вдвое быстрее перелёта по Гоману
+
+
+func _courier_target(c: Dictionary, d: Dictionary):
+	var pn: int = int(d.get("dest_pn", -1))
+	if pn < 0 or pn == int(d.pn):
+		if buildings.has(int(c.get("prev", -1))):
+			pn = int(buildings[int(c.prev)].pn)
+		else:
+			return null
+	if pn == int(d.pn):
+		return null
+	return _dock_on(int(c.team), pn)
+
+
+func _courier_lost(team: int, why: String) -> void:
+	couriers.erase(team)
+	courier_respawn[team] = D.COURIER_RESPAWN_TICKS
+	_alert_team(team, "Космический курьер потерян (%s) — новый через 1 мин" % why, -1, 1)
+
+
+func _couriers_tick() -> void:
+	for team in 2:
+		if not couriers.has(team):
+			if courier_respawn[team] > 0:
+				courier_respawn[team] -= 1
+				continue
+			var nd = _any_dock(team)
+			if nd != null:
+				couriers[team] = {"team": team, "at": nd.id, "to": -1, "prev": -1, "state": 0, "cargo": {},
+					"fuel": 0, "wait": -1, "unload": false, "t0": 0.0, "dur": 0.0,
+					"from_pn": nd.pn, "to_pn": nd.pn, "from_cell": nd.cell, "to_cell": nd.cell}
+			continue
+		var c: Dictionary = couriers[team]
+		if int(c.state) == 0:
+			if not buildings.has(int(c.at)):
+				_courier_lost(team, "космопорт разрушен")
+				continue
+			var d: Dictionary = buildings[int(c.at)]
+			if int(d.team) != team:
+				_courier_lost(team, "космопорт захвачен")
+				continue
+			var recv: Dictionary = d.get("recv", {})
+			d["recv"] = recv
+			if bool(c.unload):
+				# выгрузка: по 5 за тик в приёмный склад порта
+				var rtot := 0
+				for it in recv:
+					rtot += int(recv[it])
+				var k := 5
+				for it in c.cargo.keys():
+					while k > 0 and rtot < D.DOCK_RECV_CAP and int(c.cargo[it]) > 0:
+						c.cargo[it] = int(c.cargo[it]) - 1
+						recv[it] = int(recv.get(it, 0)) + 1
+						rtot += 1
+						k -= 1
+					if int(c.cargo[it]) <= 0:
+						c.cargo.erase(it)
+				if c.cargo.is_empty():
+					c.unload = false
+			else:
+				# погрузка: по 5 за тик с конвейерного склада порта
+				var k2 := 5
+				for it in d.buf.keys():
+					if int(it) == D.I_FUEL:
+						continue
+					while k2 > 0 and _cargo_total(c) < D.COURIER_CARGO and int(d.buf[it]) > 0:
+						d.buf[it] = int(d.buf[it]) - 1
+						c.cargo[it] = int(c.cargo.get(it, 0)) + 1
+						k2 -= 1
+			# заправка по трубе
+			if int(c.fuel) < D.COURIER_FUEL and _buf_take(d, D.I_FUEL, 1):
+				c.fuel = int(c.fuel) + 1
+			if int(c.fuel) >= D.COURIER_FUEL and not bool(c.unload):
+				if int(c.wait) < 0:
+					c.wait = D.COURIER_WAIT_TICKS
+				c.wait = int(c.wait) - 1
+				if int(c.wait) <= 0:
+					var tgt = _courier_target(c, d)
+					if tgt == null:
+						c.wait = 0   # лететь некуда — ждёт назначения
+					else:
+						c.fuel = 0
+						c.state = 1
+						c.prev = d.id
+						c.to = tgt.id
+						c.from_pn = d.pn
+						c.to_pn = tgt.pn
+						c.from_cell = d.cell
+						c.to_cell = tgt.cell
+						c.t0 = world_time
+						c.dur = _courier_dur(int(d.pn), int(tgt.pn))
+						c.wait = -1
+		else:
+			if world_time < float(c.t0) + float(c.dur):
+				continue
+			var dst = buildings.get(int(c.to))
+			if dst == null or int(dst.team) != team or dst.type != D.SPACE_DOCK:
+				_courier_lost(team, "порт назначения разрушен")
+				continue
+			c.state = 0
+			c.at = int(c.to)
+			c.unload = true
+			c.wait = -1
+
+
+## Порт выдаёт привезённое на конвейеры вокруг (по 1 за тик).
+func _dock_tick(b: Dictionary) -> void:
+	var recv: Dictionary = b.get("recv", {})
+	for it in recv.keys():
+		if int(recv[it]) <= 0:
+			recv.erase(it)
+			continue
+		if _output(b, int(it)):
+			recv[it] = int(recv[it]) - 1
+			return
+
+
+func _dock_status(b: Dictionary) -> Array:
+	var dest: int = int(b.get("dest_pn", -1))
+	var dtxt: String = "цель: " + (String(D.PLANETS[dest].name) if dest >= 0 and dest != int(b.pn) else "обратно, откуда прилетел") + " (держи E)"
+	var recv: Dictionary = b.get("recv", {})
+	var rtot := 0
+	for it in recv:
+		rtot += int(recv[it])
+	var rtxt := ("  · принято %d, выдаёт на конвейеры" % rtot) if rtot > 0 else ""
+	if not couriers.has(int(b.team)):
+		return [ST_IDLE, "курьер появится через %d с, %s" % [int(ceil(courier_respawn[int(b.team)] * D.TICK)), dtxt]]
+	var c: Dictionary = couriers[int(b.team)]
+	if int(c.state) == 1:
+		var left := float(c.t0) + float(c.dur) - world_time
+		return [ST_OK, "курьер летит на %s, прилёт через %d с, %s%s" % [D.PLANETS[int(c.to_pn)].name, int(left), dtxt, rtxt]]
+	if int(c.at) != int(b.id):
+		var opn: int = int(buildings[int(c.at)].pn) if buildings.has(int(c.at)) else 0
+		return [ST_IDLE, "курьер в другом порту (%s), %s%s" % [D.PLANETS[opn].name, dtxt, rtxt]]
+	if bool(c.unload):
+		return [ST_OK, "курьер выгружается: осталось %d%s" % [_cargo_total(c), rtxt]]
+	if int(c.fuel) < D.COURIER_FUEL:
+		return [ST_IDLE, "курьер здесь: топливо %d/%d (подай по трубе), груз %d/%d, %s%s" % [int(c.fuel), D.COURIER_FUEL,
+			_cargo_total(c), D.COURIER_CARGO, dtxt, rtxt]]
+	if _courier_target(c, b) == null:
+		return [ST_SLOW, "курьер заправлен, но лететь некуда — нужен свой космопорт на другой планете, %s" % dtxt]
+	return [ST_OK, "курьер заправлен, груз %d/%d, вылет через %d с, %s%s" % [_cargo_total(c), D.COURIER_CARGO,
+		int(ceil(maxf(float(c.wait), 0.0) * D.TICK)), dtxt, rtxt]]
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_set_dest(cell: int, pn: int) -> void:
+	if multiplayer.is_server():
+		var peer := multiplayer.get_remote_sender_id()
+		server_set_dest(Net.team_of(peer), cell, pn, _peer_pn(peer))
+
+
+func server_set_dest(team: int, cell: int, dest: int, pn: int) -> void:
+	if not grid.has(_k(pn, cell)):
+		return
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
+	if b.type != D.SPACE_DOCK or int(b.team) != team:
+		return
+	b["dest_pn"] = clampi(dest, -1, D.PLANETS.size() - 1)
+
+
+func _planet_name(j) -> String:
+	return String(D.PLANETS[int(j)].name)
+
+
+func _dock_info(j) -> Array:
+	return [String(D.PLANETS[int(j)].name), "Космический курьер полетит сюда (нужен свой космопорт на этой планете)"]
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func courier_snap(cv: Array) -> void:
+	cur_couriers = cv
+
+
+## Клиент: курьер стоит в порту, взлетает/садится у планеты, а между планетами — метка на карте системы.
+func _update_couriers() -> void:
+	var seen := {}
+	for e in cur_couriers:
+		var team: int = e[0]
+		seen[team] = true
+		if not courier_nodes.has(team):
+			var nm := _make_ship(team, 1)
+			local_root.add_child(nm)
+			var nl := _marker_label("◆ курьер", D.TEAM_COLORS[team])
+			space_root.add_child(nl)
+			courier_nodes[team] = [nm, nl]
+		var model: Node3D = courier_nodes[team][0]
+		var lbl: Label3D = courier_nodes[team][1]
+		var state: int = e[1]
+		var flame: Node3D = model.get_meta("flame")
+		var asc := 8.0
+		if state == 0:
+			var at_pn: int = e[3]
+			var at_cell: int = e[2]
+			model.visible = at_pn == my_pn
+			flame.visible = false
+			if model.visible:
+				var up: Vector3 = planet.dirs[at_cell]
+				model.transform = Transform3D(_up_basis(up).scaled(Vector3.ONE * 0.8), planet.top_pos(at_cell) + up * 0.55)
+			lbl.position = SkyCalc.planet_pos(at_pn, world_time) + Vector3.UP * D.PLANET_R * 2.0
+			continue
+		var fpn: int = e[4]
+		var tpn: int = e[5]
+		var fcell: int = e[6]
+		var tcell: int = e[7]
+		var t0: float = e[8]
+		var dur: float = e[9]
+		var u := world_time - t0
+		model.visible = false
+		var hgt := -1.0
+		var cell := fcell
+		if u < asc and fpn == my_pn:
+			hgt = 0.55 + 160.0 * pow(u / asc, 2.0)
+		elif u > dur - asc and tpn == my_pn:
+			hgt = 0.55 + 160.0 * pow(maxf(dur - u, 0.0) / asc, 2.0)
+			cell = tcell
+		if hgt >= 0.0:
+			var up: Vector3 = planet.dirs[cell]
+			model.visible = true
+			flame.visible = true
+			model.transform = Transform3D(_up_basis(up).scaled(Vector3.ONE * 0.8), planet.top_pos(cell) + up * hgt)
+		# карта системы: по дуге от планеты отправления к планете прибытия
+		var pf := SkyCalc.planet_pos(fpn, t0 + asc)
+		var pt := SkyCalc.planet_pos(tpn, t0 + dur - asc)
+		var k := clampf((u - asc) / maxf(dur - 2.0 * asc, 1.0), 0.0, 1.0)
+		var s := k * k * (3.0 - 2.0 * k)
+		var a0 := atan2(pf.z, pf.x)
+		var da := fposmod(atan2(pt.z, pt.x) - a0, TAU)
+		var rr := lerpf(pf.length(), pt.length(), s)
+		lbl.position = Vector3(cos(a0 + da * s), 0.0, sin(a0 + da * s)) * rr + Vector3.UP * D.PLANET_R
+	for team in courier_nodes.keys():
+		if not seen.has(team):
+			for nd in courier_nodes[team]:
+				(nd as Node).queue_free()
+			courier_nodes.erase(team)
+
+
 ## Курьер/заправщик подбит: взрыв, через минуту база выпустит новый.
 func _damage_rover(r: Dictionary, dmg: int) -> void:
 	if bool(r.get("dead", false)):
@@ -2165,6 +2450,16 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return int(buf.get(D.I_LEAD, 0)) + int(buf.get(D.I_URANIUM, 0)) < D.T3_AMMO_CAP
 	if t == D.FUEL_DEPOT:
 		return item == D.I_FUEL and int(buf.get(item, 0)) < D.DEPOT_CAP
+	if t == D.SPACE_DOCK:
+		if item == D.I_FUEL:
+			return int(buf.get(item, 0)) < D.COURIER_FUEL * 2
+		if D.FLUIDS.has(item):
+			return false
+		var tot := 0
+		for it in buf:
+			if int(it) != D.I_FUEL:
+				tot += int(buf[it])
+		return tot < D.DOCK_CAP
 	if t == D.LOADER:
 		if D.FLUIDS.has(item):
 			return false
@@ -2199,10 +2494,12 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 		o["src"] = src_id
 		o["flow_t"] = sim_n
 		return true
-	if t == D.CONVEYOR or t == D.PIPE:
+	if t == D.CONVEYOR or t == D.PIPE or t == D.SORTER:
 		# вода и топливо — только в трубы, всё твёрдое — только на конвейеры
 		if D.FLUIDS.has(item) != (t == D.PIPE):
 			return false
+		if t == D.SORTER and item != int(o.filter):
+			return false   # сортировщик берёт только выбранный груз
 		# лента, которая смотрит в источник, у него ничего не берёт
 		if o.item != D.I_NONE or int(grid.get(_k(pn, _out_cell(o)), -1)) == src_id:
 			return false
@@ -3188,7 +3485,7 @@ func _snap_data(pn: int) -> Dictionary:
 	for b in buildings.values():
 		if b.pn != pn:
 			continue
-		if (b.type == D.CONVEYOR or b.type == D.PIPE) and b.item != D.I_NONE:
+		if (b.type == D.CONVEYOR or b.type == D.PIPE or b.type == D.SORTER) and b.item != D.I_NONE:
 			var a := _bpos(b)
 			var nxt := planet.top_pos(_out_cell(b))
 			var up: Vector3 = planet.dirs[b.cell]
@@ -3242,6 +3539,13 @@ func _send_snapshot() -> void:
 		for k in 3:
 			row.append(_unit_limit(t, k))
 		ustat.append(row)
+	var cv: Array = []
+	for c in couriers.values():
+		var atb = buildings.get(int(c.at))
+		var at_cell: int = int(atb.cell) if atb != null else 0
+		var at_pn: int = int(atb.pn) if atb != null else 0
+		cv.append([int(c.team), int(c.state), at_cell, at_pn, int(c.from_pn), int(c.to_pn), int(c.from_cell),
+			int(c.to_cell), float(c.t0), float(c.dur)])
 	# угроза: вражеский корабль в полёте внутри сферы притяжения планеты, где у команды ядро или игрок
 	var threat := [[], []]
 	for sh in ships.values():
@@ -3269,6 +3573,7 @@ func _send_snapshot() -> void:
 		if not sd.aim_ids.is_empty():
 			turret_aims.rpc_id(p, sd.aim_ids, sd.aim_dirs)
 		asm_snap.rpc_id(p, sd.asm)
+		courier_snap.rpc_id(p, cv)
 	if not headless:
 		var sd: Dictionary = cache[my_pn] if cache.has(my_pn) else _snap_data(my_pn)
 		_apply_snapshot(sd.u, sd.it, sd.itt, sd.pl, storage, base_count, power_stats, sd.rv)
@@ -3276,6 +3581,7 @@ func _send_snapshot() -> void:
 		unit_stat = ustat
 		if my_team == 0 or my_team == 1:
 			threat_pns = PackedInt32Array(threat[my_team])
+		cur_couriers = cv
 		_apply_proj(sd.pp, sd.pv, sd.pk)
 		cur_ships = sv
 		_apply_aims(sd.aim_ids, sd.aim_dirs)
@@ -3548,6 +3854,13 @@ func _build_scene() -> void:
 	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]]], ship_name, "отпусти E — собрать")
 	ship_radial.info_func = _ship_info
 	layer.add_child(ship_radial)
+	dock_radial = RadialMenu.new()
+	var dsecs: Array = []
+	for j in D.PLANETS.size():
+		dsecs.append([String(D.PLANETS[j].name), [j]])
+	dock_radial.configure(dsecs, _planet_name, "отпусти E — назначить")
+	dock_radial.info_func = _dock_info
+	layer.add_child(dock_radial)
 	sel_box = Control.new()
 	sel_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sel_box.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -4054,7 +4367,7 @@ func _vis_add(b: Dictionary) -> void:
 		root.set_meta("ind", ind)
 	if n.has_meta("pitch"):
 		turret_nodes[b.id] = n
-	if t == D.UNLOADER:
+	if t == D.UNLOADER or t == D.SORTER:
 		var sp := Sprite3D.new()
 		sp.texture = icon_atlas
 		sp.region_enabled = true
@@ -4063,12 +4376,12 @@ func _vis_add(b: Dictionary) -> void:
 		sp.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 		sp.pixel_size = 0.07
 		sp.shaded = false
-		sp.position = Vector3(0, 1.9, 0)
+		sp.position = Vector3(0, 1.9 if t == D.UNLOADER else 1.2, 0)
 		sp.visible = false
 		n.add_child(sp)
 		root.set_meta("filter_sprite", sp)
 	# твёрдое тело для одноклеточных (по конвейерам и трубам ходим; у забора — свои секции)
-	if not multi and t != D.CONVEYOR and t != D.PIPE and t != D.WALL:
+	if not multi and t != D.CONVEYOR and t != D.PIPE and t != D.WALL and t != D.SORTER:
 		var body := StaticBody3D.new()
 		var shape_node := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
@@ -4112,8 +4425,8 @@ func _vis_add(b: Dictionary) -> void:
 # Соединения: конвейеры и трубы стыкуются с соседями, заборы — в сплошную стену, столбы — проводами
 # ---------------------------------------------------------------------
 
-const LINK_TYPES := [D.CONVEYOR, D.PIPE, D.WALL, D.POWER_POLE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
-const BELT_TYPES := [D.CONVEYOR, D.PIPE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
+const LINK_TYPES := [D.CONVEYOR, D.SORTER, D.PIPE, D.WALL, D.POWER_POLE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
+const BELT_TYPES := [D.CONVEYOR, D.SORTER, D.PIPE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
 
 
 ## Выдаёт ли постройка o продукт именно в клетку cell (завод — только вперёд).
@@ -4155,7 +4468,7 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 	var cell: int = b.cell
 	var nb: PackedInt32Array = planet.nbrs[cell]
 	var col: Color = D.TEAM_COLORS[b.team]
-	if t == D.CONVEYOR or t == D.PIPE:
+	if t == D.CONVEYOR or t == D.PIPE or t == D.SORTER:
 		var out := _local_dir(n, cell, _out_cell(b))
 		var half: float = float(out[1]) * 0.5
 		var feeders: Array = []
@@ -4163,7 +4476,7 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 			if x == _out_cell(b) or not grid.has(_k(pn, x)):
 				continue
 			var o: Dictionary = buildings[grid[_k(pn, x)]]
-			if o.type == t and _out_cell(o) == cell:
+			if (o.type == t or (t != D.PIPE and (o.type == D.CONVEYOR or o.type == D.SORTER))) and _out_cell(o) == cell:
 				feeders.append(x)
 			elif o.type == D.SPLITTER or o.type == D.JUNCTION or o.type == D.BRIDGE:
 				feeders.append(x)
@@ -4184,7 +4497,13 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 			_belt_half(n, fd[0], float(fd[1]) * 0.5 + ext, true, t == D.PIPE, col)
 			if ext > 0.0:
 				_intake(n, fd[0], float(fd[1]) * 0.5, t == D.PIPE)
-		if t == D.CONVEYOR:
+		if t == D.SORTER:
+			# арка сортировщика над лентой, на ней — значок выбранного груза
+			var arch := _seg_node(n, out[0])
+			for sz in [-0.4, 0.4]:
+				_box(arch, Vector3(0.08, 0.75, 0.08), Vector3(0, 0.45, sz), Color(0.85, 0.7, 0.15))
+			_box(arch, Vector3(0.12, 0.1, 0.9), Vector3(0, 0.85, 0), Color(0.85, 0.7, 0.15))
+		if t == D.CONVEYOR or t == D.SORTER:
 			# стык в центре: барабан-ролик под лентой и стрелка направления
 			_cyl(n, 0.36, 0.07, Vector3(0, 0.135, 0), Color(0.16, 0.16, 0.18), 8).material_override = \
 					_pmat(Color(0.2, 0.2, 0.22), 2)
@@ -4282,7 +4601,7 @@ func _vis_logistic(n: Node3D, root: Node3D, b: Dictionary) -> void:
 			if not BELT_TYPES.has(ot) and not _feeds(o, cell, false) and not _feeds(o, cell, true):
 				continue
 			var ld := _local_dir(n, cell, x)
-			var inward: bool = (ot == D.CONVEYOR or ot == D.PIPE) and _out_cell(o) == cell
+			var inward: bool = (ot == D.CONVEYOR or ot == D.PIPE or ot == D.SORTER) and _out_cell(o) == cell
 			if not BELT_TYPES.has(ot):
 				inward = true
 			_belt_half(n, ld[0], float(ld[1]) * 0.5, inward, ot == D.PIPE or (ot == D.MELTER), col)
@@ -5161,6 +5480,17 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_anim(n, crane, "swing", 0.9, 0.6)
 		_anim(n, hook, "bob", 0.12, 1.2)
 		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.66, -0.51), Color(1.0, 0.85, 0.2), true)
+	elif t == D.SPACE_DOCK:
+		# космопорт: посадочный круг, башня с огнём, бак топлива, ящики груза
+		_cyl(n, 0.78, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.3, 0.34), 8).material_override = _pmat(Color(0.3, 0.3, 0.34), 1)
+		_cyl(n, 0.6, 0.02, Vector3(0, 0.13, 0), Color(0.9, 0.75, 0.15), 8)
+		_cyl(n, 0.5, 0.03, Vector3(0, 0.14, 0), Color(0.3, 0.3, 0.34), 8)
+		_box(n, Vector3(0.1, 1.3, 0.1), Vector3(-0.62, 0.65, -0.62), Color(0.75, 0.35, 0.15))
+		var bcn := _box(n, Vector3(0.12, 0.12, 0.12), Vector3(-0.62, 1.35, -0.62), Color(0.4, 0.8, 1.0), true)
+		_anim(n, bcn, "blink", 1.0, 1.0, true)
+		_cyl(n, 0.16, 0.5, Vector3(0.62, 0.3, -0.55), Color(0.75, 0.4, 1.0), 8)   # бак топлива
+		for c in [Vector3(0.6, 0.12, 0.55), Vector3(0.38, 0.12, 0.62), Vector3(0.6, 0.32, 0.55)]:
+			_box(n, Vector3(0.2, 0.18, 0.2), c, Color(0.6, 0.45, 0.25))
 	elif t == D.FUEL_DEPOT:
 		# заправочная станция: бак He-3, колонка со шлангом
 		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.55, 0.3, 0.75))
@@ -5289,7 +5619,7 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_box(pitch, Vector3(0.08, 0.18, 0.18), Vector3(1.42, 0, 0), Color(1.0, 0.55, 0.2), true)
 		pitch.rotation_degrees = Vector3(0, 0, 25)   # пока цели нет — ствол приподнят
 	# метка команды — маленький огонёк, чтобы своё было видно ночью
-	if t != D.CONVEYOR and t != D.PIPE and t != D.WALL:
+	if t != D.CONVEYOR and t != D.PIPE and t != D.WALL and t != D.SORTER:
 		_box(n, Vector3(0.15, 0.15, 0.15), Vector3(-0.5, 0.15, -0.5), col, true)
 
 
@@ -5416,6 +5746,7 @@ func _update_client(delta: float) -> void:
 	_update_turrets(delta)
 	_update_construction(delta)
 	_update_death(delta)
+	_update_couriers()
 
 	# стрельба
 	fire_cd -= delta
@@ -6242,6 +6573,10 @@ func _switch_planet(pn: int) -> void:
 	turret_nodes.clear()
 	turret_aim.clear()
 	asm_nodes.clear()
+	for team in courier_nodes.keys():
+		(courier_nodes[team][0] as Node).queue_free()
+		(courier_nodes[team][1] as Node).queue_free()
+	courier_nodes.clear()
 	for dict in [others, rover_nodes, ship_nodes]:
 		for id in dict.keys():
 			dict[id].queue_free()
@@ -6607,7 +6942,7 @@ func _update_lights() -> void:
 			if b.lit:
 				var up: Vector3 = planet.dirs[b.cell]
 				lamps.append(planet.top_pos(b.cell) + up * 2.2)
-		elif t != D.CONVEYOR and t != D.PIPE and t != D.WALL and t != D.POWER_POLE:
+		elif not BELT_TYPES.has(t) and t != D.WALL and t != D.POWER_POLE:
 			var c := _foot_center(b.cells)
 			glows.append([c.distance_squared_to(cam_p), c + c.normalized() * 1.0, b.cells.size()])
 	glows.sort_custom(func(x, y): return x[0] < y[0])
@@ -7405,8 +7740,10 @@ func _update_hud() -> void:
 			var info: Array = inspect_info if inspect_info.size() >= 7 \
 					and int(grid.get(_k(my_pn, inspect_cell), -1)) == int(b.id) else []
 			_fill_inspect(b, info)
-			if _hover_own(D.UNLOADER):
+			if _hover_own(D.UNLOADER) or _hover_own(D.SORTER):
 				hints.append("E (держать) — выбрать груз")
+			if _hover_own(D.SPACE_DOCK):
+				hints.append("E (держать) — куда летит космический курьер")
 			if _hover_own(D.LAUNCH_PAD):
 				hints.append("E (держать) — собрать корабль")
 			if _hover_own(D.ASSEMBLER):
@@ -7770,9 +8107,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kz.pressed and e_menu == null and not radial.is_open:
 			var menu: RadialMenu = null
 			var cur := 0
-			if _hover_own(D.UNLOADER):
+			if _hover_own(D.UNLOADER) or _hover_own(D.SORTER):
 				menu = item_radial
 				cur = buildings[grid[_k(my_pn, hover_cell)]].filter
+			elif _hover_own(D.SPACE_DOCK):
+				menu = dock_radial
+				cur = maxi(int(buildings[grid[_k(my_pn, hover_cell)]].get("dest_pn", -1)), 0)
 			elif _hover_own(D.ASSEMBLER):
 				menu = unit_radial
 				cur = maxi(int(buildings[grid[_k(my_pn, hover_cell)]].ukind), 0)
@@ -7803,6 +8143,11 @@ func _unhandled_input(event: InputEvent) -> void:
 						server_pad_action(my_team, filter_cell, my_pn, res)
 					else:
 						req_pad_action.rpc_id(1, filter_cell, res)
+				elif e_menu == dock_radial:
+					if is_server:
+						server_set_dest(my_team, filter_cell, res, my_pn)
+					else:
+						req_set_dest.rpc_id(1, filter_cell, res)
 			e_menu = null
 			filter_cell = NO_CELL
 			if player:
