@@ -4905,7 +4905,7 @@ func _vis_logistic(n: Node3D, root: Node3D, b: Dictionary) -> void:
 	var nb: PackedInt32Array = planet.nbrs[cell]
 	var steel := _pmat(Color(0.5, 0.5, 0.55), 1)
 	var hazard := Color(0.9, 0.75, 0.15)
-	if t != D.BRIDGE:
+	if t == D.SPLITTER:
 		for x in nb:
 			if not grid.has(_k(pn, x)):
 				continue
@@ -4934,22 +4934,38 @@ func _vis_logistic(n: Node3D, root: Node3D, b: Dictionary) -> void:
 			_box(vane, Vector3(0.08, 0.1, 0.1), Vector3(0.5, 0, 0), col, true)
 		n.set_meta("spin", spin)
 	elif t == D.JUNCTION:
-		# крестовина: нижний проход и мостик над ним, рамка с жёлто-чёрной разметкой
-		_box(n, Vector3(1.0, 0.2, 1.0), Vector3(0, 0.1, 0), Color(0.3, 0.3, 0.33)).material_override = steel
-		for k in 4:
-			var c := Vector3(0.45 if k % 2 == 0 else -0.45, 0.25, 0.45 if k < 2 else -0.45)
-			_box(n, Vector3(0.14, 0.1, 0.14), c, hazard)
-		_box(n, Vector3(1.0, 0.05, 0.5), Vector3(0, 0.23, 0), Color.WHITE).material_override = \
-				_pmat(Color(0.2, 0.2, 0.22), 2)
-		var top := Node3D.new()
-		top.position = Vector3(0, 0.42, 0)
-		top.rotation.y = PI / 2.0
-		n.add_child(top)
-		_box(top, Vector3(1.0, 0.05, 0.5), Vector3.ZERO, Color.WHITE).material_override = _pmat(Color(0.2, 0.2, 0.22), 2)
-		for sz in [-0.3, 0.3]:
-			_box(top, Vector3(1.0, 0.12, 0.06), Vector3(0, 0.03, sz), Color(0.58, 0.56, 0.5))
-			_box(n, Vector3(0.08, 0.4, 0.08), Vector3(sz, 0.2, sz), Color(0.4, 0.4, 0.44))
-			_box(n, Vector3(0.08, 0.4, 0.08), Vector3(sz, 0.2, -sz), Color(0.4, 0.4, 0.44))
+		# перекрёсток: груз идёт насквозь — из клетки, откуда пришёл, в противоположную.
+		# Рисуем только настоящие линии: вход + выход напротив; вторая линия — мостиком повыше.
+		var k := nb.size()
+		var line := 0
+		for i in k:
+			var x: int = nb[i]
+			if not grid.has(_k(pn, x)):
+				continue
+			var o: Dictionary = buildings[grid[_k(pn, x)]]
+			var ot: int = o.type
+			var feeds_in: bool = ((ot == D.CONVEYOR or ot == D.PIPE or ot == D.SORTER) and _out_cell(o) == cell) \
+					or _feeds(o, cell, false) or _feeds(o, cell, true)
+			if not feeds_in:
+				continue
+			var lift := Node3D.new()
+			lift.position.y = 0.34 * line
+			n.add_child(lift)
+			var pipe: bool = ot == D.PIPE or ot == D.MELTER
+			var ld := _local_dir(n, cell, x)
+			_belt_half(lift, ld[0], float(ld[1]) * 0.5, true, pipe, col)
+			var opp: int = nb[(i + k / 2) % k]
+			var od := _local_dir(n, cell, opp)
+			_belt_half(lift, od[0], float(od[1]) * 0.5, false, pipe, col)
+			if line > 0:
+				for sv in [ld[0], od[0]]:
+					var post := _seg_node(n, sv)
+					_box(post, Vector3(0.08, 0.34 * line, 0.08), Vector3(0.6, 0.17 * line, 0.3), Color(0.4, 0.4, 0.44))
+					_box(post, Vector3(0.08, 0.34 * line, 0.08), Vector3(0.6, 0.17 * line, -0.3), Color(0.4, 0.4, 0.44))
+			line += 1
+		# ступица с жёлто-чёрной разметкой
+		_cyl(n, 0.45, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.3, 0.33), 6).material_override = steel
+		_cyl(n, 0.48, 0.03, Vector3(0, 0.13, 0), hazard, 6)
 	else:
 		# мост: въездной пандус сзади, опора, площадка наверху; есть дальний мост — пролёт-ферма до него
 		var out := _local_dir(n, cell, _out_cell(b))
