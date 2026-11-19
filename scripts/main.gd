@@ -4,6 +4,9 @@ extends Node
 ## список серверов (в разработке), креатив, выход.
 
 const MenuBg = preload("res://scripts/menu_bg.gd")
+const LangGlobe = preload("res://scripts/lang_globe.gd")
+const I18n = preload("res://scripts/i18n.gd")
+const Settings = preload("res://scripts/settings.gd")
 
 var menu: CanvasLayer
 var bg: Node3D
@@ -15,16 +18,32 @@ var stub_text: Label
 var ip_edit: LineEdit
 var port_edit: LineEdit
 var status_lbl: Label
+var settings_box: VBoxContainer
+var cur_box := "main"   # какой экран открыт (после смены языка меню пересобирается)
 
 
 func _ready() -> void:
 	if Net.dedicated:
 		return
+	_setup_font()
+	Settings.load_all()
 	bg = MenuBg.new()
 	add_child(bg)
 	_build_menu()
 	Net.status.connect(func(t: String): status_lbl.text = t)
 	Net.game_started.connect(_on_game_started)
+
+
+## Шрифт с системными запасными: иероглифы, арабица, деванагари берутся из шрифтов ОС.
+func _setup_font() -> void:
+	var sf := SystemFont.new()
+	sf.font_names = PackedStringArray(["Noto Sans", "Segoe UI", "Arial", "Microsoft YaHei", "Yu Gothic UI",
+		"Malgun Gothic", "Nirmala UI", "Noto Sans CJK SC", "Noto Sans Devanagari", "Noto Sans Arabic", "DejaVu Sans"])
+	sf.allow_system_fallback = true
+	ThemeDB.fallback_font = sf
+	var th := ThemeDB.get_default_theme()
+	if th:
+		th.default_font = sf
 
 
 func _on_game_started() -> void:
@@ -92,7 +111,7 @@ func _build_menu() -> void:
 	title.offset_top = 36
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	menu.add_child(title)
-	var sub := _label("командная стратегия в системе газового гиганта", 18, Color(0.6, 0.75, 1.0))
+	var sub := _label(I18n.t("командная стратегия в системе газового гиганта"), 18, Color(0.6, 0.75, 1.0))
 	sub.anchor_left = 0.0
 	sub.anchor_right = 1.0
 	sub.offset_top = 140
@@ -114,11 +133,12 @@ func _build_menu() -> void:
 	main_box.custom_minimum_size = Vector2(360, 0)
 	main_box.add_theme_constant_override("separation", 10)
 	holder.add_child(main_box)
-	_button("Локальная игра", main_box, _on_local)
-	_button("Локальный мультиплеер", main_box, _on_multiplayer)
-	_button("Список серверов", main_box, _on_servers)
-	_button("Креатив", main_box, _on_creative)
-	_button("Выход", main_box, _on_quit)
+	_button(I18n.t("Локальная игра"), main_box, _on_local)
+	_button(I18n.t("Локальный мультиплеер"), main_box, _on_multiplayer)
+	_button(I18n.t("Список серверов"), main_box, _on_servers)
+	_button(I18n.t("Креатив"), main_box, _on_creative)
+	_button(I18n.t("Настройки"), main_box, _on_settings)
+	_button(I18n.t("Выход"), main_box, _on_quit)
 
 	# локальный мультиплеер: создать игру или подключиться по адресу
 	mp_box = VBoxContainer.new()
@@ -126,20 +146,20 @@ func _build_menu() -> void:
 	mp_box.add_theme_constant_override("separation", 10)
 	mp_box.visible = false
 	holder.add_child(mp_box)
-	mp_box.add_child(_label("Локальный мультиплеер", 26))
+	mp_box.add_child(_label(I18n.t("Локальный мультиплеер"), 26))
 	ip_edit = LineEdit.new()
-	ip_edit.placeholder_text = "IP сервера"
+	ip_edit.placeholder_text = I18n.t("IP сервера")
 	ip_edit.text = "127.0.0.1"
 	ip_edit.add_theme_font_size_override("font_size", 18)
 	mp_box.add_child(ip_edit)
 	port_edit = LineEdit.new()
-	port_edit.placeholder_text = "Порт"
+	port_edit.placeholder_text = I18n.t("Порт")
 	port_edit.text = str(Net.DEFAULT_PORT)
 	port_edit.add_theme_font_size_override("font_size", 18)
 	mp_box.add_child(port_edit)
-	_button("Создать игру (хост)", mp_box, _on_host)
-	_button("Подключиться", mp_box, _on_join)
-	_button("Назад", mp_box, _on_back)
+	_button(I18n.t("Создать игру (хост)"), mp_box, _on_host)
+	_button(I18n.t("Подключиться"), mp_box, _on_join)
+	_button(I18n.t("Назад"), mp_box, _on_back)
 
 	# заглушка «в разработке»
 	stub_box = VBoxContainer.new()
@@ -149,13 +169,45 @@ func _build_menu() -> void:
 	holder.add_child(stub_box)
 	stub_title = _label("", 26)
 	stub_box.add_child(stub_title)
-	var tag := _label("В РАЗРАБОТКЕ", 16, Color(1.0, 0.8, 0.3))
+	var tag := _label(I18n.t("В РАЗРАБОТКЕ"), 16, Color(1.0, 0.8, 0.3))
 	stub_box.add_child(tag)
 	stub_text = _label("", 16, Color(0.8, 0.85, 0.9))
 	stub_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	stub_text.custom_minimum_size = Vector2(360, 0)
 	stub_box.add_child(stub_text)
-	_button("Назад", stub_box, _on_back)
+	_button(I18n.t("Назад"), stub_box, _on_back)
+
+	# настройки: язык (планета-глобус), полный экран, чувствительность мыши
+	settings_box = VBoxContainer.new()
+	settings_box.custom_minimum_size = Vector2(440, 0)
+	settings_box.add_theme_constant_override("separation", 8)
+	settings_box.visible = false
+	holder.add_child(settings_box)
+	settings_box.add_child(_label(I18n.t("Настройки"), 26))
+	settings_box.add_child(_label(I18n.t("Язык") + ": " + I18n.lang_name(I18n.lang), 18, Color(1.0, 0.85, 0.4)))
+	var hint := _label(I18n.t("Нажми на страну, чтобы выбрать язык. Тяни — крутить планету."), 13, Color(0.8, 0.85, 0.9))
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(440, 0)
+	settings_box.add_child(hint)
+	var globe := LangGlobe.new()
+	globe.picked.connect(_on_lang_picked)
+	settings_box.add_child(globe)
+	var fs := CheckBox.new()
+	fs.text = I18n.t("Полноэкранный режим")
+	fs.button_pressed = Settings.fullscreen
+	fs.add_theme_font_size_override("font_size", 18)
+	fs.toggled.connect(_on_fullscreen)
+	settings_box.add_child(fs)
+	settings_box.add_child(_label(I18n.t("Чувствительность мыши"), 16))
+	var sl := HSlider.new()
+	sl.min_value = 0.25
+	sl.max_value = 3.0
+	sl.step = 0.05
+	sl.value = Settings.sens
+	sl.custom_minimum_size = Vector2(300, 24)
+	sl.value_changed.connect(_on_sens)
+	settings_box.add_child(sl)
+	_button(I18n.t("Назад"), settings_box, _on_back)
 
 	status_lbl = _label("", 15, Color(1.0, 0.85, 0.5))
 	status_lbl.anchor_left = 0.0
@@ -168,11 +220,11 @@ func _build_menu() -> void:
 
 
 func _on_local() -> void:
-	_show_stub("Локальная игра", "Одиночная игра против ботов — в разработке.\nПока можно играть в локальный мультиплеер или креатив.")
+	_show_stub(I18n.t("Локальная игра"), I18n.t("Одиночная игра против ботов — в разработке.\nПока можно играть в локальный мультиплеер или креатив."))
 
 
 func _on_servers() -> void:
-	_show_stub("Список серверов", "Поиск серверов — в разработке.\nПодключиться к серверу по адресу можно через «Локальный мультиплеер».")
+	_show_stub(I18n.t("Список серверов"), I18n.t("Поиск серверов — в разработке.\nПодключиться к серверу по адресу можно через «Локальный мультиплеер»."))
 
 
 func _on_multiplayer() -> void:
@@ -181,6 +233,30 @@ func _on_multiplayer() -> void:
 
 func _on_back() -> void:
 	_show(main_box)
+
+
+func _on_settings() -> void:
+	_show(settings_box)
+
+
+func _on_lang_picked(code: String) -> void:
+	I18n.lang = code
+	Settings.save_all()
+	# пересобрать меню на новом языке и вернуться в настройки
+	menu.queue_free()
+	_build_menu()
+	_show(settings_box)
+
+
+func _on_fullscreen(on: bool) -> void:
+	Settings.fullscreen = on
+	Settings.apply()
+	Settings.save_all()
+
+
+func _on_sens(v: float) -> void:
+	Settings.sens = v
+	Settings.save_all()
 
 
 func _on_creative() -> void:
@@ -200,7 +276,7 @@ func _on_quit() -> void:
 
 
 func _show(box: Control) -> void:
-	for b in [main_box, mp_box, stub_box]:
+	for b in [main_box, mp_box, stub_box, settings_box]:
 		(b as Control).visible = b == box
 	status_lbl.text = ""
 

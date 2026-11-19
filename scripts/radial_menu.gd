@@ -4,6 +4,7 @@ extends Control
 ## внутри сектора. Отпустил Z — выбор применён.
 
 const D = preload("res://scripts/defs.gd")
+const T = preload("res://scripts/i18n.gd")
 
 const R_OUT := 230.0
 const R_IN := 95.0
@@ -118,8 +119,8 @@ func _draw() -> void:
 		if name_func.is_valid():
 			label_txt = String(name_func.call(t))
 		else:
-			label_txt = "Бластер" if t == D.WEAPON else String(D.NAMES[t])
-		draw_string(font, lp + Vector2(-80, -8), String(sectors[i][0]), HORIZONTAL_ALIGNMENT_CENTER, 160, 15,
+			label_txt = T.t("Бластер") if t == D.WEAPON else T.t(String(D.NAMES[t]))
+		draw_string(font, lp + Vector2(-80, -8), T.t(String(sectors[i][0])), HORIZONTAL_ALIGNMENT_CENTER, 160, 15,
 				Color(1, 1, 1, 0.7))
 		draw_string(font, lp + Vector2(-80, 12), label_txt, HORIZONTAL_ALIGNMENT_CENTER, 160, 17, Color.WHITE)
 		if types.size() > 1:

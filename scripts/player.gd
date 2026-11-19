@@ -6,6 +6,7 @@ extends CharacterBody3D
 const SPEED := 6.0
 const SPRINT := 10.0
 const JUMP := 5.0
+const Settings = preload("res://scripts/settings.gd")
 const GRAVITY := 6.0     # слабая гравитация: терраса 0.5 м берётся прыжком легко
 var gmul := 1.0          # множитель гравитации текущей планеты
 const SENS := 0.0025
@@ -45,8 +46,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	var mm := event as InputEventMouseMotion
 	if mm and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not look_locked:
-		rotate_object_local(Vector3.UP, -mm.relative.x * SENS)
-		head.rotation.x = clampf(head.rotation.x - mm.relative.y * SENS, -1.5, 1.5)
+		rotate_object_local(Vector3.UP, -mm.relative.x * SENS * Settings.sens)
+		head.rotation.x = clampf(head.rotation.x - mm.relative.y * SENS * Settings.sens, -1.5, 1.5)
 
 
 func _physics_process(delta: float) -> void:
