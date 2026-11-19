@@ -292,7 +292,7 @@ const FILTER_GROUPS := [
 const T_NEUTRAL := 2               # команда нейтральных баз
 const TEAM_NAMES := ["Синие", "Красные", "Нейтралы"]
 const TEAM_COLORS := [Color(0.25, 0.6, 1.0), Color(1.0, 0.35, 0.25), Color(0.8, 0.8, 0.72)]
-const TEAM_HOME := [1, 2]           # стартовые планеты: синие — Kepler-186f, красные — Kepler-452b
+const TEAM_HOME := [1, 3]           # стартовые планеты: синие — Kepler-186f (2-я), красные — Kepler-62f (4-я)
 
 # захват баз: ядро врага сначала разрушить (оно становится нейтральным), нейтральное — удержать
 const CAPTURE_RADIUS := 9.0         # стоять у ядра ближе этого
@@ -433,8 +433,8 @@ const HOME_PLANET := 1             # на какой планете ядра и 
 const PLANETS := [
 	{"name": "Kepler-22b", "a": 1700.0, "phase": 0.6},
 	{"name": "Kepler-186f (синие)", "a": 2400.0, "phase": 0.0},
-	{"name": "Kepler-452b (красные)", "a": 3300.0, "phase": 2.6},
-	{"name": "Kepler-62f", "a": 4500.0, "phase": 4.4},
+	{"name": "Kepler-452b", "a": 3300.0, "phase": 2.6},
+	{"name": "Kepler-62f (красные)", "a": 4500.0, "phase": 4.4},
 	{"name": "Kepler-442b", "a": 6000.0, "phase": 1.9},
 ]
 const SOI_FRAC := 0.138            # сфера влияния = орбита * (μ планеты / μ гиганта)^0.4
