@@ -184,7 +184,7 @@ func _on_back() -> void:
 
 
 func _on_creative() -> void:
-	Net.host(_port(), true)
+	Net.start_offline(true)   # без сервера: порт не открывается, к игре никто не подключится
 
 
 func _on_host() -> void:

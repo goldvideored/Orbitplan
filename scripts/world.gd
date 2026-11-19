@@ -1953,6 +1953,8 @@ func _drill_tick(b: Dictionary, r: float) -> void:
 	b.prog += r
 	# скорость пропорциональна доле рудных клеток под буром
 	var need: float = float(D.DRILL_TICKS[t]) * float(b.cells.size()) / float(maxi(int(b.ore_n), 1))
+	if D.RARE_ORES.has(ore):
+		need /= D.RARE_SPEED   # редкие породы добываются в 5 раз медленнее
 	if b.prog >= need:
 		if t == D.DRILL3:
 			b.wuse += 1

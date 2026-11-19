@@ -57,6 +57,7 @@ const ITEM_COLORS := {
 }
 const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP]
 const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE]   # базовый бур не берёт
+const RARE_SPEED := 0.2        # скорость добычи редких пород относительно обычных
 const CORE_CAP := 500          # ядро (база) хранит не больше 500 каждого ресурса
 const START_STORAGE := {I_COPPER: 150, I_IRON: 80, I_SILICON: 30}
 

@@ -49,6 +49,17 @@ func host(port: int, creative_on := false) -> void:
 	_create_world(seed_val, 0)
 
 
+## Одиночная игра без сервера: сеть не открывается, мир считается тут же (креатив).
+func start_offline(creative_on := true) -> void:
+	creative = creative_on
+	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	seed_val = randi()
+	peer_team.clear()
+	ready_peers.clear()
+	peer_team[1] = 0
+	_create_world(seed_val, 0)
+
+
 func start_dedicated(port: int) -> void:
 	var p := ENetMultiplayerPeer.new()
 	if p.create_server(port, MAX_CLIENTS) != OK:
