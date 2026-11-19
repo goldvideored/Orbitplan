@@ -428,7 +428,7 @@ const AA_ITEMS_PER_SHOT := 3   # 1 снаряд = 3 любых ресурса
 const AA_AMMO_CAP := 30
 const AA_WATER_CAP := 10
 const DRONE_ALT := 2.5         # на какой высоте летают дроны
-const SHIP_HP := [300, 800, 1000]   # прочность разведчика, транспорта, истребителя
+const SHIP_HP := [300, 800, 1000, 150, 600]   # разведчик, транспорт, НЛО, камикадзе, истребитель F
 
 const POISON_TICKS := 20       # облучение ураном: 2 с
 const POISON_DMG := 1          # урона за тик
@@ -468,6 +468,14 @@ const GIANT_MAX_LEVEL := 4     # гигант даёт максимум 4 уро
 const SCOUT_COST := {I_IRON: 60, I_COPPER: 30, I_SILICON: 20, I_CHIP: 20}
 const TRANSPORT_COST := {I_IRON: 150, I_COPPER: 60, I_SILICON: 40, I_CHIP: 40, I_LEAD: 20}
 const FIGHTER_COST := {I_IRON: 200, I_UALLOY: 40, I_UCHIP: 25, I_UNIQUE: 20}
+const KAMIKAZE_COST := {I_IRON: 80, I_ALLOY: 10, I_URANIUM: 10, I_CHIP: 15}
+const JET_COST := {I_IRON: 180, I_ALLOY: 20, I_SILICON: 40, I_CHIP: 40}
+const KAMIKAZE_R := 14.0           # подрыв камикадзе: радиус, м
+const KAMIKAZE_DMG := 500          # урон в центре (к краю — 30%)
+const JET_CD := 60.0               # истребитель F: 1 разрывная ракета в минуту
+const JET_MISSILE_SPEED := 70.0
+const JET_MISSILE_R := 8.0
+const JET_MISSILE_DMG := 250
 const FIGHTER_CD := 30.0           # бластер истребителя: 2 выстрела в минуту
 const FIGHTER_RANGE := 300.0
 const FIGHTER_DMG := 400
@@ -539,6 +547,9 @@ const SHIP_KINDS := [
 	# истребитель-НЛО: уникальное топливо, Δv ~1000 м/с, бластер, 2 уникальных меха на борту
 	{"name": "Истребитель", "dry": 3.0, "tank": 30, "thrust": 80.0, "build": 400, "cargo": 8, "ve": 1092.0,
 		"fuel": I_UFUEL, "only": U_UMECH},
+	# 3 тир обычных кораблей
+	{"name": "Ракета-камикадзе", "dry": 1.5, "tank": 16, "thrust": 40.0, "build": 120, "cargo": 0, "ve": 200.0, "fuel": I_FUEL},
+	{"name": "Истребитель F", "dry": 2.5, "tank": 30, "thrust": 60.0, "build": 300, "cargo": 0, "ve": 290.0, "fuel": I_FUEL},
 ]
-const SHIP_COSTS := [SCOUT_COST, TRANSPORT_COST, FIGHTER_COST]
+const SHIP_COSTS := [SCOUT_COST, TRANSPORT_COST, FIGHTER_COST, KAMIKAZE_COST, JET_COST]
 const LOAD_RADIUS := 12.0          # с какого расстояния транспорт забирает юнитов

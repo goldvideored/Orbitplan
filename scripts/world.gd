@@ -1902,7 +1902,11 @@ func server_ship_crash(peer: int, id: int) -> void:
 	if ships.has(id) and ships[id].pilot == peer:
 		var at: Vector3 = ships[id].pos
 		var cpn: int = ships[id].pn
+		var skind: int = int(ships[id].kind)
+		var steam: int = int(ships[id].team)
 		ships.erase(id)
+		if skind == 3:
+			_blast(at, steam, cpn, D.KAMIKAZE_R, D.KAMIKAZE_DMG)   # камикадзе: врезался или подорван
 		_damage_player(peer, 40)
 		for p in Net.ready_peers:
 			fx_boom.rpc_id(p, at, 6.0, false, cpn)
@@ -3143,7 +3147,12 @@ func _proj_tick() -> void:
 		for s_i in steps:
 			var a: Vector3 = pr.pos
 			var v: Vector3 = pr.vel
-			if int(pr.kind) == 5:
+			if int(pr.kind) == 6:
+				if _missile_near(pr, a):
+					_blast(a, pr.team, pr.pn, D.JET_MISSILE_R, int(pr.dmg))
+					alive = false
+					break
+			elif int(pr.kind) == 5:
 				# самонаводящийся: поворачивает к цели, у цели — прямое попадание и взрыв
 				var tp = _tpos(pr.tgt) if pr.has("tgt") else null
 				if tp != null:
@@ -3166,20 +3175,24 @@ func _proj_tick() -> void:
 			if pr.kind == 0 and _bullet_hit(pr, a, b):
 				alive = false
 				break
-			if pr.kind >= 3 and _flak_near(pr, b):
+			if (pr.kind == 3 or pr.kind == 4) and _flak_near(pr, b):
 				_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
 				alive = false
 				break
 			pr.cell = _pl(int(pr.pn)).walk(pr.cell, b.normalized())
 			if b.length() < _pl(int(pr.pn)).top_r(pr.cell):
-				if pr.kind >= 3:
+				if pr.kind == 3 or pr.kind == 4:
 					_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
+				elif pr.kind == 6:
+					_blast(b, pr.team, pr.pn, D.JET_MISSILE_R, int(pr.dmg))
 				elif pr.kind != 0:
 					_explode(b, pr.team, pr.kind == 2, pr.pn)
 				alive = false
 				break
 		if alive and pr.ttl <= 0.0:
-			if pr.kind >= 3:
+			if pr.kind == 6:
+				_blast(pr.pos, pr.team, pr.pn, D.JET_MISSILE_R, int(pr.dmg))
+			elif pr.kind >= 3 and pr.kind <= 4:
 				_explode_flak(pr.pos, pr.team, pr.kind == 4, pr.pn)
 			elif pr.kind != 0:
 				_explode(pr.pos, pr.team, pr.kind == 2, pr.pn)
@@ -4033,7 +4046,8 @@ func _build_scene() -> void:
 	layer.add_child(unit_radial)
 	ship_radial = RadialMenu.new()
 	var ship_name := func(k): return D.SHIP_KINDS[k].name
-	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]], ["Истребитель", [2]]], ship_name, "отпусти E — собрать")
+	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]], ["НЛО", [2]], ["Камикадзе", [3]], ["Истребитель F", [4]]],
+		ship_name, "отпусти E — собрать")
 	ship_radial.info_func = _ship_info
 	layer.add_child(ship_radial)
 	dock_radial = RadialMenu.new()
@@ -6957,7 +6971,7 @@ func on_auto_retro() -> void:
 
 
 ## Вызывает корабль при жёсткой посадке.
-func on_ship_crash(_sh: Node3D, self_destruct := false) -> void:
+func on_ship_crash(_sh: Node3D, self_destruct := false, msg := "") -> void:
 	var id := piloting_id
 	if is_server:
 		server_ship_crash(1, id)
@@ -6965,7 +6979,9 @@ func on_ship_crash(_sh: Node3D, self_destruct := false) -> void:
 		req_ship_crash.rpc_id(1, id)
 	_switch_planet(_spawn_pn(my_team))
 	_stop_piloting(_spawn_pos(my_team))
-	if self_destruct:
+	if msg != "":
+		big_msg.text = msg
+	elif self_destruct:
 		big_msg.text = "КОРАБЛЬ САМОУНИЧТОЖЕН"
 	else:
 		big_msg.text = "КОРАБЛЬ РАЗБИТ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
@@ -7023,6 +7039,10 @@ func _near_ship() -> int:
 func _make_ship(team: int, kind := 0) -> Node3D:
 	if kind == 2:
 		return _make_ufo(team)
+	if kind == 3:
+		return _make_missile(team)
+	if kind == 4:
+		return _make_jet(team)
 	var n := Node3D.new()
 	var col: Color = D.TEAM_COLORS[team]
 	var hull := _pmat(Color(0.86, 0.86, 0.88), 1)
@@ -7179,6 +7199,101 @@ func _make_ufo(team: int) -> Node3D:
 	return n
 
 
+## Пламя двигателя и луч посадочного фонаря (их включает код корабля) — общие для моделей.
+func _ship_fx(n: Node3D, flame_r: float, flame_y: float) -> void:
+	var flame := MeshInstance3D.new()
+	var fm := CylinderMesh.new()
+	fm.top_radius = flame_r
+	fm.bottom_radius = 0.0
+	fm.height = flame_r * 5.0
+	flame.mesh = fm
+	flame.position = Vector3(0, flame_y - flame_r * 2.5, 0)
+	flame.material_override = _mat(Color(1.0, 0.6, 0.2), true)
+	flame.visible = false
+	n.add_child(flame)
+	n.set_meta("flame", flame)
+	var beam := MeshInstance3D.new()
+	var bcm := CylinderMesh.new()
+	bcm.top_radius = 0.3
+	bcm.bottom_radius = 5.0
+	bcm.height = 10.0
+	beam.mesh = bcm
+	beam.position = Vector3(0, -5.0, 0)
+	var bmat := StandardMaterial3D.new()
+	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	bmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	bmat.albedo_color = Color(1.0, 0.95, 0.8, 0.07)
+	beam.material_override = bmat
+	beam.visible = false
+	n.add_child(beam)
+	n.set_meta("beam", beam)
+
+
+## Ракета-камикадзе: тонкий корпус, красная боеголовка, 4 стабилизатора, полоса команды.
+func _make_missile(team: int) -> Node3D:
+	var n := Node3D.new()
+	var col: Color = D.TEAM_COLORS[team]
+	var body := _pmat(Color(0.82, 0.82, 0.8), 1)
+	var dark := _pmat(Color(0.22, 0.22, 0.25), 1)
+	_part(n, "cyl", Vector3(0.38, 4.2, 0), Vector3(0, 2.6, 0), body)
+	var nose := MeshInstance3D.new()
+	var nm := CylinderMesh.new()
+	nm.top_radius = 0.0
+	nm.bottom_radius = 0.38
+	nm.height = 1.2
+	nm.radial_segments = 12
+	nose.mesh = nm
+	nose.position = Vector3(0, 5.3, 0)
+	nose.material_override = _pmat(Color(0.85, 0.18, 0.12), 0)
+	n.add_child(nose)
+	_part(n, "cyl", Vector3(0.4, 0.25, 0), Vector3(0, 4.3, 0), _pmat(Color(0.95, 0.8, 0.1), 0))   # пояс «опасно»
+	_part(n, "cyl", Vector3(0.39, 0.3, 0), Vector3(0, 2.0, 0), _pmat(col, 0))                       # полоса команды
+	for i in 4:
+		var a := TAU * i / 4.0
+		var fin := _part(n, "box", Vector3(0.06, 0.9, 0.55), Vector3(cos(a) * 0.55, 0.85, sin(a) * 0.55), dark)
+		fin.rotation.y = -a
+	_part(n, "cyl", Vector3(0.28, 0.35, 0), Vector3(0, 0.35, 0), dark)   # сопло
+	_ship_fx(n, 0.3, 0.2)
+	return n
+
+
+## Истребитель F: реактивный самолёт в духе американских истребителей — фюзеляж, треугольные крылья,
+## два киля, фонарь кабины, сопло. Стоит на хвосте (нос — вверх), как и остальные корабли.
+func _make_jet(team: int) -> Node3D:
+	var n := Node3D.new()
+	var col: Color = D.TEAM_COLORS[team]
+	var grey := _pmat(Color(0.55, 0.58, 0.62), 1)
+	var dark := _pmat(Color(0.3, 0.32, 0.36), 1)
+	_part(n, "box", Vector3(0.75, 4.6, 0.6), Vector3(0, 2.6, 0), grey)                # фюзеляж
+	var nose := MeshInstance3D.new()
+	var nm := CylinderMesh.new()
+	nm.top_radius = 0.0
+	nm.bottom_radius = 0.38
+	nm.height = 1.3
+	nm.radial_segments = 8
+	nose.mesh = nm
+	nose.position = Vector3(0, 5.55, 0)
+	nose.material_override = dark
+	n.add_child(nose)
+	var canopy := _part(n, "box", Vector3(0.4, 1.0, 0.3), Vector3(0, 4.3, -0.38), _pmat(Color(0.3, 0.6, 0.85), 0))
+	canopy.rotation_degrees = Vector3(-6, 0, 0)
+	for sx in [-1.0, 1.0]:
+		# треугольное крыло: два бруса под углом (широко у хвоста, узко к носу)
+		var w1 := _part(n, "box", Vector3(2.1, 1.5, 0.08), Vector3(sx * 1.25, 1.7, 0), grey)
+		w1.rotation_degrees = Vector3(0, 0, sx * -18.0)
+		_part(n, "box", Vector3(0.9, 0.5, 0.06), Vector3(sx * 0.75, 3.0, 0), grey)
+		_box(n, Vector3(0.6, 0.12, 0.09), Vector3(sx * 2.0, 1.2, 0), col, true)        # огни на законцовках
+		var tail := _part(n, "box", Vector3(0.06, 1.1, 0.9), Vector3(sx * 0.35, 0.8, 0.55), grey)   # кили
+		tail.rotation_degrees = Vector3(0, 0, sx * 14.0)
+		_part(n, "box", Vector3(1.0, 0.6, 0.06), Vector3(sx * 0.75, 0.55, 0), dark)     # стабилизаторы
+	_part(n, "box", Vector3(0.77, 0.4, 0.62), Vector3(0, 3.6, 0), _pmat(col, 0))      # полоса команды
+	_part(n, "cyl", Vector3(0.32, 0.5, 0), Vector3(0, 0.15, 0), dark)                  # сопло
+	_ship_fx(n, 0.3, 0.0)
+	return n
+
+
 var fighter_cd := 0.0   # клиент: когда истребитель снова сможет выстрелить (время мира)
 
 
@@ -7246,6 +7361,101 @@ func server_ship_fire(peer: int, id: int, from: Vector3, dir: Vector3) -> void:
 		_fx_beam(from, from + dir * best_t, 3, pn)
 
 
+## Мощный взрыв: юниты, игроки, корабли, курьеры, постройки в радиусе r (урон к краю — 30%).
+func _blast(at: Vector3, team: int, pn: int, r: float, dmg: int) -> void:
+	var k := func(d: float) -> int: return int(float(dmg) * lerpf(1.0, 0.3, clampf(d / r, 0.0, 1.0)))
+	for u in units:
+		if u.team == team or u.hp <= 0 or u.pn != pn:
+			continue
+		var d := at.distance_to(_tpos({"k": "unit", "ref": u}))
+		if d < r:
+			u.hp -= k.call(d)
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == team or o.hp <= 0 or int(o.get("pn", -9)) != pn:
+			continue
+		var d := at.distance_to(Vector3(o.pos))
+		if d < r:
+			_damage_player(pid, k.call(d))
+	for sh in ships.values():
+		if int(sh.team) == team or int(sh.pn) != pn:
+			continue
+		var d := at.distance_to(Vector3(sh.pos))
+		if d < r:
+			_damage_ship(sh, k.call(d))
+	for rv in rovers.duplicate():
+		if int(rv.team) == team or int(rv.pn) != pn:
+			continue
+		var d := at.distance_to(_rpos(rv))
+		if d < r:
+			_damage_rover(rv, k.call(d))
+	if pn >= 0:
+		for b in buildings.values():
+			if b.team == team or b.pn != pn or not buildings.has(b.id):
+				continue
+			var d := at.distance_to(_bpos(b))
+			if d < r + 1.0:
+				_damage_building(b, k.call(d))
+				if finished:
+					break
+	for p in Net.ready_peers:
+		fx_boom.rpc_id(p, at, r, false, pn)
+	if not headless and pn == my_pn:
+		_boom(at, r, false)
+
+
+var jet_cd := 0.0   # клиент: когда истребитель F снова сможет пустить ракету
+
+
+func _jet_fire() -> void:
+	if piloting == null or world_time < jet_cd or piloting.pn < 0:
+		return
+	jet_cd = world_time + D.JET_CD
+	var nose := piloting.global_transform.basis.y.normalized()
+	var from := piloting.global_position + nose * 3.5
+	var vel := piloting.vel + nose * D.JET_MISSILE_SPEED
+	if is_server:
+		server_jet_fire(1, piloting_id, from, vel)
+	else:
+		req_jet_fire.rpc_id(1, piloting_id, from, vel)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_jet_fire(id: int, from: Vector3, vel: Vector3) -> void:
+	if multiplayer.is_server():
+		server_jet_fire(multiplayer.get_remote_sender_id(), id, from, vel)
+
+
+func server_jet_fire(peer: int, id: int, from: Vector3, vel: Vector3) -> void:
+	if not ships.has(id):
+		return
+	var sh: Dictionary = ships[id]
+	if int(sh.pilot) != peer or int(sh.kind) != 4 or int(sh.pn) < 0:
+		return
+	if world_time < float(sh.get("fire_t", -100.0)):
+		return
+	sh["fire_t"] = world_time + D.JET_CD - 0.5
+	if vel.length() > D.JET_MISSILE_SPEED * 3.0:
+		vel = vel.normalized() * D.JET_MISSILE_SPEED * 3.0
+	var c := _pl(int(sh.pn)).walk(-1, from.normalized())
+	_spawn_proj(from, vel, int(sh.team), 6, D.JET_MISSILE_DMG, 8.0, c, int(sh.pn))
+
+
+## Разрывная ракета истребителя F: летит прямо, рвётся у любой вражеской цели или о землю.
+func _missile_near(pr: Dictionary, at: Vector3) -> bool:
+	for u in units:
+		if u.team != pr.team and u.hp > 0 and u.pn == pr.pn and at.distance_to(_tpos({"k": "unit", "ref": u})) < 3.0:
+			return true
+	for sh in ships.values():
+		if int(sh.team) != int(pr.team) and int(sh.pn) == int(pr.pn) and at.distance_to(Vector3(sh.pos)) < 4.0:
+			return true
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if int(o.team) != int(pr.team) and int(o.get("pn", -9)) == int(pr.pn) and o.hp > 0 and at.distance_to(Vector3(o.pos)) < 2.5:
+			return true
+	return false
+
+
 func _update_proj(delta: float) -> void:
 	proj_time += delta
 	var t := proj_time
@@ -7253,8 +7463,8 @@ func _update_proj(delta: float) -> void:
 	for i in n:
 		var p0 := proj_pos[i]
 		var v0 := proj_vel[i] if i < proj_vel.size() else Vector3.ZERO
-		var p := p0 + v0 * t - p0.normalized() * (0.5 * D.PROJ_G * t * t)
 		var k := int(proj_kind[i]) if i < proj_kind.size() else 0
+		var p := p0 + v0 * t - p0.normalized() * (0.0 if k >= 5 else 0.5 * D.PROJ_G * t * t)
 		var sc := 1.0 if k == 0 else 2.0
 		mm_proj.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * sc), p))
 		var col := Color(1.0, 0.9, 0.4)
@@ -7264,6 +7474,8 @@ func _update_proj(delta: float) -> void:
 			col = Color(0.5, 1.0, 0.35)
 		elif k == 5:
 			col = Color(0.4, 0.75, 1.0)
+		elif k == 6:
+			col = Color(1.0, 0.45, 0.15)
 		if k == 1:
 			col = Color(1.0, 0.55, 0.2)
 		elif k == 2:
@@ -8405,6 +8617,11 @@ func _update_ship_panel() -> void:
 	if kind == 2:
 		var cdl := fighter_cd - world_time
 		lines.append("Бластер (F): " + ("ГОТОВ" if cdl <= 0.0 else "перезарядка %d с" % int(ceil(cdl))))
+	elif kind == 3:
+		lines.append("F — подрыв (взрыв %d м). Врезался — тоже взрыв" % int(D.KAMIKAZE_R))
+	elif kind == 4:
+		var jcd := jet_cd - world_time
+		lines.append("Ракета (F): " + ("ГОТОВА" if jcd <= 0.0 else "перезарядка %d с" % int(ceil(jcd))) + ("" if sh.pn >= 0 else " (только у планеты)"))
 	lines.append("")
 	lines.append_array(_plan_lines())
 	ui.s_text.text = "\n".join(lines)
@@ -8523,6 +8740,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				_exit_ship()
 			elif kp.keycode == KEY_F and piloting.kind == 2:
 				_fighter_fire()
+			elif kp.keycode == KEY_F and piloting.kind == 3:
+				on_ship_crash(piloting, false, "РАКЕТА ПОДОРВАНА")
+			elif kp.keycode == KEY_F and piloting.kind == 4:
+				_jet_fire()
 			elif (kp.keycode == KEY_L or kp.keycode == KEY_U) and int(D.SHIP_KINDS[piloting.kind].cargo) > 0 and piloting.landed:
 				var do_load := kp.keycode == KEY_L
 				if is_server:
@@ -8776,6 +8997,10 @@ func _ship_info(k: int) -> Array:
 	var extra := "мест для юнитов: %d (танк и дрон — 1, мех — 4)" % int(sk.cargo) if int(sk.cargo) > 0 else "1 игрок"
 	if k == 2:
 		extra = "уникальное топливо, бластер (F) на %d м раз в %d с, берёт 2 уникальных меха" % [int(D.FIGHTER_RANGE), int(D.FIGHTER_CD)]
+	elif k == 3:
+		extra = "пилотируемая ракета: врезалась или F — взрыв радиусом %d м, %d урона" % [int(D.KAMIKAZE_R), D.KAMIKAZE_DMG]
+	elif k == 4:
+		extra = "разрывная ракета (F) раз в минуту: взрыв %d м, %d урона" % [int(D.JET_MISSILE_R), D.JET_MISSILE_DMG]
 	return [sk.name, "Δv полного бака %d м/с, %s" % [int(dv), extra], "Цена: " + _cost_dict_text(D.SHIP_COSTS[k])]
 
 
