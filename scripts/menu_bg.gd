@@ -569,7 +569,8 @@ func _war_step(dt: float) -> void:
 		if c < mm.instance_count:
 			mm.set_instance_transform(c, Transform3D(bas, _upos(u) - d * 0.3))
 			var col: Color = D.TEAM_COLORS[int(u.team)]
-			mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, clampf(float(u.hp) / float(UNIT_HP[kind]), 0.3, 1.0)))
+			# a >= 0.5 — юнит идёт: в шейдере шагают ноги, бегут траки
+			mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, 0.5 + 0.49 * clampf(float(u.hp) / float(UNIT_HP[kind]), 0.3, 1.0)))
 			cnt[kind] = c + 1
 	for k in 3:
 		(mm_kind[k] as MultiMesh).visible_instance_count = cnt[k]

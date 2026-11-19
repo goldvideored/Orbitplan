@@ -87,6 +87,9 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var unit_lights: Array = []   # клиент: фары юнитов [где, куда смотрит]
+var rover_lights: Array = []  # клиент: фары курьеров
+var sim_n := 0                # сервер: номер тика (для «по ленте недавно что-то ехало»)
 var threat_pns := PackedInt32Array()   # клиент: планеты, где сейчас вражеский корабль у нас (баннер тревоги)
 var nav_target := -1    # помощник перелёта: планета-цель (-1 — выключен)
 var plan := {}          # расчёт перелёта к цели
@@ -584,7 +587,7 @@ func _add_building(d: Dictionary) -> void:
 	for c in cells:
 		grid[_k(b.pn, c)] = b.id
 	power_dirty = true
-	if is_server and b.type == D.LOADER:
+	if is_server and (b.type == D.LOADER or b.type == D.FUEL_DEPOT):
 		_spawn_rover(b)
 	next_id = maxi(next_id, b.id + 1)
 	if _busy(b):
@@ -797,7 +800,20 @@ func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
 				hit_ship = sh
 				hit_unit = null
 				hit_peer = -1
-	if hit_ship != null:
+	var hit_rover = null
+	for r in rovers:
+		if int(r.team) == int(pl.team) or int(r.pn) != spn:
+			continue
+		var t := _ray_sphere(from, dir, _rpos(r) + _rpos(r).normalized() * 0.6, 0.9)
+		if t > 0.0 and t < best_t:
+			best_t = t
+			hit_rover = r
+			hit_ship = null
+			hit_unit = null
+			hit_peer = -1
+	if hit_rover != null:
+		_damage_rover(hit_rover, D.GUN_DMG)
+	elif hit_ship != null:
 		_damage_ship(hit_ship, D.GUN_DMG)   # ракеты сбиваются и из бластера
 	elif hit_unit != null:
 		hit_unit.hp -= D.GUN_DMG
@@ -1287,6 +1303,14 @@ func _status(b: Dictionary) -> Array:
 		if _unit_count(b.team, k) >= _unit_limit(b.team, k):
 			return [ST_SLOW, "лимит: %s %d/%d (захвати базы — лимит вырастет)" % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
 		return [ST_IDLE, "%s: подай конвейером %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
+	if (t == D.LOADER or t == D.FUEL_DEPOT) and int(b.get("rover_t", 0)) > 0:
+		return [ST_STOP, "%s уничтожен — новый через %d с" % ["Заправщик" if t == D.FUEL_DEPOT else "Курьер",
+			int(ceil(float(b.rover_t) * D.TICK))]]
+	if t == D.FUEL_DEPOT:
+		var fu := int(b.buf.get(D.I_FUEL, 0))
+		if fu == 0:
+			return [ST_IDLE, "ждёт топливо по трубе"]
+		return [ST_OK, "топливо %d/%d" % [fu, D.DEPOT_CAP]]
 	if t == D.LOADER:
 		var total := 0
 		for it in b.buf:
@@ -1322,10 +1346,12 @@ func _send_states() -> void:
 	var ids := PackedInt32Array()
 	var sts := PackedByteArray()
 	for b in buildings.values():
-		if b.type == D.CONVEYOR or b.type == D.PIPE:
-			continue
 		ids.append(b.id)
-		sts.append(int(_status(b)[0]))
+		if b.type == D.CONVEYOR or b.type == D.PIPE or b.type == D.SPLITTER or b.type == D.JUNCTION or b.type == D.BRIDGE:
+			# лента крутится, только пока по ней недавно что-то ехало
+			sts.append(ST_OK if sim_n - int(b.get("flow_t", -100)) < 12 else ST_IDLE)
+		else:
+			sts.append(int(_status(b)[0]))
 	for p in Net.ready_peers:
 		states.rpc_id(p, ids, sts)
 	if not headless:
@@ -1340,6 +1366,9 @@ func states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
 func _apply_states(ids: PackedInt32Array, sts: PackedByteArray) -> void:
 	for i in ids.size():
 		bstate[ids[i]] = sts[i]
+		var broot = bnodes.get(ids[i])
+		if broot != null and buildings.has(ids[i]) and BELT_TYPES.has(int(buildings[ids[i]].type)):
+			_set_belt_run(broot, sts[i] == ST_OK)
 		var root = bnodes.get(ids[i])
 		if root == null or not root.has_meta("ind"):
 			continue
@@ -1474,6 +1503,7 @@ func _uf_union(parent: Dictionary, a: int, b: int) -> void:
 
 
 func _sim_tick() -> void:
+	sim_n += 1
 	if power_dirty:
 		_rebuild_power()
 	var skies := {}   # небо каждой планеты считаем один раз за тик
@@ -1602,6 +1632,8 @@ func _sim_tick() -> void:
 			_repair_tick(b, r)
 		elif t == D.UNLOADER:
 			_unloader_tick(b)
+		elif t == D.LOADER or t == D.FUEL_DEPOT:
+			_depot_tick(b)
 		elif t == D.LAUNCH_PAD:
 			_pad_tick(b)
 	_players_tick()
@@ -1828,7 +1860,8 @@ func _unloader_tick(b: Dictionary) -> void:
 func _spawn_rover(home: Dictionary) -> void:
 	var d: Vector3 = planet.dirs[home.cell]
 	rovers.append({"id": next_rover_id, "team": home.team, "home": home.id, "dir": d, "pn": home.pn,
-		"cell": home.cell, "fwd": _up_basis(d).x, "state": 0,
+		"cell": home.cell, "fwd": _up_basis(d).x, "state": 0, "hp": D.ROVER_HP,
+		"kind": 1 if home.type == D.FUEL_DEPOT else 0,   # 0 — курьер, 1 — заправщик
 		"cargo_item": D.I_NONE, "cargo_n": 0, "target": -1})
 	next_rover_id += 1
 
@@ -1836,6 +1869,32 @@ func _spawn_rover(home: Dictionary) -> void:
 func _rpos(r: Dictionary) -> Vector3:
 	var d: Vector3 = r.dir
 	return d * planet.top_r(r.cell)
+
+
+## Куда можно отвезти item: точка выгрузки с этим фильтром, а топливо — ещё и стартовая площадка.
+func _find_drop(team: int, item: int, from: Vector3, pn: int) -> int:
+	var best := -1
+	var bd := INF
+	for b in buildings.values():
+		if b.team != team or b.pn != pn or _busy(b) or not _drop_ok(b, item):
+			continue
+		var d: float = from.distance_squared_to(_bpos(b))
+		if d < bd:
+			bd = d
+			best = b.id
+	return best
+
+
+func _drop_ok(b: Dictionary, item: int) -> bool:
+	return _drop_room(b, item) > 0
+
+
+func _drop_room(b: Dictionary, item: int) -> int:
+	if b.type == D.UNLOADER and b.filter == item:
+		return D.UNLOADER_CAP - int(b.buf.get(item, 0))
+	if b.type == D.LAUNCH_PAD and item == D.I_FUEL:
+		return D.PAD_FUEL_CAP - int(b.buf.get(item, 0))
+	return 0
 
 
 ## Ближайшая своя точка выгрузки, которая принимает item и где есть место. -1 — нет такой.
@@ -1880,31 +1939,35 @@ func _rovers_tick() -> void:
 		var home: Dictionary = buildings[r.home]
 		if r.state == 0:
 			# дома: выбираем груз, которого больше всего и для которого есть точка выгрузки
+			# курьер возит только твёрдое, заправщик — только топливо
 			var buf: Dictionary = home.buf
 			var best_item := D.I_NONE
 			var best_n := 0
+			var tanker: bool = int(r.kind) == 1
 			for it in buf:
 				var n := int(buf[it])
-				if n > best_n and _find_unloader(r.team, it, _rpos(r), r.pn) != -1:
+				if tanker != (int(it) == D.I_FUEL) or (not tanker and D.FLUIDS.has(int(it))):
+					continue
+				if n > best_n and _find_drop(r.team, it, _rpos(r), r.pn) != -1:
 					best_n = n
 					best_item = it
 			if best_item != D.I_NONE:
-				var take := mini(best_n, D.ROVER_CAP)
+				var take := mini(best_n, D.TANKER_CAP if tanker else D.ROVER_CAP)
 				buf[best_item] = best_n - take
 				r.cargo_item = best_item
 				r.cargo_n = take
-				r.target = _find_unloader(r.team, best_item, _rpos(r), r.pn)
+				r.target = _find_drop(r.team, best_item, _rpos(r), r.pn)
 				r.state = 1
 		elif r.state == 1:
 			# везём
-			if not buildings.has(r.target) or buildings[r.target].filter != r.cargo_item:
-				r.target = _find_unloader(r.team, r.cargo_item, _rpos(r), r.pn)
+			if not buildings.has(r.target) or not _drop_ok(buildings[r.target], r.cargo_item):
+				r.target = _find_drop(r.team, r.cargo_item, _rpos(r), r.pn)
 				if r.target == -1:
 					continue   # некуда — ждём на месте
 			var tgt: Dictionary = buildings[r.target]
 			if _rover_move(r, _bpos(tgt)):
 				var have := int(tgt.buf.get(r.cargo_item, 0))
-				var n := mini(D.UNLOADER_CAP - have, r.cargo_n)
+				var n := mini(_drop_room(tgt, r.cargo_item), r.cargo_n)
 				if n > 0:
 					tgt.buf[r.cargo_item] = have + n
 					r.cargo_n -= n
@@ -1912,11 +1975,40 @@ func _rovers_tick() -> void:
 					r.cargo_item = D.I_NONE
 					r.state = 2
 				else:
-					r.target = _find_unloader(r.team, r.cargo_item, _rpos(r), r.pn)   # эта полна — ищем другую
+					r.target = _find_drop(r.team, r.cargo_item, _rpos(r), r.pn)   # эта полна — ищем другую
 		elif r.state == 2:
 			# домой
 			if _rover_move(r, _bpos(home)):
 				r.state = 0
+
+
+## Курьер/заправщик подбит: взрыв, через минуту база выпустит новый.
+func _damage_rover(r: Dictionary, dmg: int) -> void:
+	if bool(r.get("dead", false)):
+		return
+	r.hp = int(r.get("hp", D.ROVER_HP)) - dmg
+	if int(r.hp) > 0:
+		return
+	r["dead"] = true
+	var at := _rpos(r) + _rpos(r).normalized() * 0.6
+	rovers.erase(r)
+	if buildings.has(r.home):
+		buildings[r.home]["rover_t"] = D.ROVER_RESPAWN_TICKS
+		_alert_team(int(r.team), "%s уничтожен — новый через 1 мин" % ("Заправщик" if int(r.kind) == 1 else "Курьер"),
+			int(r.pn), 1)
+	for p in Net.ready_peers:
+		fx_boom.rpc_id(p, at, 2.5, false, int(r.pn))
+	if not headless and int(r.pn) == my_pn:
+		_boom(at, 2.5, false)
+
+
+## База курьера: если его уничтожили — отсчёт до нового.
+func _depot_tick(b: Dictionary) -> void:
+	if int(b.get("rover_t", 0)) <= 0:
+		return
+	b.rover_t = int(b.rover_t) - 1
+	if b.rover_t <= 0:
+		_spawn_rover(b)
 
 
 func _buf_take(b: Dictionary, item: int, n: int) -> bool:
@@ -2067,8 +2159,10 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		if item != D.I_LEAD and item != D.I_URANIUM:
 			return false
 		return int(buf.get(D.I_LEAD, 0)) + int(buf.get(D.I_URANIUM, 0)) < D.T3_AMMO_CAP
+	if t == D.FUEL_DEPOT:
+		return item == D.I_FUEL and int(buf.get(item, 0)) < D.DEPOT_CAP
 	if t == D.LOADER:
-		if item == D.I_WATER:
+		if D.FLUIDS.has(item):
 			return false
 		var total := 0
 		for it in buf:
@@ -2099,16 +2193,18 @@ func _push(cell: int, src_id: int, team: int, item: int, pn: int) -> bool:
 		o.item = item
 		o.prog = 0.0
 		o["src"] = src_id
+		o["flow_t"] = sim_n
 		return true
 	if t == D.CONVEYOR or t == D.PIPE:
-		# вода — только в трубы, всё твёрдое — только на конвейеры
-		if (item == D.I_WATER) != (t == D.PIPE):
+		# вода и топливо — только в трубы, всё твёрдое — только на конвейеры
+		if D.FLUIDS.has(item) != (t == D.PIPE):
 			return false
 		# лента, которая смотрит в источник, у него ничего не берёт
 		if o.item != D.I_NONE or int(grid.get(_k(pn, _out_cell(o)), -1)) == src_id:
 			return false
 		o.item = item
 		o.prog = 0.0
+		o["flow_t"] = sim_n
 		return true
 	if t == D.CORE:
 		# сырую руду ядро не принимает — только переработанное
@@ -2153,6 +2249,14 @@ func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool, pn
 		if d < bd:
 			bd = d
 			best = {"pos": p, "unit": null, "pid": pid, "bld": null}
+	for r in rovers:
+		if int(r.team) == team or int(r.pn) != pn:
+			continue
+		var rp := _rpos(r) + _rpos(r).normalized() * 0.6
+		var d := from.distance_to(rp)
+		if d < bd:
+			bd = d
+			best = {"pos": rp, "unit": null, "pid": -1, "bld": null, "rover": r}
 	if with_buildings:
 		for b in buildings.values():
 			if b.team == team or b.pn != pn:
@@ -2166,7 +2270,9 @@ func _find_target(team: int, from: Vector3, rng: float, with_buildings: bool, pn
 
 
 func _hit_target(tgt: Dictionary, dmg: int) -> void:
-	if tgt.unit != null:
+	if tgt.get("rover") != null:
+		_damage_rover(tgt.rover, dmg)
+	elif tgt.unit != null:
 		tgt.unit.hp -= dmg
 	elif tgt.pid != -1:
 		_damage_player(tgt.pid, dmg)
@@ -3108,7 +3214,7 @@ func _snap_data(pn: int) -> Dictionary:
 	var rv: Array = []
 	for r in rovers:
 		if r.pn == pn:
-			rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item])
+			rv.append([r.id, _rpos(r), r.fwd, r.team, r.cargo_n, r.cargo_item, int(r.get("kind", 0))])
 	var caps: Array = []
 	for b in buildings.values():
 		if b.type == D.CORE and b.pn == pn:
@@ -3665,12 +3771,19 @@ func _merge(parts: Array, mat: Material) -> ArrayMesh:
 	var verts := PackedVector3Array()
 	var norms := PackedVector3Array()
 	var cols := PackedColorArray()
+	var cust := PackedFloat32Array()   # CUSTOM0: точка вращения + вид анимации (см. unit.gdshader)
 	var idx := PackedInt32Array()
 	for part in parts:
 		var pm: PrimitiveMesh = part[0]
-		var rot: Vector3 = part[2]
-		var xf := Transform3D(Basis.from_euler(rot * (PI / 180.0)), part[1])
+		var xf: Transform3D
+		if typeof(part[1]) == TYPE_TRANSFORM3D:
+			xf = part[1]
+		else:
+			var rot: Vector3 = part[2]
+			xf = Transform3D(Basis.from_euler(rot * (PI / 180.0)), part[1])
 		var col: Color = part[3]
+		var akind: float = float(part[4]) if part.size() > 4 else 0.0
+		var piv: Vector3 = part[5] if part.size() > 5 else Vector3.ZERO
 		var arr := pm.get_mesh_arrays()
 		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 		var nn: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
@@ -3679,6 +3792,10 @@ func _merge(parts: Array, mat: Material) -> ArrayMesh:
 			verts.append(xf * v[i])
 			norms.append((xf.basis * nn[i]).normalized())
 			cols.append(col)
+			cust.append(piv.x)
+			cust.append(piv.y)
+			cust.append(piv.z)
+			cust.append(akind)
 		var ii = arr[Mesh.ARRAY_INDEX]
 		if ii != null and ii.size() > 0:
 			for k in ii:
@@ -3691,68 +3808,100 @@ func _merge(parts: Array, mat: Material) -> ArrayMesh:
 	out[Mesh.ARRAY_VERTEX] = verts
 	out[Mesh.ARRAY_NORMAL] = norms
 	out[Mesh.ARRAY_COLOR] = cols
+	out[Mesh.ARRAY_CUSTOM0] = cust
 	out[Mesh.ARRAY_INDEX] = idx
 	var am := ArrayMesh.new()
-	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out)
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, out, [], {},
+		Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT)
 	am.surface_set_material(0, mat)
 	return am
 
 
-## Мини-танк: корпус на гусеницах, башня цвета команды, ствол. Перёд — -Z.
+## Деталь-брус между двумя точками (для ног паука): [меш, преобразование, -, цвет, вид, шарнир].
+func _seg(a: Vector3, b: Vector3, th: float, col: Color, akind: float, piv: Vector3) -> Array:
+	var dir := (b - a).normalized()
+	var side := dir.cross(Vector3.UP)
+	if side.length() < 0.01:
+		side = dir.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var xf := Transform3D(Basis(side, dir.cross(side), dir), (a + b) * 0.5)
+	return [_pb(Vector3(th, th, a.distance_to(b))), xf, null, col, akind, piv]
+
+
+## Мини-танк: корпус на гусеницах (траки бегут), башня цвета команды, ствол, фары. Перёд — -Z.
 func _tank_mesh(mat: Material) -> ArrayMesh:
 	var dark := Color(0.22, 0.22, 0.24, METAL)
 	var steel := Color(0.5, 0.5, 0.53, METAL)
 	var team := Color(1, 1, 1, PAINT)
+	var lamp := Color(1.0, 0.92, 0.6, GLOW)
 	var parts := [
-		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(-0.5, 0.16, 0), Vector3.ZERO, dark],     # гусеницы
-		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(0.5, 0.16, 0), Vector3.ZERO, dark],
-		[_pb(Vector3(0.8, 0.3, 1.15)), Vector3(0, 0.36, 0), Vector3.ZERO, steel],         # корпус
-		[_pb(Vector3(0.82, 0.06, 0.5)), Vector3(0, 0.53, 0.25), Vector3.ZERO, team],       # полоса
-		[_pc(0.28, 0.32, 0.24, 8), Vector3(0, 0.62, 0.05), Vector3.ZERO, team],           # башня
-		[_pc(0.05, 0.06, 0.7, 6), Vector3(0, 0.66, -0.42), Vector3(90, 0, 0), dark],      # ствол
-		[_pb(Vector3(0.12, 0.06, 0.05)), Vector3(0, 0.36, -0.6), Vector3.ZERO, Color(1.0, 0.85, 0.4, GLOW)],  # фара
+		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(-0.5, 0.16, 0), Vector3.ZERO, dark, 20],     # гусеницы
+		[_pb(Vector3(0.24, 0.32, 1.3)), Vector3(0.5, 0.16, 0), Vector3.ZERO, dark, 20],
+		[_pb(Vector3(0.8, 0.3, 1.15)), Vector3(0, 0.36, 0), Vector3.ZERO, steel, 30],         # корпус
+		[_pb(Vector3(0.82, 0.06, 0.5)), Vector3(0, 0.53, 0.25), Vector3.ZERO, team, 30],       # полоса
+		[_pc(0.28, 0.32, 0.24, 8), Vector3(0, 0.62, 0.05), Vector3.ZERO, team, 30],           # башня
+		[_pc(0.05, 0.06, 0.7, 6), Vector3(0, 0.66, -0.42), Vector3(90, 0, 0), dark, 30],      # ствол
+		[_pb(Vector3(0.12, 0.07, 0.05)), Vector3(-0.25, 0.4, -0.6), Vector3.ZERO, lamp, 30],  # фары
+		[_pb(Vector3(0.12, 0.07, 0.05)), Vector3(0.25, 0.4, -0.6), Vector3.ZERO, lamp, 30],
 	]
 	return _merge(parts, mat)
 
 
-## Дрон-камикадзе: корпус цвета команды, крестовина с 4 винтами, глаз, заряд снизу. Центр — середина.
+## Дрон-камикадзе: корпус цвета команды, крестовина, 4 крутящихся винта, глаз-фара, заряд снизу.
 func _drone_mesh(mat: Material) -> ArrayMesh:
 	var dark := Color(0.2, 0.2, 0.22, METAL)
 	var steel := Color(0.55, 0.55, 0.6, METAL)
 	var team := Color(1, 1, 1, PAINT)
 	var parts := [
-		[_ps(0.22), Vector3.ZERO, Vector3.ZERO, team],
-		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, 45, 0), steel],
-		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, -45, 0), steel],
-		[_pb(Vector3(0.1, 0.04, 0.06)), Vector3(0, 0.02, -0.2), Vector3.ZERO, Color(1.0, 0.25, 0.15, GLOW)],   # глаз
-		[_ps(0.1), Vector3(0, -0.2, 0), Vector3.ZERO, Color(1.0, 0.55, 0.15, GLOW)],                             # заряд
+		[_ps(0.22), Vector3.ZERO, Vector3.ZERO, team, 11],
+		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, 45, 0), steel, 11],
+		[_pb(Vector3(1.0, 0.05, 0.07)), Vector3.ZERO, Vector3(0, -45, 0), steel, 11],
+		[_pb(Vector3(0.12, 0.05, 0.06)), Vector3(0, 0.02, -0.21), Vector3.ZERO, Color(1.0, 0.9, 0.6, GLOW), 11],   # фара
+		[_ps(0.1), Vector3(0, -0.2, 0), Vector3.ZERO, Color(1.0, 0.55, 0.15, GLOW), 11],                             # заряд
 	]
 	for sx in [-1.0, 1.0]:
 		for sz in [-1.0, 1.0]:
-			parts.append([_pc(0.17, 0.17, 0.03, 10), Vector3(sx * 0.35, 0.05, sz * 0.35), Vector3.ZERO, dark])
+			var c := Vector3(sx * 0.35, 0.06, sz * 0.35)
+			parts.append([_pc(0.04, 0.04, 0.06, 6), c, Vector3.ZERO, dark, 11])
+			parts.append([_pb(Vector3(0.4, 0.015, 0.05)), c + Vector3(0, 0.03, 0), Vector3.ZERO, dark, 10, c])   # лопасти
+			parts.append([_pb(Vector3(0.05, 0.015, 0.4)), c + Vector3(0, 0.03, 0), Vector3.ZERO, dark, 10, c])
 	return _merge(parts, mat)
 
 
-## Боевой мех: ноги, корпус цвета команды, кабина с визором, пушки на руках. Перёд — -Z.
+## Боевой мех-паук: брюшко и головогрудь цвета команды, кабина с визором и фарами,
+## спаренные пушки сверху, 8 суставчатых ног (ходят двумя группами). Перёд — -Z.
 func _mech_mesh(mat: Material) -> ArrayMesh:
 	var dark := Color(0.2, 0.2, 0.22, METAL)
 	var steel := Color(0.48, 0.48, 0.52, METAL)
 	var team := Color(1, 1, 1, PAINT)
+	var lamp := Color(1.0, 0.92, 0.6, GLOW)
 	var parts := [
-		[_pb(Vector3(1.1, 0.35, 0.6)), Vector3(0, 1.45, 0), Vector3.ZERO, steel],         # таз
-		[_pb(Vector3(1.4, 1.0, 0.95)), Vector3(0, 2.1, 0), Vector3.ZERO, team],           # корпус
-		[_pb(Vector3(0.65, 0.42, 0.55)), Vector3(0, 2.8, -0.1), Vector3.ZERO, steel],     # кабина
-		[_pb(Vector3(0.52, 0.12, 0.05)), Vector3(0, 2.82, -0.39), Vector3.ZERO, Color(1.0, 0.8, 0.3, GLOW)],  # визор
-		[_pb(Vector3(0.9, 0.12, 0.6)), Vector3(0, 2.66, 0.2), Vector3.ZERO, dark],         # ранец
+		[_ps(0.85), Vector3(0, 1.55, 0.75), Vector3.ZERO, team, 30],                         # брюшко
+		[_pb(Vector3(1.2, 0.55, 1.2)), Vector3(0, 1.45, -0.35), Vector3.ZERO, steel, 30],     # головогрудь
+		[_pb(Vector3(1.0, 0.12, 1.0)), Vector3(0, 1.76, -0.35), Vector3.ZERO, team, 30],      # панцирь
+		[_pb(Vector3(0.6, 0.35, 0.45)), Vector3(0, 1.5, -1.05), Vector3.ZERO, steel, 30],     # кабина
+		[_pb(Vector3(0.5, 0.1, 0.04)), Vector3(0, 1.58, -1.28), Vector3.ZERO, Color(1.0, 0.4, 0.25, GLOW), 30],  # визор
+		[_pb(Vector3(0.1, 0.08, 0.04)), Vector3(-0.22, 1.38, -1.28), Vector3.ZERO, lamp, 30],  # фары
+		[_pb(Vector3(0.1, 0.08, 0.04)), Vector3(0.22, 1.38, -1.28), Vector3.ZERO, lamp, 30],
+		[_pb(Vector3(0.7, 0.25, 0.5)), Vector3(0, 1.95, -0.3), Vector3.ZERO, dark, 30],       # турель
 	]
 	for sx in [-1.0, 1.0]:
-		parts.append([_pb(Vector3(0.4, 1.3, 0.45)), Vector3(sx * 0.42, 0.75, 0), Vector3(-8, 0, 0), dark])   # ноги
-		parts.append([_pb(Vector3(0.55, 0.16, 0.8)), Vector3(sx * 0.42, 0.08, -0.08), Vector3.ZERO, steel])    # ступни
-		parts.append([_pb(Vector3(0.5, 0.25, 0.6)), Vector3(sx * 0.95, 2.55, 0), Vector3.ZERO, team])          # наплечники
-		parts.append([_pb(Vector3(0.32, 0.36, 1.1)), Vector3(sx * 0.95, 2.05, -0.25), Vector3.ZERO, steel])    # руки-пушки
-		parts.append([_pc(0.07, 0.08, 0.6, 6), Vector3(sx * 0.95, 2.05, -1.05), Vector3(90, 0, 0), dark])      # стволы
-		parts.append([_pb(Vector3(0.1, 0.1, 0.04)), Vector3(sx * 0.95, 2.05, -1.36), Vector3.ZERO,
-			Color(1.0, 0.5, 0.2, GLOW)])
+		parts.append([_pc(0.08, 0.09, 1.1, 6), Vector3(sx * 0.18, 1.98, -0.95), Vector3(90, 0, 0), dark, 30])   # стволы
+		parts.append([_pb(Vector3(0.1, 0.1, 0.04)), Vector3(sx * 0.18, 1.98, -1.52), Vector3.ZERO,
+			Color(1.0, 0.5, 0.2, GLOW), 30])
+	# ноги: шарнир у корпуса -> колено высоко над корпусом -> стопа далеко в стороне
+	var zs := [-0.85, -0.35, 0.15, 0.65]
+	for side in 2:
+		var sx := -1.0 if side == 0 else 1.0
+		for i in 4:
+			var leg := float(side * 4 + i + 1)
+			var hip := Vector3(sx * 0.55, 1.4, float(zs[i]) - 0.2)
+			var spread := float(zs[i]) * 1.6
+			var knee := Vector3(sx * 1.45, 2.25, hip.z + spread * 0.5)
+			var foot := Vector3(sx * 2.25, 0.0, hip.z + spread)
+			parts.append(_seg(hip, knee, 0.16, steel, leg, hip))
+			parts.append(_seg(knee, foot, 0.12, dark, leg, hip))
+			parts.append([_ps(0.11), knee, Vector3.ZERO, team, leg, hip])   # колено
 	return _merge(parts, mat)
 
 
@@ -4307,6 +4456,30 @@ func _revis(id: int) -> void:
 	_vis_add(buildings[id])
 
 
+## Лента/труба: полосы бегут, только когда по ней что-то едет.
+func _set_belt_run(root: Node3D, on: bool) -> void:
+	if root.has_meta("belt_on") and bool(root.get_meta("belt_on")) == on:
+		return
+	root.set_meta("belt_on", on)
+	if not root.has_meta("belt_meshes"):
+		var found: Array = []
+		var stack: Array = [root]
+		while not stack.is_empty():
+			var nd: Node = stack.pop_back()
+			for ch in nd.get_children():
+				stack.append(ch)
+				if ch is MeshInstance3D:
+					var sm := (ch as MeshInstance3D).material_override as ShaderMaterial
+					if sm != null:
+						var pt = sm.get_shader_parameter("pattern")
+						if pt != null and (int(pt) == 2 or int(pt) == 3):
+							found.append(ch)
+		root.set_meta("belt_meshes", found)
+	for mi in root.get_meta("belt_meshes"):
+		if is_instance_valid(mi):
+			(mi as MeshInstance3D).set_instance_shader_parameter("belt_on", 1.0 if on else 0.0)
+
+
 ## Высота декора (по мешам) в его локальных координатах.
 func _deco_height(n: Node3D) -> float:
 	var h := 0.3
@@ -4563,7 +4736,7 @@ func _update_assembly() -> void:
 			mm.instance_count = 1
 			mm.mesh = meshes[kind]
 			var col: Color = D.TEAM_COLORS[b.team]
-			mm.set_instance_custom_data(0, Color(col.r, col.g, col.b, 1.0))
+			mm.set_instance_custom_data(0, Color(col.r, col.g, col.b, 0.49))   # стоит, целый
 			var mmi := MultiMeshInstance3D.new()
 			mmi.multimesh = mm
 			holder.add_child(mmi)
@@ -4984,6 +5157,15 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_anim(n, crane, "swing", 0.9, 0.6)
 		_anim(n, hook, "bob", 0.12, 1.2)
 		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.66, -0.51), Color(1.0, 0.85, 0.2), true)
+	elif t == D.FUEL_DEPOT:
+		# заправочная станция: бак He-3, колонка со шлангом
+		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.55, 0.3, 0.75))
+		_cyl(n, 0.45, 1.2, Vector3(-0.2, 0.75, 0.15), Color(0.6, 0.6, 0.65), 12).material_override = \
+				_pmat(Color(0.6, 0.6, 0.65), 1)
+		_cyl(n, 0.47, 0.1, Vector3(-0.2, 1.0, 0.15), Color(0.75, 0.4, 1.0), 12)
+		_box(n, Vector3(0.25, 0.8, 0.25), Vector3(0.5, 0.55, -0.4), Color(0.85, 0.85, 0.8))
+		var glow := _box(n, Vector3(0.18, 0.12, 0.05), Vector3(0.5, 0.8, -0.53), Color(0.85, 0.45, 1.0), true)
+		_anim(n, glow, "blink", 1.0, 0.8)
 	elif t == D.UNLOADER:
 		_box(n, Vector3(1.45, 0.15, 1.45), Vector3(0, 0.08, 0), Color(0.2, 0.45, 0.8))
 		_box(n, Vector3(0.9, 0.6, 0.9), Vector3(0, 0.45, 0), Color(0.4, 0.42, 0.46)).material_override = \
@@ -5218,7 +5400,7 @@ func _update_client(delta: float) -> void:
 	_update_viewmodel(delta)
 	_update_self_avatar()
 	lamp_acc += delta
-	if lamp_acc >= 0.25:
+	if lamp_acc >= 0.06:
 		lamp_acc = 0.0
 		_update_lights()
 	_update_units()
@@ -5384,6 +5566,7 @@ func _update_units() -> void:
 	var lifts := [0.0, D.DRONE_ALT, 0.0]   # модели стоят на земле, дроны летают
 	var ns := 0
 	unit_pos.clear()
+	unit_lights.clear()
 	var seen_ids := {}
 	for i in n:
 		var j := i * stride
@@ -5416,7 +5599,13 @@ func _update_units() -> void:
 			var f := face.normalized()
 			bas = Basis(f.cross(up), up, -f)
 		mm.set_instance_transform(c, Transform3D(bas, p + up * (float(lifts[kind]) - 0.3)))
-		mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, hpf))
+		var moving := false
+		if can_lerp:
+			moving = Vector3(cur_units[j], cur_units[j + 1], cur_units[j + 2]).distance_to(
+				Vector3(prev_units[j], prev_units[j + 1], prev_units[j + 2])) > 0.02
+		mm.set_instance_custom_data(c, Color(col.r, col.g, col.b, clampf(hpf, 0.0, 1.0) * 0.49 + (0.5 if moving else 0.0)))
+		if unit_lights.size() < 48 and face.length() > 0.5:
+			unit_lights.append([p + up * (float(lifts[kind]) + 0.4), face])
 		counts[kind] = c + 1
 		if team == my_team:
 			unit_pos[id] = p
@@ -6247,6 +6436,7 @@ func _update_proj(delta: float) -> void:
 
 func _update_rovers(delta: float) -> void:
 	var seen := {}
+	rover_lights.clear()
 	var k := minf(1.0, delta * 12.0)
 	for e in cur_rovers:
 		var id: int = e[0]
@@ -6254,7 +6444,7 @@ func _update_rovers(delta: float) -> void:
 		var fwd: Vector3 = e[2]
 		seen[id] = true
 		if not rover_nodes.has(id):
-			var nn := _make_rover(int(e[3]))
+			var nn := _make_rover(int(e[3]), int(e[6]) if e.size() > 6 else 0)
 			nn.position = pos
 			rover_nodes[id] = nn
 		var node: Node3D = rover_nodes[id]
@@ -6267,6 +6457,8 @@ func _update_rovers(delta: float) -> void:
 		node.transform = Transform3D(Basis(f.cross(up), up, -f), p)
 		var crate: Node3D = node.get_meta("crate")
 		crate.visible = int(e[4]) > 0
+		if rover_lights.size() < 24:
+			rover_lights.append([p + up * 0.6, f])
 	for id in rover_nodes.keys():
 		if not seen.has(id):
 			rover_nodes[id].queue_free()
@@ -6274,7 +6466,7 @@ func _update_rovers(delta: float) -> void:
 
 
 ## Ровер-курьер: шасси на шести колёсах, кабина с фарами, ящик с грузом.
-func _make_rover(team: int) -> Node3D:
+func _make_rover(team: int, kind := 0) -> Node3D:
 	var n := Node3D.new()
 	var col: Color = D.TEAM_COLORS[team]
 	var body := _pmat(Color(0.82, 0.8, 0.72), 1)
@@ -6290,7 +6482,14 @@ func _make_rover(team: int) -> Node3D:
 			w.rotation_degrees = Vector3(0, 0, 90)
 	_part(n, "cyl", Vector3(0.015, 0.5, 0), Vector3(0.35, 1.3, -0.45), dark)
 	_box(n, Vector3(0.06, 0.06, 0.06), Vector3(0.35, 1.56, -0.45), col, true)
-	var crate := _part(n, "box", Vector3(0.85, 0.45, 0.8), Vector3(0, 0.88, 0.35), _pmat(Color(0.6, 0.45, 0.25), 1))
+	var crate: MeshInstance3D
+	if kind == 1:
+		# заправщик: цистерна He-3 (полная — светится полоса)
+		var tank := _part(n, "cyl", Vector3(0.38, 1.0, 0), Vector3(0, 0.95, 0.35), _pmat(Color(0.7, 0.7, 0.75), 1))
+		tank.rotation_degrees = Vector3(90, 0, 0)
+		crate = _box(n, Vector3(0.8, 0.08, 0.6), Vector3(0, 1.35, 0.35), Color(0.8, 0.4, 1.0), true)
+	else:
+		crate = _part(n, "box", Vector3(0.85, 0.45, 0.8), Vector3(0, 0.88, 0.35), _pmat(Color(0.6, 0.45, 0.25), 1))
 	crate.visible = false
 	n.set_meta("crate", crate)
 	local_root.add_child(n)
@@ -6413,6 +6612,15 @@ func _update_lights() -> void:
 		if n >= D.MAX_LIGHTS:
 			break
 		lamp_img.set_pixel(n, 0, Color(p.x, p.y, p.z, D.LAMP_RADIUS))
+		n += 1
+	# фары юнитов и курьеров: пятно света перед машиной
+	for e in unit_lights + rover_lights:
+		if n >= D.MAX_LIGHTS - 16:
+			break
+		var lp: Vector3 = Vector3(e[0]) + Vector3(e[1]) * 2.6
+		if lp.distance_to(cam_p) > 120.0:
+			continue
+		lamp_img.set_pixel(n, 0, Color(lp.x, lp.y, lp.z, D.HEADLIGHT_RADIUS))
 		n += 1
 	for g in glows:
 		if n >= D.MAX_LIGHTS:

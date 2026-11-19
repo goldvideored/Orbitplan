@@ -96,6 +96,7 @@ const UNIT_REPAIR := 28   # ремонтная станция: чинит юни
 const WALL := 29          # забор: высокий, юниты упираются
 const LAMP := 30          # лампа: светит вокруг, выключается (маскировка)
 const BATTERY := 31       # аккумулятор: копит излишек энергии сети и отдаёт при нехватке
+const FUEL_DEPOT := 32    # заправочная станция: топливо из труб, заправщик развозит его по площадкам
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -107,12 +108,12 @@ const NAMES := {
 	TURRET: "Лазерная турель", TURRET2: "Пулемётная турель", TURRET3: "Артиллерия",
 	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	SPLITTER: "Разветвитель", JUNCTION: "Перекрёсток", BRIDGE: "Мост", POWER_POLE: "Энергостолб",
-	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор",
+	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор", FUEL_DEPOT: "Заправочная станция",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
-	CONVEYOR: "везёт твёрдые предметы, воду не берёт",
-	PIPE: "только для воды",
+	CONVEYOR: "везёт твёрдые предметы; воду и топливо He-3 не берёт — только трубы",
+	PIPE: "вода и топливо He-3",
 	DRILL: "медленно, без энергии, редкие руды не берёт",
 	DRILL2: "быстро, 50 энергии, берёт любые руды",
 	DRILL3: "очень быстро, 150 энергии + вода по трубе",
@@ -139,7 +140,8 @@ const DESC := {
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "собирает юнитов из ресурсов с конвейеров. Держи E — выбрать тип (пока не выбран, стоит)",
 	BATTERY: "копит излишек энергии сети (до 5000) и отдаёт при нехватке — ночью кормит сеть от солнечных панелей",
-	LOADER: "принимает грузы с конвейеров, ровер развозит их по точкам выгрузки",
+	LOADER: "принимает грузы с конвейеров, курьер развозит их по точкам выгрузки (воду и топливо не возит)",
+	FUEL_DEPOT: "принимает топливо He-3 по трубам, заправщик везёт его на стартовые площадки и точки выгрузки с фильтром «топливо»",
 	UNLOADER: "ровер привозит сюда выбранный груз (E — выбрать), выдаёт на конвейеры",
 	CHIP_FACTORY: "1 кремний + 1 медь -> микросхема. 80 энергии",
 }
@@ -172,13 +174,14 @@ const COST := {
 	ASSEMBLER: {I_COPPER: 60, I_IRON: 40},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
+	FUEL_DEPOT: {I_IRON: 30, I_SILICON: 10, I_CHIP: 10},
 	CHIP_FACTORY: {I_COPPER: 80, I_IRON: 60, I_SILICON: 20},
 }
 const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
+	LOADER: 250, UNLOADER: 250, FUEL_DEPOT: 250, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
 	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60, BATTERY: 200,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
@@ -217,7 +220,7 @@ const CATEGORIES := [
 	["Добыча", [DRILL, DRILL2, DRILL3]],
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, BATTERY, POWER_POLE, LAMP]],
 	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
-	["Логистика", [LOADER, UNLOADER]],
+	["Логистика", [LOADER, UNLOADER, FUEL_DEPOT]],
 	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
 	["Космос", [LAUNCH_PAD]],
 ]
@@ -236,7 +239,8 @@ const POWER_USE := {DRILL2: 50.0, DRILL3: 150.0, SMELTER: 60.0, CRUSHER: 40.0,
 const POLE_RING := 5               # энергостолб связывает всё в 5 кольцах вокруг себя
 const LAMP_RADIUS := 16.0          # радиус света лампы, м
 const GLOW_RADIUS := 4.0           # слабое свечение вокруг постройки, м
-const MAX_LIGHTS := 128            # сколько источников света передаём в шейдер
+const MAX_LIGHTS := 128   # сколько источников света передаём в шейдер
+const HEADLIGHT_RADIUS := 5.5   # пятно света от фар юнитов и курьеров
 const BRIDGE_RANGE := 4            # мост достаёт до следующего моста в 4 клетках
 const REPAIR_RADIUS := 10.0
 const REPAIR_RATE := 3             # прочности за тик каждой постройке рядом
@@ -272,6 +276,11 @@ const RECIPES := {
 # Логистика: точки погрузки/выгрузки и роверы-курьеры
 # ---------------------------------------------------------------------
 const ROVER_CAP := 25          # единиц груза за рейс
+const ROVER_HP := 150          # курьера и заправщика можно уничтожить
+const ROVER_RESPAWN_TICKS := 600   # новый — через 1 мин
+const TANKER_CAP := 20         # заправщик везёт до 20 топлива
+const DEPOT_CAP := 60          # сколько топлива держит заправочная станция
+const FLUIDS := [I_WATER, I_FUEL]  # текут только по трубам
 const ROVER_SPEED := 0.5       # м за тик (5 м/с)
 const ROVER_REACH := 2.5       # с какого расстояния ровер грузится/выгружается
 const LOADER_CAP := 100        # сколько всего держит точка погрузки

@@ -7,6 +7,7 @@ render_mode unshaded, cull_disabled;
 uniform vec4 albedo : source_color = vec4(1.0);
 uniform bool use_vertex_color = false;
 uniform int pattern = 1;   // 0 гладко, 1 металл с панелями, 2 лента конвейера, 3 труба с водой
+instance uniform float belt_on = 0.0;   // лента/труба: 1 — по ней что-то едет (полосы бегут)
 
 const float BELT_SPEED = 4.75;   // м/с — как едут предметы по ленте
 const float PIPE_SPEED = 9.5;
@@ -48,11 +49,11 @@ void fragment() {
 			base *= 0.96 + 0.06 * h;
 		} else if (pattern == 2) {
 			// резиновая лента: поперечные полосы едут вдоль оси X
-			float s = mod(floor(op.x - TIME * BELT_SPEED * PX), 4.0);
+			float s = mod(floor(op.x - TIME * BELT_SPEED * PX * belt_on), 4.0);
 			base *= (s < 1.0) ? 0.55 : (0.9 + 0.1 * h);
 		} else if (pattern == 3) {
 			// труба: по ней бегут светлые пиксели воды
-			float flow = hash2(vec2(floor(op.x - TIME * PIPE_SPEED * PX), floor(op.z)));
+			float flow = hash2(vec2(floor(op.x - TIME * PIPE_SPEED * PX * belt_on), floor(op.z)));
 			base = mix(base, vec3(0.45, 0.75, 1.0), step(0.82, flow));
 			base *= 0.92 + 0.08 * h;
 		}
