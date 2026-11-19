@@ -94,6 +94,8 @@ var unit_lights: Array = []   # клиент: фары юнитов [где, к�
 var rover_lights: Array = []  # клиент: фары курьеров
 var sim_n := 0                # сервер: номер тика (для «по ленте недавно что-то ехало»)
 var threat_pns := PackedInt32Array()   # клиент: планеты, где сейчас вражеский корабль у нас (баннер тревоги)
+var plan_acc := 0
+var nav_need0 := 0.0    # с какой величины начался текущий манёвр (для полоски)
 var nav_target := -1    # помощник перелёта: планета-цель (-1 — выключен)
 var plan := {}          # расчёт перелёта к цели
 var plan_traj: MeshInstance3D
@@ -6095,8 +6097,11 @@ func _update_client(delta: float) -> void:
 			pred_acc = 0.0
 			pred = _predict()
 			_draw_trajectories()
-			plan = _plan()
-			_draw_plan()
+			plan_acc += 1
+			if plan_acc >= 2:   # планирование тяжелее прогноза — раз в 0.5 с
+				plan_acc = 0
+				plan = _plan()
+				_draw_plan()
 		_update_map_view()
 		_update_compass()
 
@@ -6667,14 +6672,75 @@ func _cycle_target() -> void:
 	_draw_plan()
 
 
+## Траектория вокруг гиганта (без учёта планет): ближайшее сближение с планетой j — [расстояние, через сколько с].
+func _sim_min(r: Vector3, v: Vector3, j: int) -> Array:
+	var t := world_time
+	var best := INF
+	var best_t := 0.0
+	var dt := 2.0
+	for i in 450:
+		var rl := r.length()
+		if rl < D.GIANT_R:
+			break
+		v -= r / rl * (D.GIANT_MU / (rl * rl)) * dt
+		r += v * dt
+		t += dt
+		var d := r.distance_to(SkyCalc.planet_pos(j, t))
+		if d < best:
+			best = d
+			best_t = t - world_time
+	return [best, best_t]
+
+
+## Помощник в открытом космосе: какой добавкой скорости (направление ◆ и величина) свести
+## ближайшее сближение с целью к попаданию в её сферу притяжения. Подбирается численно.
+func _space_plan() -> Dictionary:
+	var j := nav_target
+	var r0: Vector3 = piloting.global_position
+	var v0: Vector3 = piloting.vel
+	var res := {"target": j, "space": true, "need": 0.0}
+	var base := _sim_min(r0, v0, j)
+	res["dist"] = base[0]
+	res["dist_t"] = base[1]
+	var goal: float = SkyCalc.soi(j) * 0.5
+	if float(base[0]) < goal:
+		return res
+	var pro := v0.normalized() if v0.length() > 0.1 else Vector3.FORWARD
+	var nrm := r0.cross(v0)
+	nrm = nrm.normalized() if nrm.length() > 0.001 else Vector3.UP
+	var rad := nrm.cross(pro)
+	var g := Vector3.ZERO
+	for ax in [pro, rad, nrm]:
+		var e: Vector3 = ax
+		var dp: float = _sim_min(r0, v0 + e * 1.0, j)[0]
+		var dm: float = _sim_min(r0, v0 - e * 1.0, j)[0]
+		g += e * (dp - dm) * 0.5
+	if g.length() < 0.01:
+		return res
+	var dir := -g.normalized()
+	var step := clampf((float(base[0]) - goal) / g.length(), 0.5, 250.0)
+	var best_m := 0.0
+	var best_d: float = base[0]
+	for k in [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]:
+		var m: float = step * float(k)
+		var d: float = _sim_min(r0, v0 + dir * m, j)[0]
+		if d < best_d:
+			best_d = d
+			best_m = m
+	if best_m > 0.0:
+		res["burn_dir"] = dir
+		res["need"] = best_m
+		res["after"] = best_d
+	return res
+
+
 func _plan() -> Dictionary:
 	var sh := piloting
 	if sh == null or nav_target < 0 or nav_target == sh.pn:
 		return {}
 	var res := {"target": nav_target}
 	if sh.pn < 0:
-		res["space"] = true
-		return res
+		return _space_plan()
 	var mu: float = D.GIANT_MU
 	var r1: float = D.PLANETS[sh.pn].a
 	var r2: float = D.PLANETS[nav_target].a
@@ -6710,6 +6776,10 @@ func _plan() -> Dictionary:
 	res["r1"] = r1
 	res["r2"] = r2
 	res["arrive"] = SkyCalc.planet_pos(nav_target, world_time + maxf(wait, 0.0) + tt)
+	# сколько ещё разгоняться (если жечь по ◆ из текущей точки): до нужной скорости ухода
+	var vnow := sh.vel.length()
+	var rnow := maxf(sh.global_position.length(), 1.0)
+	res["need"] = maxf(0.0, sqrt(vinf * vinf + 2.0 * mu1 / rnow) - vnow) if not sh.landed else dv_ej + float(D.DV_LAUNCH)
 	# когда скорость корабля вокруг планеты совпадёт с направлением разгона
 	var v := sh.vel
 	var r := sh.global_position
@@ -6761,7 +6831,16 @@ func _plan_lines() -> PackedStringArray:
 		return out
 	out.append("ЦЕЛЬ: %s   (T — сменить)" % D.PLANETS[nav_target].name)
 	var hit := int(pred.get("enc", -1)) == nav_target
-	if plan.is_empty() or plan.has("space"):
+	if plan.has("space"):
+		if hit:
+			out.append("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель" % int(pred.enc_t))
+		elif float(plan.need) > 0.3:
+			out.append("Жги по ◆ на навболе: ещё %.1f м/с" % float(plan.need))
+			out.append("Сейчас пролетишь в %d м от цели, после манёвра — ~%d м" % [int(plan.dist), int(plan.get("after", plan.dist))])
+		else:
+			out.append("Сближение %d м через %d с — дальше сфера притяжения цели" % [int(plan.dist), int(plan.dist_t)])
+		return out
+	if plan.is_empty():
 		out.append("Перехват цели: ДА, через %d с" % int(pred.enc_t) if hit else "Перехвата нет — подправь скорость")
 		return out
 	var wait: float = plan.wait
@@ -6931,7 +7010,8 @@ func _update_compass() -> void:
 		marks.append([-hvec, "anti"])
 	marks.append([up, "out"])
 	marks.append([-up, "in"])
-	if not plan.is_empty() and plan.has("burn_dir") and float(plan.wait) < 40.0:
+	if not plan.is_empty() and plan.has("burn_dir") and (plan.has("space") or float(plan.get("wait", 0.0)) < 60.0) \
+			and float(plan.get("need", 1.0)) > 0.3:
 		marks.append([plan.burn_dir, "burn"])
 	navball.set_data(nose, right, us, up, north, marks, piloting.sas_mode, piloting.power)
 
@@ -8221,6 +8301,33 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.banner_until = 0.0
 	ui.banner_msg = ""
 
+	# --- над навболом: скорость и полоска манёвра (сколько ещё жечь по ◆)
+	var nav := VBoxContainer.new()
+	nav.anchor_left = 0.5
+	nav.anchor_right = 0.5
+	nav.anchor_top = 1.0
+	nav.anchor_bottom = 1.0
+	nav.offset_left = -170
+	nav.offset_right = 170
+	nav.offset_top = -360
+	nav.offset_bottom = -286
+	nav.add_theme_constant_override("separation", 3)
+	nav.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	nav.visible = false
+	layer.add_child(nav)
+	var spd := _ui_label(22, Color(1, 1, 1))
+	spd.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	nav.add_child(spd)
+	var mlab := _ui_label(14, Color(1.0, 0.75, 0.35))
+	mlab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	nav.add_child(mlab)
+	var mbar := _bar(Color(1.0, 0.65, 0.2), 10)
+	nav.add_child(mbar)
+	ui.nav = nav
+	ui.nav_speed = spd
+	ui.nav_label = mlab
+	ui.nav_bar = mbar
+
 	# --- гибель: выбор базы для возрождения
 	var dp := PanelContainer.new()
 	var dsb := StyleBoxFlat.new()
@@ -8385,6 +8492,7 @@ func _update_hud() -> void:
 	ui.ship.visible = flying
 	ui.creative.visible = creative and not flying
 	var hints := PackedStringArray()
+	_update_nav_assist()
 	if flying:
 		ui.insp.visible = false
 		ui.ore.visible = false
@@ -8592,6 +8700,37 @@ func _fill_inspect(b: Dictionary, info: Array) -> void:
 			l.text = str(items[i + 1])
 			hb.add_child(l)
 			(ui.insp_items as Control).add_child(hb)
+
+
+## Над навболом: скорость; если идёт манёвр к цели — сколько ещё жечь по ◆ и полоска выполнения.
+func _update_nav_assist() -> void:
+	var nav: Control = ui.nav
+	nav.visible = piloting != null and map_mode == 0
+	if not nav.visible:
+		return
+	var sh := piloting
+	var vv := sh.vel.dot(sh.global_position.normalized())
+	ui.nav_speed.text = "%d м/с   ↕ %+d" % [int(sh.vel.length()), int(vv)]
+	var need := -1.0
+	if not plan.is_empty() and plan.has("burn_dir"):
+		need = float(plan.get("need", -1.0))
+	var bar: ProgressBar = ui.nav_bar
+	var lab: Label = ui.nav_label
+	if need <= 0.3:
+		nav_need0 = 0.0
+		bar.visible = false
+		lab.text = ("перехват есть" if int(pred.get("enc", -1)) == nav_target and nav_target >= 0 else "")
+		return
+	if plan.has("wait") and float(plan.wait) > 8.0 and not sh.landed:
+		bar.visible = false
+		lab.text = "Окно через %d с, затем %.1f м/с по ◆" % [int(plan.wait), need]
+		return
+	if nav_need0 <= 0.0 or need > nav_need0 * 1.2:
+		nav_need0 = need
+	bar.visible = true
+	bar.value = clampf(1.0 - need / nav_need0, 0.0, 1.0)
+	var aligned := sh.global_transform.basis.y.normalized().dot(Vector3(plan.burn_dir).normalized())
+	lab.text = "Манёвр: ещё %.1f м/с по ◆%s" % [need, "   (нос на ◆!)" if aligned < 0.97 else "   ЖГИ"]
 
 
 func _update_ship_panel() -> void:
