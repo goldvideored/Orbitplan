@@ -277,6 +277,7 @@ const ICONS := {
 	D.I_FUEL: ["canister", Color(0.6, 0.3, 0.8), Color(1.0, 0.7, 1.0)],
 	D.I_WATER: ["drop", Color(0.2, 0.5, 1.0), Color(0.7, 0.9, 1.0)],
 	D.I_CHIP: ["chip", Color(0.15, 0.5, 0.25), Color(0.95, 0.8, 0.3)],
+	D.I_ALLOY: ["ingot", Color(0.32, 0.4, 0.35), Color(0.5, 1.0, 0.35)],
 	UI_HEART: ["heart", Color(0.9, 0.2, 0.25), Color(1, 1, 1)],
 	UI_SUN: ["sun", Color(1.0, 0.85, 0.3), Color(1.0, 0.75, 0.2)],
 	UI_BOLT: ["bolt", Color(1.0, 0.85, 0.2), Color(1, 1, 1)],

@@ -35,6 +35,7 @@ const I_LEAD := 14
 const I_URANIUM := 15
 const I_FUEL := 16
 const I_CHIP := 17         # микросхема: кремний + медь на заводе микросхем
+const I_ALLOY := 18        # свинцово-урановый сплав: для построек 3 тира и модернизации до 3 уровня
 # жидкость — только по трубам
 const I_WATER := 20
 
@@ -44,7 +45,7 @@ const ITEM_NAMES := {
 	I_URANIUM_ORE: "Урановая руда", I_HELIUM_ORE: "Гелиевый реголит",
 	I_COAL: "Уголь", I_COPPER: "Медь", I_IRON: "Железо", I_SILICON: "Кремний",
 	I_LEAD: "Свинец", I_URANIUM: "Уран", I_FUEL: "Топливо He-3", I_WATER: "Вода",
-	I_CHIP: "Микросхема",
+	I_CHIP: "Микросхема", I_ALLOY: "Сплав Pb-U",
 }
 const ITEM_COLORS := {
 	I_COAL_ORE: Color(0.12, 0.12, 0.13), I_COPPER_ORE: Color(0.78, 0.45, 0.25),
@@ -54,8 +55,9 @@ const ITEM_COLORS := {
 	I_COAL: Color(0.2, 0.2, 0.22), I_COPPER: Color(1.0, 0.55, 0.25), I_IRON: Color(0.8, 0.8, 0.85),
 	I_SILICON: Color(0.35, 0.4, 0.55), I_LEAD: Color(0.55, 0.55, 0.75), I_URANIUM: Color(0.45, 1.0, 0.3),
 	I_FUEL: Color(0.9, 0.5, 1.0), I_WATER: Color(0.25, 0.55, 1.0), I_CHIP: Color(0.2, 0.6, 0.3),
+	I_ALLOY: Color(0.38, 0.5, 0.42),
 }
-const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP]
+const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP, I_ALLOY]
 const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE]   # базовый бур не берёт
 const RARE_SPEED := 0.2        # скорость добычи редких пород относительно обычных
 const CORE_CAP := 500          # ядро (база) хранит не больше 500 каждого ресурса
@@ -120,7 +122,7 @@ const DESC := {
 	SOLAR: "до 100 энергии, зависит от света (ночью 0)",
 	COAL_PLANT: "500 энергии, жжёт уголь",
 	NUCLEAR: "1000 энергии, нужны уран и вода",
-	SMELTER: "руда меди/железа/свинца -> металл, кварц -> кремний. 60 энергии",
+	SMELTER: "руда меди/железа/свинца -> металл, кварц -> кремний, 2 свинца + 1 уран -> сплав Pb-U. 60 энергии",
 	CRUSHER: "угольная руда -> уголь. 40 энергии",
 	MELTER: "лёд -> вода (выход в трубы). 30 энергии",
 	CENTRIFUGE: "4 урановой руды -> уран. 200 энергии",
@@ -151,18 +153,18 @@ const COST := {
 	PIPE: {I_IRON: 1},
 	DRILL: {I_COPPER: 12},
 	DRILL2: {I_COPPER: 50, I_IRON: 30},
-	DRILL3: {I_IRON: 100, I_SILICON: 50, I_LEAD: 25},
+	DRILL3: {I_IRON: 100, I_SILICON: 50, I_LEAD: 25, I_ALLOY: 20},
 	SOLAR: {I_COPPER: 20, I_SILICON: 20},
 	COAL_PLANT: {I_COPPER: 78, I_IRON: 78},
-	NUCLEAR: {I_IRON: 390, I_LEAD: 195, I_SILICON: 130},
+	NUCLEAR: {I_IRON: 390, I_LEAD: 195, I_SILICON: 130, I_ALLOY: 40},
 	SMELTER: {I_COPPER: 20, I_IRON: 10},
 	CRUSHER: {I_COPPER: 15, I_IRON: 5},
 	MELTER: {I_COPPER: 15, I_IRON: 10},
 	CENTRIFUGE: {I_IRON: 120, I_SILICON: 60, I_LEAD: 40},
-	FUEL_SYNTH: {I_IRON: 125, I_SILICON: 100, I_LEAD: 50},
+	FUEL_SYNTH: {I_IRON: 125, I_SILICON: 100, I_LEAD: 50, I_ALLOY: 25},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
 	TURRET2: {I_IRON: 80, I_COPPER: 40, I_CHIP: 10},
-	LAUNCH_PAD: {I_IRON: 375, I_SILICON: 100, I_CHIP: 75, I_LEAD: 50},
+	LAUNCH_PAD: {I_IRON: 375, I_SILICON: 100, I_CHIP: 75, I_LEAD: 50, I_ALLOY: 40},
 	AA_GUN: {I_IRON: 100, I_COPPER: 60, I_CHIP: 20},
 	SPLITTER: {I_COPPER: 4}, JUNCTION: {I_COPPER: 4}, BRIDGE: {I_COPPER: 6, I_IRON: 4},
 	POWER_POLE: {I_COPPER: 8, I_IRON: 4},
@@ -170,7 +172,7 @@ const COST := {
 	WALL: {I_IRON: 3},
 	LAMP: {I_COPPER: 3, I_SILICON: 1},
 	BATTERY: {I_COPPER: 50, I_IRON: 30, I_SILICON: 20},
-	TURRET3: {I_IRON: 300, I_LEAD: 100, I_SILICON: 50, I_CHIP: 50},
+	TURRET3: {I_IRON: 300, I_LEAD: 100, I_SILICON: 50, I_CHIP: 50, I_ALLOY: 30},
 	ASSEMBLER: {I_COPPER: 60, I_IRON: 40},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
@@ -264,6 +266,7 @@ const RECIPES := {
 		{"in": {I_IRON_ORE: 1}, "out": I_IRON, "n": 1, "t": 12.0},
 		{"in": {I_LEAD_ORE: 1}, "out": I_LEAD, "n": 1, "t": 15.0},
 		{"in": {I_QUARTZ: 1}, "out": I_SILICON, "n": 1, "t": 14.0},
+		{"in": {I_LEAD: 2, I_URANIUM: 1}, "out": I_ALLOY, "n": 1, "t": 30.0},   # сплав Pb-U
 	],
 	CRUSHER: [{"in": {I_COAL_ORE: 1}, "out": I_COAL, "n": 1, "t": 8.0}],
 	MELTER: [{"in": {I_ICE: 1}, "out": I_WATER, "n": 2, "t": 6.0}],

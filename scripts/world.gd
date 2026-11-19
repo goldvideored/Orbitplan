@@ -435,9 +435,13 @@ func _upgrade_cost(b: Dictionary) -> Dictionary:
 		return out
 	var cost: Dictionary = D.COST[b.type]
 	for it in cost:
+		if int(it) == D.I_ALLOY:
+			continue   # сплав — только на 3 уровень (ниже)
 		out[it] = mini(int(cost[it]) * int(D.UPG_COST_MULT[lv]) + (5 if it == D.I_CHIP else 0), D.CORE_CAP)
 	if not out.has(D.I_CHIP):
 		out[D.I_CHIP] = 5 * lv
+	if lv == 2:
+		out[D.I_ALLOY] = 10 if _size_of(int(b.type)) == 1 else 20   # до 3 уровня — нужен сплав Pb-U
 	return out
 
 
