@@ -1851,6 +1851,8 @@ func server_board(peer: int, id: int) -> void:
 		return
 	sh.pilot = peer
 	sh.state = 1
+	sh["launch_pos"] = Vector3(sh.pos) + Vector3(sh.pos).normalized() * 1.5
+	sh["launch_pn"] = int(sh.pn)
 	if peer == 1 and not headless:
 		_start_piloting(id, sh.pos, sh.quat, sh.fuel, sh.pn, int(sh.kind))
 	else:
@@ -1904,10 +1906,21 @@ func server_ship_crash(peer: int, id: int) -> void:
 		var cpn: int = ships[id].pn
 		var skind: int = int(ships[id].kind)
 		var steam: int = int(ships[id].team)
+		var lpos: Vector3 = ships[id].get("launch_pos", at)
+		var lpn: int = int(ships[id].get("launch_pn", cpn))
 		ships.erase(id)
+		if players.has(peer):
+			var o: Dictionary = players[peer]
+			if skind == 3:
+				o.pos = lpos   # камикадзе: пилот без штрафа на месте запуска
+				o["pn"] = lpn
+			else:
+				if cpn >= 0:
+					o.pos = at   # погиб там, где разбился (для «ближайшей базы» при возрождении)
+					o["pn"] = cpn
+				_damage_player(peer, D.PLAYER_HP * 100)   # корабль уничтожен — пилот погибает
 		if skind == 3:
 			_blast(at, steam, cpn, D.KAMIKAZE_R, D.KAMIKAZE_DMG)   # камикадзе: врезался или подорван
-		_damage_player(peer, 40)
 		for p in Net.ready_peers:
 			fx_boom.rpc_id(p, at, 6.0, false, cpn)
 		if not headless and cpn == my_pn:
@@ -6498,6 +6511,8 @@ func _start_piloting(id: int, pos: Vector3, quat: Quaternion, fuel: float, pn: i
 	sh.setup(self, id, _make_ship(my_team, kind), fuel, pn, kind)
 	piloting = sh
 	piloting_id = id
+	launch_pos = pos + pos.normalized() * 1.5   # место запуска: сюда вернёт после подрыва камикадзе
+	launch_pn = pn
 	player.visible = false
 	player.active = false
 	player.set_physics_process(false)
@@ -6971,20 +6986,38 @@ func on_auto_retro() -> void:
 
 
 ## Вызывает корабль при жёсткой посадке.
+var launch_pos := Vector3.ZERO   # клиент: откуда взлетел текущий корабль
+var launch_pn := 0
+
+
+## Корабль уничтожен (разбит, сбит, самоуничтожен). Пилот погибает — дальше обычная гибель с выбором базы.
+## Камикадзе — исключение: пилот без штрафа возвращается на место запуска.
 func on_ship_crash(_sh: Node3D, self_destruct := false, msg := "") -> void:
 	var id := piloting_id
+	var kamikaze: bool = piloting != null and piloting.kind == 3
+	var cpn: int = piloting.pn if piloting != null else -1
+	var cpos: Vector3 = piloting.global_position if piloting != null else Vector3.ZERO
 	if is_server:
 		server_ship_crash(1, id)
 	else:
 		req_ship_crash.rpc_id(1, id)
-	_switch_planet(_spawn_pn(my_team))
-	_stop_piloting(_spawn_pos(my_team))
+	if kamikaze:
+		_switch_planet(launch_pn)
+		_stop_piloting(launch_pos)
+		big_msg.text = (msg if msg != "" else "РАКЕТА ВЗОРВАЛАСЬ") + "\nты вернулся на место запуска"
+		get_tree().create_timer(3.0).timeout.connect(_clear_msg)
+		return
+	if cpn >= 0:
+		_stop_piloting(cpos + cpos.normalized() * 1.5)   # тело остаётся там, где разбился корабль
+	else:
+		_switch_planet(_spawn_pn(my_team))
+		_stop_piloting(_spawn_pos(my_team))
 	if msg != "":
 		big_msg.text = msg
 	elif self_destruct:
 		big_msg.text = "КОРАБЛЬ САМОУНИЧТОЖЕН"
 	else:
-		big_msg.text = "КОРАБЛЬ РАЗБИТ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
+		big_msg.text = "КОРАБЛЬ РАЗБИТ — ПИЛОТ ПОГИБ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
 	get_tree().create_timer(3.0).timeout.connect(_clear_msg)
 
 
