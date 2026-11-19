@@ -133,7 +133,7 @@ const DESC := {
 	UNIT_REPAIR: "чинит своих юнитов в 10 м. 60 энергии",
 	WALL: "высокий забор: не перепрыгнуть, наземные юниты упираются и ломают его",
 	LAMP: "светит на 16 м. E — вкл/выкл, Shift+E — все свои лампы на луне (маскировка)",
-	AA_GUN: "бьёт летающие цели на 90 м. Снаряды — любой ресурс (уран облучает), вода по трубе — стрельба вдвое чаще",
+	AA_GUN: "бьёт летающие цели на 90 м. Снаряд — 3 любых ресурса (уран облучает), выстрел раз в 1.6 с, вода по трубе — чаще",
 	TURRET2: "пули на 10 клеток, медь с конвейера (1 медь = 4 пули)",
 	TURRET3: "навесные снаряды на 50 клеток, взрыв 10 клеток. Свинец или уран (облучение 2 с)",
 	ASSEMBLER: "собирает юнитов из ресурсов с конвейеров. Держи E — выбрать тип (пока не выбран, стоит)",
@@ -147,31 +147,31 @@ const COST := {
 	CONVEYOR: {I_COPPER: 1},
 	PIPE: {I_IRON: 1},
 	DRILL: {I_COPPER: 12},
-	DRILL2: {I_COPPER: 25, I_IRON: 15},
-	DRILL3: {I_IRON: 40, I_SILICON: 20, I_LEAD: 10},
-	SOLAR: {I_COPPER: 10, I_SILICON: 10},
-	COAL_PLANT: {I_COPPER: 30, I_IRON: 30},
-	NUCLEAR: {I_IRON: 120, I_LEAD: 60, I_SILICON: 40},
+	DRILL2: {I_COPPER: 50, I_IRON: 30},
+	DRILL3: {I_IRON: 100, I_SILICON: 50, I_LEAD: 25},
+	SOLAR: {I_COPPER: 20, I_SILICON: 20},
+	COAL_PLANT: {I_COPPER: 78, I_IRON: 78},
+	NUCLEAR: {I_IRON: 390, I_LEAD: 195, I_SILICON: 130},
 	SMELTER: {I_COPPER: 20, I_IRON: 10},
 	CRUSHER: {I_COPPER: 15, I_IRON: 5},
 	MELTER: {I_COPPER: 15, I_IRON: 10},
-	CENTRIFUGE: {I_IRON: 60, I_SILICON: 30, I_LEAD: 20},
-	FUEL_SYNTH: {I_IRON: 50, I_SILICON: 40, I_LEAD: 20},
+	CENTRIFUGE: {I_IRON: 120, I_SILICON: 60, I_LEAD: 40},
+	FUEL_SYNTH: {I_IRON: 125, I_SILICON: 100, I_LEAD: 50},
 	TURRET: {I_COPPER: 25, I_IRON: 15},
-	TURRET2: {I_IRON: 40, I_COPPER: 20, I_CHIP: 5},
-	LAUNCH_PAD: {I_IRON: 150, I_SILICON: 40, I_CHIP: 30, I_LEAD: 20},
-	AA_GUN: {I_IRON: 50, I_COPPER: 30, I_CHIP: 10},
+	TURRET2: {I_IRON: 80, I_COPPER: 40, I_CHIP: 10},
+	LAUNCH_PAD: {I_IRON: 375, I_SILICON: 100, I_CHIP: 75, I_LEAD: 50},
+	AA_GUN: {I_IRON: 100, I_COPPER: 60, I_CHIP: 20},
 	SPLITTER: {I_COPPER: 4}, JUNCTION: {I_COPPER: 4}, BRIDGE: {I_COPPER: 6, I_IRON: 4},
-	POWER_POLE: {I_COPPER: 4, I_IRON: 2},
+	POWER_POLE: {I_COPPER: 8, I_IRON: 4},
 	REPAIR: {I_IRON: 30, I_SILICON: 10, I_CHIP: 5}, UNIT_REPAIR: {I_IRON: 40, I_CHIP: 8},
 	WALL: {I_IRON: 3},
 	LAMP: {I_COPPER: 3, I_SILICON: 1},
-	BATTERY: {I_COPPER: 25, I_IRON: 15, I_SILICON: 10},
-	TURRET3: {I_IRON: 120, I_LEAD: 40, I_SILICON: 20, I_CHIP: 20},
-	ASSEMBLER: {I_COPPER: 30, I_IRON: 20},
+	BATTERY: {I_COPPER: 50, I_IRON: 30, I_SILICON: 20},
+	TURRET3: {I_IRON: 300, I_LEAD: 100, I_SILICON: 50, I_CHIP: 50},
+	ASSEMBLER: {I_COPPER: 60, I_IRON: 40},
 	LOADER: {I_IRON: 20, I_CHIP: 10},
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
-	CHIP_FACTORY: {I_COPPER: 40, I_IRON: 30, I_SILICON: 10},
+	CHIP_FACTORY: {I_COPPER: 80, I_IRON: 60, I_SILICON: 20},
 }
 const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
@@ -197,6 +197,14 @@ static func build_time(t: int) -> float:
 		return float(BUILD_TIME[t])
 	var s: int = SIZE.get(t, 1)
 	return 2.5 if s == 1 else (6.0 if s == 3 else 14.0)
+
+
+# модернизация заводов (U на своём заводе): уровень 1..3
+const UPGRADABLE := [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY, ASSEMBLER]
+const UPG_MAX := 3
+const UPG_SPEED := [1.0, 1.6, 2.3]   # скорость работы по уровням
+const UPG_POWER := [1.0, 1.5, 2.2]   # расход энергии по уровням
+const UPG_COST_MULT := [0, 1, 2]     # цена улучшения до уровня L = цена постройки × это
 
 
 const GENERATORS := [SOLAR, COAL_PLANT, NUCLEAR]
@@ -348,15 +356,15 @@ const T3_AMMO_CAP := 10
 
 # ПВО: зенитные снаряды рвутся рядом с летающей целью
 const AA_RANGE := 90.0
-const AA_CD := 6               # тиков между выстрелами
-const AA_CD_WATER := 3         # с водой — вдвое чаще
+const AA_CD := 16              # тиков между выстрелами (1.6 с)
+const AA_CD_WATER := 9         # с водой — почти вдвое чаще
 const AA_WATER_PER := 4        # 1 вода на 4 выстрела
 const AA_SPEED := 60.0         # м/с
 const AA_DMG := 18             # в центре взрыва, к краю — 30%
 const AA_FUSE := 2.5           # взрыватель: рвётся ближе этого к цели
 const AA_SPLASH := 4.0         # радиус осколков
-const AA_SHOTS_PER_ITEM := 2   # 1 любой ресурс = 2 снаряда
-const AA_AMMO_CAP := 20
+const AA_ITEMS_PER_SHOT := 3   # 1 снаряд = 3 любых ресурса
+const AA_AMMO_CAP := 30
 const AA_WATER_CAP := 10
 const DRONE_ALT := 2.5         # на какой высоте летают дроны
 const SHIP_HP := [300, 800]    # прочность разведчика и транспорта

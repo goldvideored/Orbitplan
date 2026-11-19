@@ -128,6 +128,12 @@ func _marker(c: Control, p: Vector2, kind: String) -> void:
 			for a in 4:
 				var v := Vector2.RIGHT.rotated(TAU * a / 4.0 + PI / 4.0)
 				c.draw_line(p + v * 8, p + v * 14, cyan, 2.5)
+		"burn":
+			# куда жечь для перелёта к цели — оранжевый ромб
+			var orange := Color(1.0, 0.65, 0.2)
+			c.draw_polyline(PackedVector2Array([p + Vector2(0, -12), p + Vector2(12, 0), p + Vector2(0, 12),
+				p + Vector2(-12, 0), p + Vector2(0, -12)]), orange, 3.0)
+			c.draw_circle(p, 3.0, orange)
 		"in":
 			c.draw_arc(p, 8, 0, TAU, 20, cyan, 2.5)
 			for a in 4:

@@ -87,6 +87,10 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
+var nav_target := -1    # помощник перелёта: луна-цель (-1 — выключен)
+var plan := {}          # расчёт перелёта к цели
+var plan_traj: MeshInstance3D
+var plan_label: Label3D
 var death_t := -1.0     # клиент: сколько секунд прошло с гибели (-1 — жив)
 var death_pos := Vector3.ZERO
 var death_pn := 0
@@ -419,6 +423,64 @@ func _spawn_near(core: Dictionary) -> Vector3:
 	return planet.dirs[c] * (planet.top_r(c) + 1.0)
 
 
+## Цена модернизации до следующего уровня.
+func _upgrade_cost(b: Dictionary) -> Dictionary:
+	var out := {}
+	var lv: int = int(b.lvl)
+	if lv >= D.UPG_MAX:
+		return out
+	var cost: Dictionary = D.COST[b.type]
+	for it in cost:
+		out[it] = mini(int(cost[it]) * int(D.UPG_COST_MULT[lv]) + (5 if it == D.I_CHIP else 0), D.CORE_CAP)
+	if not out.has(D.I_CHIP):
+		out[D.I_CHIP] = 5 * lv
+	return out
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_upgrade(cell: int) -> void:
+	if multiplayer.is_server():
+		var peer := multiplayer.get_remote_sender_id()
+		if _in_reach(peer, cell, _peer_pn(peer)):
+			server_upgrade(Net.team_of(peer), cell, _peer_pn(peer))
+
+
+func server_upgrade(team: int, cell: int, pn: int) -> void:
+	if not grid.has(_k(pn, cell)):
+		return
+	var b: Dictionary = buildings[grid[_k(pn, cell)]]
+	if int(b.team) != team or not D.UPGRADABLE.has(int(b.type)) or int(b.lvl) >= D.UPG_MAX or _busy(b):
+		return
+	var cost := _upgrade_cost(b)
+	if not creative:
+		var st: Dictionary = storage[team]
+		for it in cost:
+			if int(st.get(it, 0)) < int(cost[it]):
+				return
+		for it in cost:
+			st[it] = int(st.get(it, 0)) - int(cost[it])
+	b.lvl = int(b.lvl) + 1
+	for p in Net.ready_peers:
+		ev_upgrade.rpc_id(p, b.id, int(b.lvl))
+	if not headless:
+		_apply_upgrade(b.id, int(b.lvl))
+
+
+@rpc("authority", "call_remote", "reliable")
+func ev_upgrade(id: int, lvl: int) -> void:
+	_apply_upgrade(id, lvl)
+
+
+func _apply_upgrade(id: int, lvl: int) -> void:
+	if not buildings.has(id):
+		return
+	var b: Dictionary = buildings[id]
+	b.lvl = lvl
+	if int(b.pn) == my_pn and bnodes.has(id):
+		_revis(id)
+		_boom(_bpos(b) + _bpos(b).normalized() * 1.5, 1.5, false)
+
+
 @rpc("any_peer", "call_remote", "reliable")
 func req_choose_base(core_id: int) -> void:
 	if multiplayer.is_server():
@@ -496,7 +558,7 @@ func _add_building(d: Dictionary) -> void:
 		"blocked": false, "water": 0, "wuse": 0, "burn": 0, "wt": 0, "cool": false,
 		"pr": 0.0, "pout": 0.0, "out_blocked": false, "filter": int(d.get("filter", D.I_NONE)),
 		"ukind": int(d.get("ukind", -1)), "lit": bool(d.get("lit", true)),
-		"charge": 0.0, "bflow": 0.0,
+		"charge": 0.0, "bflow": 0.0, "lvl": int(d.get("lvl", 1)),
 		# стройка: bt — готовность 0..1, decon — идёт снос, by — кто строит/сносит (peer)
 		"bt": float(d.get("bt", 1.0)), "decon": bool(d.get("decon", false)), "by": int(d.get("by", 0)),
 		"refund_full": false,
@@ -511,6 +573,8 @@ func _add_building(d: Dictionary) -> void:
 			if not cells.has(x) and not outs.has(x):
 				outs.append(x)
 	b["outs"] = outs
+	if D.RECIPES.has(b.type):
+		b["fouts"] = _front_cells(b)   # завод отдаёт продукт только вперёд
 	if _is_drill(b.type):
 		var info := _drill_ore(cells)
 		b["ore"] = info[0]
@@ -557,7 +621,8 @@ func _busy(b: Dictionary) -> bool:
 
 func _bdata(b: Dictionary) -> Dictionary:
 	return {"id": b.id, "type": b.type, "team": b.team, "cell": b.cell, "dir": b.dir, "filter": b.filter,
-		"pn": b.pn, "main": b.main, "ukind": b.ukind, "lit": b.lit, "bt": b.bt, "decon": b.decon, "by": b.by}
+		"pn": b.pn, "main": b.main, "ukind": b.ukind, "lit": b.lit, "bt": b.bt, "decon": b.decon, "by": b.by,
+		"lvl": b.lvl}
 
 
 # =====================================================================
@@ -719,7 +784,21 @@ func server_shoot(peer: int, from: Vector3, dir: Vector3) -> void:
 				hit_unit = null
 				hit_peer = pid
 
-	if hit_unit != null:
+	var hit_ship = null
+	for sh in ships.values():
+		if int(sh.team) == int(pl.team) or int(sh.pn) != spn:
+			continue
+		var sup: Vector3 = Basis(Quaternion(sh.quat)).y
+		for h in [1.2, 2.6, 4.0]:
+			var t := _ray_sphere(from, dir, Vector3(sh.pos) + sup * h, 1.1)
+			if t > 0.0 and t < best_t:
+				best_t = t
+				hit_ship = sh
+				hit_unit = null
+				hit_peer = -1
+	if hit_ship != null:
+		_damage_ship(hit_ship, D.GUN_DMG)   # ракеты сбиваются и из бластера
+	elif hit_unit != null:
 		hit_unit.hp -= D.GUN_DMG
 	elif hit_peer != -1:
 		_damage_player(hit_peer, D.GUN_DMG)
@@ -1145,14 +1224,15 @@ func _status(b: Dictionary) -> Array:
 	if t == D.REPAIR or t == D.UNIT_REPAIR:
 		return _power_state(b, "чинит %s в %d м" % ["постройки" if t == D.REPAIR else "юнитов", int(D.REPAIR_RADIUS)])
 	if t == D.AA_GUN:
-		var ammo := int(b.get("ammo", 0))
+		var items := 0
 		for it in b.buf:
-			ammo += int(b.buf[it]) * D.AA_SHOTS_PER_ITEM
+			items += int(b.buf[it])
+		var ammo := int(b.get("ammo", 0)) + items / D.AA_ITEMS_PER_SHOT
 		var boost: String = ("  вода %d — стрельба ×2" % b.water) if b.water > 0 else "  (подай воду — стрельба ×2)"
 		if creative or b.team == D.T_NEUTRAL:
 			return [ST_OK, "ПВО, боеприпасы бесконечны"]
 		if ammo <= 0:
-			return [ST_STOP, "нет снарядов: подай любой ресурс"]
+			return [ST_STOP, "нет снарядов: подай ресурсы (3 на выстрел)"]
 		return [ST_OK, "ПВО: снарядов %d%s" % [ammo, boost]]
 	if t == D.TURRET2:
 		var cu := int(b.buf.get(D.I_COPPER, 0))
@@ -1436,8 +1516,9 @@ func _sim_tick() -> void:
 			prod[team] += out
 			gprod[root] = float(gprod.get(root, 0.0)) + out
 		if D.POWER_USE.has(t) and _wants_power(b):
-			demand[team] += D.POWER_USE[t]
-			gdem[root] = float(gdem.get(root, 0.0)) + float(D.POWER_USE[t])
+			var pu: float = float(D.POWER_USE[t]) * float(D.UPG_POWER[int(b.lvl) - 1])
+			demand[team] += pu
+			gdem[root] = float(gdem.get(root, 0.0)) + pu
 
 	# аккумуляторы: излишек сети заряжает их, нехватку они покрывают
 	var bats := {}   # корень сети -> аккумуляторы
@@ -1503,7 +1584,7 @@ func _sim_tick() -> void:
 		elif t == D.CONVEYOR or t == D.PIPE:
 			_belt_tick(b)
 		elif D.RECIPES.has(t):
-			_factory_tick(b, r)
+			_factory_tick(b, r * float(D.UPG_SPEED[int(b.lvl) - 1]))
 		elif t == D.ASSEMBLER:
 			_assembler_tick(b)
 		elif t == D.TURRET:
@@ -1934,7 +2015,7 @@ func _has_inputs(b: Dictionary, ins: Dictionary) -> bool:
 
 ## Выдать 1 предмет в любую клетку вокруг контура (по кругу). true — если кто-то взял.
 func _output(b: Dictionary, item: int) -> bool:
-	var outs: Array = b.outs
+	var outs: Array = b.get("fouts", b.outs)
 	var k := outs.size()
 	for i in k:
 		var idx: int = (b.rr + i) % k
@@ -2275,19 +2356,25 @@ func _aa_tick(b: Dictionary) -> void:
 	var free_ammo: bool = creative or b.team == D.T_NEUTRAL
 	if not free_ammo and int(b.get("ammo", 0)) <= 0:
 		# заряжаем: уран в приоритете, иначе что есть
-		var it := D.I_NONE
-		if int(b.buf.get(D.I_URANIUM, 0)) > 0:
-			it = D.I_URANIUM
-		else:
-			for k in b.buf:
-				if int(b.buf[k]) > 0:
-					it = k
-					break
-		if it == D.I_NONE:
+		var total := 0
+		for k in b.buf:
+			total += int(b.buf[k])
+		if total < D.AA_ITEMS_PER_SHOT:
 			return
-		_buf_take(b, it, 1)
-		b["ammo"] = D.AA_SHOTS_PER_ITEM
-		b["ammo_u"] = it == D.I_URANIUM
+		var need: int = D.AA_ITEMS_PER_SHOT
+		var had_u := false
+		var order: Array = [D.I_URANIUM]
+		for k in b.buf:
+			if int(k) != D.I_URANIUM:
+				order.append(k)
+		for k in order:
+			while need > 0 and int(b.buf.get(k, 0)) > 0:
+				_buf_take(b, int(k), 1)
+				need -= 1
+				if int(k) == D.I_URANIUM:
+					had_u = true
+		b["ammo"] = 1
+		b["ammo_u"] = had_u
 	var uranium := bool(b.get("ammo_u", false)) if not free_ammo else int(b.buf.get(D.I_URANIUM, 0)) > 0
 	# упреждение: где будет цель, пока летит снаряд (два уточнения)
 	var p: Vector3 = tgt.pos
@@ -2595,7 +2682,7 @@ func _unit_limit(team: int, kind: int) -> int:
 func _assembler_tick(b: Dictionary) -> void:
 	var k: int = b.ukind
 	if b.timer > 0:
-		b.timer -= 1
+		b.timer = maxi(0, int(b.timer) - int(b.lvl))   # модернизация — собирает быстрее
 		if b.timer == 0:
 			_spawn_unit(b.team, _bay_cell(b), b.pn, k)
 		return
@@ -2607,6 +2694,24 @@ func _assembler_tick(b: Dictionary) -> void:
 	for it in need:
 		b.buf[it] = int(b.buf[it]) - int(need[it])
 	b.timer = int(D.UNIT_STATS[k].build)
+
+
+## Клетки перед постройкой (со стороны, куда она повёрнута) — туда завод выдаёт продукт.
+func _front_cells(b: Dictionary) -> Array:
+	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var toward: int = nb[int(b.dir) % nb.size()]
+	var c := _foot_center(b.cells)
+	var up := c.normalized()
+	var f := planet.top_pos(toward) - planet.top_pos(b.cell)
+	f = (f - up * f.dot(up)).normalized()
+	var res: Array = []
+	for x in b.outs:
+		var v := planet.top_pos(x) - c
+		if (v - up * v.dot(up)).normalized().dot(f) > 0.55:
+			res.append(x)
+	if res.is_empty():
+		res.append(_bay_cell(b))
+	return res
 
 
 ## Площадка сборки юнита — клетка рядом со сборщиком, со стороны, куда он смотрит.
@@ -3400,6 +3505,11 @@ func _build_space() -> void:
 	local_root.add_child(map_ship_label)
 	sys_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
 	space_root.add_child(sys_ship_label)
+	plan_traj = MeshInstance3D.new()
+	space_root.add_child(plan_traj)
+	plan_label = _marker_label("◎ цель", Color(1.0, 0.75, 0.3))
+	plan_label.visible = false
+	space_root.add_child(plan_label)
 	map_cam = Camera3D.new()
 	map_cam.projection = Camera3D.PROJECTION_ORTHOGONAL
 	map_cam.far = 30000
@@ -3420,16 +3530,20 @@ func _set_orbit_width(w: float) -> void:
 	for j in orbit_ribbons.size():
 		var a: float = D.PLANETS[j].a
 		var verts := PackedVector3Array()
+		var verts2 := PackedVector3Array()   # вертикальная лента: видно, даже если смотришь вдоль плоскости орбит
 		for i in 257:
 			var ang := TAU * i / 256.0
 			var dir := Vector3(cos(ang), 0, sin(ang))
 			verts.append(dir * (a - w / 2.0))
 			verts.append(dir * (a + w / 2.0))
-		var arr := []
-		arr.resize(Mesh.ARRAY_MAX)
-		arr[Mesh.ARRAY_VERTEX] = verts
+			verts2.append(dir * a + Vector3.UP * (w / 2.0))
+			verts2.append(dir * a - Vector3.UP * (w / 2.0))
 		var am := ArrayMesh.new()
-		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
+		for vv in [verts, verts2]:
+			var arr := []
+			arr.resize(Mesh.ARRAY_MAX)
+			arr[Mesh.ARRAY_VERTEX] = vv
+			am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
 		orbit_ribbons[j].mesh = am
 
 
@@ -3721,6 +3835,14 @@ func _vis_add(b: Dictionary) -> void:
 		_anim(n, fire, "burn", 0.3, 6.0, true)
 	else:
 		_vis_shape(n, t, col)
+	if D.RECIPES.has(t):
+		# выход продукта — лоток спереди со стрелкой
+		_box(n, Vector3(0.22, 0.3, 0.5), Vector3(0.74, 0.22, 0), Color(0.25, 0.25, 0.28))
+		var arr := _box(n, Vector3(0.12, 0.05, 0.3), Vector3(0.86, 0.4, 0), Color(1.0, 0.8, 0.2), true)
+		_anim(n, arr, "pulse", 0.3, 2.0, true)
+	if D.UPGRADABLE.has(t):
+		for i in int(b.get("lvl", 1)) - 1:
+			_box(n, Vector3(0.26, 0.07, 0.12), Vector3(-0.6, 0.95 + 0.14 * i, 0.6), Color(1.0, 0.8, 0.2), true)
 	if n.has_meta("bulb"):
 		root.set_meta("bulb", n.get_meta("bulb"))
 		if not bool(b.get("lit", true)):
@@ -3802,6 +3924,13 @@ const LINK_TYPES := [D.CONVEYOR, D.PIPE, D.WALL, D.POWER_POLE, D.SPLITTER, D.JUN
 const BELT_TYPES := [D.CONVEYOR, D.PIPE, D.SPLITTER, D.JUNCTION, D.BRIDGE]
 
 
+## Выдаёт ли постройка o продукт именно в клетку cell (завод — только вперёд).
+func _feeds(o: Dictionary, cell: int, pipe: bool) -> bool:
+	if not _is_producer(o, pipe):
+		return false
+	return not o.has("fouts") or (o.fouts as Array).has(cell)
+
+
 ## Постройка сама выдаёт продукт в соседние клетки (к ней пристыкуется лента).
 func _is_producer(o: Dictionary, pipe: bool) -> bool:
 	var t: int = o.type
@@ -3846,7 +3975,7 @@ func _vis_links(n: Node3D, root: Node3D, b: Dictionary) -> void:
 				feeders.append(x)
 			elif o.type == D.SPLITTER or o.type == D.JUNCTION or o.type == D.BRIDGE:
 				feeders.append(x)
-			elif _is_producer(o, t == D.PIPE):
+			elif _feeds(o, cell, t == D.PIPE):
 				feeders.append(x)
 		# лента заходит внутрь машины, в которую смотрит, — без зазора у стенки
 		var oc := _out_cell(b)
@@ -3958,7 +4087,7 @@ func _vis_logistic(n: Node3D, root: Node3D, b: Dictionary) -> void:
 				continue
 			var o: Dictionary = buildings[grid[_k(pn, x)]]
 			var ot: int = o.type
-			if not BELT_TYPES.has(ot) and not _is_producer(o, false) and not _is_producer(o, true):
+			if not BELT_TYPES.has(ot) and not _feeds(o, cell, false) and not _feeds(o, cell, true):
 				continue
 			var ld := _local_dir(n, cell, x)
 			var inward: bool = (ot == D.CONVEYOR or ot == D.PIPE) and _out_cell(o) == cell
@@ -5040,6 +5169,8 @@ func _update_client(delta: float) -> void:
 			pred_acc = 0.0
 			pred = _predict()
 			_draw_trajectories()
+			plan = _plan()
+			_draw_plan()
 		_update_map_view()
 		_update_compass()
 
@@ -5578,6 +5709,143 @@ func _predict() -> Dictionary:
 	return res
 
 
+# ---------------------------------------------------------------------
+# Помощник перелёта (T — выбрать луну-цель). Считает самый экономный перелёт по Гоману:
+# когда стартовать (окно), сколько Δv, куда жечь. Управляет игрок сам.
+# ---------------------------------------------------------------------
+
+func _cycle_target() -> void:
+	if piloting == null:
+		return
+	var n := D.PLANETS.size()
+	var start := nav_target
+	for i in n + 1:
+		start += 1
+		if start >= n:
+			nav_target = -1
+			break
+		if start != piloting.pn:
+			nav_target = start
+			break
+	plan = _plan()
+	_draw_plan()
+
+
+func _plan() -> Dictionary:
+	var sh := piloting
+	if sh == null or nav_target < 0 or nav_target == sh.pn:
+		return {}
+	var res := {"target": nav_target}
+	if sh.pn < 0:
+		res["space"] = true
+		return res
+	var mu: float = D.GIANT_MU
+	var r1: float = D.PLANETS[sh.pn].a
+	var r2: float = D.PLANETS[nav_target].a
+	var at := (r1 + r2) * 0.5
+	var tt := PI * sqrt(at * at * at / mu)
+	var n1 := sqrt(mu / (r1 * r1 * r1))
+	var n2 := sqrt(mu / (r2 * r2 * r2))
+	var phi_req := wrapf(PI - n2 * tt, -PI, PI)   # на сколько цель должна опережать нас при старте
+	var p1 := SkyCalc.planet_pos(sh.pn, world_time)
+	var p2 := SkyCalc.planet_pos(nav_target, world_time)
+	var phi_now := wrapf(atan2(p2.z, p2.x) - atan2(p1.z, p1.x), -PI, PI)
+	var rel := n2 - n1
+	var wait := fposmod(phi_req - phi_now, TAU) / rel if rel > 0.0 else fposmod(phi_now - phi_req, TAU) / -rel
+	var syn := TAU / absf(rel)
+	if wait > syn - 15.0:
+		wait -= syn   # окно только что было — ещё можно успеть
+	var vinf := sqrt(mu / r1) * (sqrt(2.0 * r2 / (r1 + r2)) - 1.0)   # > 0 — наружу, < 0 — внутрь
+	var vinf2 := absf(sqrt(mu / r2) * (1.0 - sqrt(2.0 * r1 / (r1 + r2))))
+	var rp := maxf(sh.global_position.length(), D.PLANET_R + 5.0)
+	var dv_ej := sqrt(vinf * vinf + 2.0 * D.SHIP_MU / rp) - sqrt(D.SHIP_MU / rp)
+	var dv_land := sqrt(vinf2 * vinf2 + 2.0 * D.SHIP_MU / D.PLANET_R)
+	# куда жечь: по движению луны вокруг гиганта (наружу) или против него (внутрь)
+	var vm := (SkyCalc.frame(sh.pn, world_time) * SkyCalc.planet_vel(sh.pn, world_time)).normalized()
+	var burn := vm if vinf > 0.0 else -vm
+	res["wait"] = wait
+	res["tt"] = tt
+	res["dv_ej"] = dv_ej
+	res["dv_land"] = dv_land
+	res["burn_dir"] = burn
+	res["outward"] = vinf > 0.0
+	res["dep_ang"] = atan2(p1.z, p1.x) + n1 * wait
+	res["r1"] = r1
+	res["r2"] = r2
+	res["arrive"] = SkyCalc.planet_pos(nav_target, world_time + maxf(wait, 0.0) + tt)
+	# когда скорость корабля вокруг луны совпадёт с направлением разгона
+	var v := sh.vel
+	var r := sh.global_position
+	res["align_t"] = -1.0
+	if not sh.landed and v.length() > 1.0:
+		var ang := v.angle_to(burn)
+		var omega := v.length() / r.length()
+		var sgn := v.cross(burn).dot(r.cross(v))
+		res["align_ang"] = rad_to_deg(ang)
+		res["align_t"] = ang / omega if sgn >= 0.0 else (TAU - ang) / omega
+	return res
+
+
+## Эллипс перелёта на карте системы: от нашей луны в момент окна до цели в момент прилёта.
+func _draw_plan() -> void:
+	if plan_traj == null:
+		return
+	if plan.is_empty() or not plan.has("r1"):
+		plan_traj.mesh = null
+		plan_label.visible = false
+		return
+	var r1: float = plan.r1
+	var r2: float = plan.r2
+	var at := (r1 + r2) * 0.5
+	var e := absf(r2 - r1) / (r1 + r2)
+	var pts := PackedVector3Array()
+	var th0: float = plan.dep_ang
+	for i in 97:
+		var nu := PI * i / 96.0
+		if r2 < r1:
+			nu += PI   # внутрь: стартуем из апоцентра
+		var rr := at * (1.0 - e * e) / (1.0 + e * cos(nu))
+		var ang := th0 + (nu if r2 >= r1 else nu - PI)
+		pts.append(Vector3(cos(ang), 0.0, sin(ang)) * rr)
+	var w := maxf(orbit_width, 6.0) * 0.8
+	_strip(plan_traj, pts, -1, Color(1.0, 0.75, 0.3), Color(1.0, 0.75, 0.3), Vector3.UP, w)
+	plan_label.position = plan.arrive + Vector3.UP * D.PLANET_R * 1.6
+	plan_label.text = "◎ " + String(D.PLANETS[nav_target].name) + " при прилёте"
+	plan_label.visible = true
+
+
+## Строки помощника перелёта в панели корабля.
+func _plan_lines() -> PackedStringArray:
+	var out := PackedStringArray()
+	if piloting == null:
+		return out
+	if nav_target < 0:
+		out.append("T — выбрать луну для перелёта")
+		return out
+	out.append("ЦЕЛЬ: %s   (T — сменить)" % D.PLANETS[nav_target].name)
+	var hit := int(pred.get("enc", -1)) == nav_target
+	if plan.is_empty() or plan.has("space"):
+		out.append("Перехват цели: ДА, через %d с" % int(pred.enc_t) if hit else "Перехвата нет — подправь скорость")
+		return out
+	var wait: float = plan.wait
+	if piloting.landed:
+		out.append("Сначала выйди на орбиту (~%d м/с)" % D.DV_LAUNCH)
+	if hit:
+		out.append("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель" % int(pred.enc_t))
+	elif wait < -5.0:
+		out.append("Окно только что прошло (%d с назад) — жги сейчас, чуть сильнее" % int(-wait))
+	elif wait < 8.0:
+		out.append("ОКНО СЕЙЧАС — разгон ~%d м/с %s" % [int(plan.dv_ej), "по движению луны" if plan.outward else "против движения луны"])
+	else:
+		out.append("Окно перелёта через %d с" % int(wait))
+	if float(plan.align_t) >= 0.0 and not hit:
+		out.append("Направление разгона (◆ на навболе): угол %d°, совпадёт через %d с" % [int(plan.get("align_ang", 0.0)), int(plan.align_t)])
+	out.append("Разгон ~%d м/с, в пути ~%d с, посадка у цели ~%d м/с" % [int(plan.dv_ej), int(plan.tt), int(plan.dv_land)])
+	var need: float = float(plan.dv_ej) + float(plan.dv_land) + (float(D.DV_LAUNCH) if piloting.landed else 0.0)
+	out.append("Нужно ~%d м/с, есть %d м/с%s" % [int(need), int(piloting.dv()), "" if piloting.dv() >= need else "  — НЕ ХВАТИТ"])
+	return out
+
+
 func _draw_trajectories() -> void:
 	var r := piloting.global_position
 	var nrm := r.cross(piloting.vel)
@@ -5621,15 +5889,26 @@ func _ribbon_surface(am: ArrayMesh, pts: PackedVector3Array, from: int, to: int,
 		side = side.normalized() * (w / 2.0) if side.length() > 0.000001 else Vector3.ZERO
 		verts.append(pts[i] - side)
 		verts.append(pts[i] + side)
-	var arr := []
-	arr.resize(Mesh.ARRAY_MAX)
-	arr[Mesh.ARRAY_VERTEX] = verts
-	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
+	# вторая лента поперёк первой — траекторию видно с любого угла, а не только сверху
+	var verts2 := PackedVector3Array()
+	for i in range(from, to):
+		var a := pts[maxi(i - 1, from)]
+		var b := pts[mini(i + 1, to - 1)]
+		var side := (b - a).cross(nrm)
+		var up2 := side.cross(b - a)
+		up2 = up2.normalized() * (w / 2.0) if up2.length() > 0.000001 else Vector3.ZERO
+		verts2.append(pts[i] - up2)
+		verts2.append(pts[i] + up2)
 	var m := StandardMaterial3D.new()
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
-	m.albedo_color = col
-	am.surface_set_material(am.get_surface_count() - 1, m)   # с проверкой глубины: за луной и внутри неё не видно
+	m.albedo_color = col   # с проверкой глубины: за луной и внутри неё не видно
+	for vv in [verts, verts2]:
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = vv
+		am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLE_STRIP, arr)
+		am.surface_set_material(am.get_surface_count() - 1, m)
 
 
 ## Камера карты: 1 — вид сверху на орбиту вокруг луны, 2 — вся система сверху.
@@ -5715,6 +5994,8 @@ func _update_compass() -> void:
 		marks.append([-hvec, "anti"])
 	marks.append([up, "out"])
 	marks.append([-up, "in"])
+	if not plan.is_empty() and plan.has("burn_dir") and float(plan.wait) < 40.0:
+		marks.append([plan.burn_dir, "burn"])
 	navball.set_data(nose, right, us, up, north, marks, piloting.sas_mode, piloting.power)
 
 
@@ -6853,6 +7134,12 @@ func _update_hud() -> void:
 				hints.append("E (держать) — выбрать юнита")
 			if _hover_own(D.LAMP):
 				hints.append("E — вкл/выкл лампу,  Shift+E — все свои лампы на луне")
+			if _hover_upgradable():
+				if int(b.lvl) >= D.UPG_MAX:
+					hints.append("Максимальный уровень модернизации")
+				else:
+					hints.append("U — модернизировать до ур. %d (скорость ×%.1f): %s" % [int(b.lvl) + 1,
+						float(D.UPG_SPEED[int(b.lvl)]), _cost_dict_text(_upgrade_cost(b))])
 		else:
 			var dep: int = planet.ore[hover_cell]
 			if planet.level[hover_cell] >= D.MAX_LEVEL:
@@ -6884,7 +7171,7 @@ func _update_hud() -> void:
 ## Карточка постройки под прицелом. info от сервера может опаздывать — тогда только то, что знаем сами.
 func _fill_inspect(b: Dictionary, info: Array) -> void:
 	var t: int = b.type
-	ui.insp_name.text = String(D.NAMES[t])
+	ui.insp_name.text = String(D.NAMES[t]) + (("  · ур. %d" % int(b.lvl)) if D.UPGRADABLE.has(t) else "")
 	var state := ST_IDLE
 	var txt := ""
 	var hp := 1.0
@@ -6979,6 +7266,8 @@ func _update_ship_panel() -> void:
 		lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
 	elif bool(pred.get("impact", false)):
 		lines.append("Траектория пересекает поверхность")
+	lines.append("")
+	lines.append_array(_plan_lines())
 	ui.s_text.text = "\n".join(lines)
 
 
@@ -7112,6 +7401,8 @@ func _unhandled_input(event: InputEvent) -> void:
 					destruct_armed = now + 2.0
 					big_msg.text = "САМОУНИЧТОЖЕНИЕ?\nнажми Backspace ещё раз"
 					get_tree().create_timer(2.0).timeout.connect(_clear_msg)
+			elif kp.keycode == KEY_T:
+				_cycle_target()
 			elif kp.keycode == KEY_M:
 				# в сфере луны: нет -> орбита -> система; в космосе: нет -> система
 				if piloting.pn >= 0:
@@ -7157,6 +7448,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				req_board.rpc_id(1, sid)
 			return
+	# --- U на своём заводе: модернизация ---
+	if kz and kz.keycode == KEY_U and kz.pressed and not kz.echo and _hover_upgradable():
+		if is_server:
+			if _in_reach(1, hover_cell, my_pn):
+				server_upgrade(my_team, hover_cell, my_pn)
+		else:
+			req_upgrade.rpc_id(1, hover_cell)
+		return
 	# --- E на своей лампе: вкл/выкл; Shift+E — все свои лампы на луне (маскировка) ---
 	if kz and kz.keycode == KEY_E and kz.pressed and not kz.echo and e_menu == null and _hover_own(D.LAMP):
 		var all_l := Input.is_key_pressed(KEY_SHIFT)
@@ -7349,6 +7648,13 @@ func _type_info(t: int) -> Array:
 		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.NUCLEAR_POWER), D.POWER_RING]
 	lines.append(extra)
 	return lines
+
+
+func _hover_upgradable() -> bool:
+	if hover_cell == NO_CELL or not grid.has(_k(my_pn, hover_cell)):
+		return false
+	var b: Dictionary = buildings[grid[_k(my_pn, hover_cell)]]
+	return int(b.team) == my_team and D.UPGRADABLE.has(int(b.type))
 
 
 func _hover_own(type: int) -> bool:
