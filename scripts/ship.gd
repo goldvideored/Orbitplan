@@ -59,11 +59,11 @@ func dv() -> float:
 
 ## Гравитационный параметр и радиус тела, вокруг которого летим сейчас.
 func body_mu() -> float:
-	return D.SHIP_MU if pn >= 0 else D.GIANT_MU
+	return D.planet_mu(pn)
 
 
 func body_r() -> float:
-	return D.PLANET_R if pn >= 0 else D.GIANT_R
+	return D.planet_r(pn)
 
 
 func altitude() -> float:

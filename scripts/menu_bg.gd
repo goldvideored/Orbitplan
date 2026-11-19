@@ -209,6 +209,7 @@ func _build_planet() -> void:
 	world.set_process(false)
 	world.set_process_unhandled_input(false)
 	world.planet = planet
+	world.planets = [planet]
 	world.local_root = pnode
 	world.my_pn = 0
 	world.icon_atlas = Icons.build_atlas()

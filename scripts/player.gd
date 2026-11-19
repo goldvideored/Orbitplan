@@ -7,6 +7,7 @@ const SPEED := 6.0
 const SPRINT := 10.0
 const JUMP := 5.0
 const GRAVITY := 6.0     # слабая гравитация: терраса 0.5 м берётся прыжком легко
+var gmul := 1.0          # множитель гравитации текущей планеты
 const SENS := 0.0025
 
 var active := true       # false, когда включена орбитальная камера
@@ -84,7 +85,7 @@ func _physics_process(delta: float) -> void:
 		if want_jump:
 			vr = JUMP
 	else:
-		vr -= GRAVITY * delta
+		vr -= GRAVITY * gmul * delta
 	velocity = dir * spd + up * vr
 	move_and_slide()
 

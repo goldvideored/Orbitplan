@@ -26,6 +26,7 @@ const I_QUARTZ := 4
 const I_LEAD_ORE := 5      # редкое
 const I_URANIUM_ORE := 6   # редкое
 const I_HELIUM_ORE := 7    # редкое: реголит с гелием-3, из него делают топливо
+const I_UNIQUE_ORE := 8    # залежь уникальной материи (малые планеты 1 и 5, редко — на 3-й), берёт только Бур III
 # переработанное — идёт в ядро
 const I_COAL := 10
 const I_COPPER := 11
@@ -36,13 +37,15 @@ const I_URANIUM := 15
 const I_FUEL := 16
 const I_CHIP := 17         # микросхема: кремний + медь на заводе микросхем
 const I_ALLOY := 18        # свинцово-урановый сплав: для построек 3 тира и модернизации до 3 уровня
+const I_UNIQUE := 19       # уникальная материя (Бур III с залежи сразу выдаёт её)
 # жидкость — только по трубам
 const I_WATER := 20
 
 const ITEM_NAMES := {
 	I_COAL_ORE: "Угольная руда", I_COPPER_ORE: "Медная руда", I_IRON_ORE: "Железная руда",
 	I_ICE: "Лёд", I_QUARTZ: "Кварцевый песок", I_LEAD_ORE: "Свинцовая руда",
-	I_URANIUM_ORE: "Урановая руда", I_HELIUM_ORE: "Гелиевый реголит",
+	I_URANIUM_ORE: "Урановая руда", I_HELIUM_ORE: "Гелиевый реголит", I_UNIQUE_ORE: "Залежь материи",
+	I_UNIQUE: "Уникальная материя",
 	I_COAL: "Уголь", I_COPPER: "Медь", I_IRON: "Железо", I_SILICON: "Кремний",
 	I_LEAD: "Свинец", I_URANIUM: "Уран", I_FUEL: "Топливо He-3", I_WATER: "Вода",
 	I_CHIP: "Микросхема", I_ALLOY: "Сплав Pb-U",
@@ -55,10 +58,11 @@ const ITEM_COLORS := {
 	I_COAL: Color(0.2, 0.2, 0.22), I_COPPER: Color(1.0, 0.55, 0.25), I_IRON: Color(0.8, 0.8, 0.85),
 	I_SILICON: Color(0.35, 0.4, 0.55), I_LEAD: Color(0.55, 0.55, 0.75), I_URANIUM: Color(0.45, 1.0, 0.3),
 	I_FUEL: Color(0.9, 0.5, 1.0), I_WATER: Color(0.25, 0.55, 1.0), I_CHIP: Color(0.2, 0.6, 0.3),
-	I_ALLOY: Color(0.38, 0.5, 0.42),
+	I_ALLOY: Color(0.38, 0.5, 0.42), I_UNIQUE_ORE: Color(0.2, 0.75, 0.8), I_UNIQUE: Color(0.4, 1.0, 0.95),
 }
-const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP, I_ALLOY]
-const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE]   # базовый бур не берёт
+const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP, I_ALLOY, I_UNIQUE]
+const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE, I_UNIQUE_ORE]   # базовый бур не берёт
+const ORE_PRODUCT := {I_UNIQUE_ORE: I_UNIQUE}   # что бур выдаёт вместо самой руды
 const RARE_SPEED := 0.2        # скорость добычи редких пород относительно обычных
 const CORE_CAP := 500          # ядро (база) хранит не больше 500 каждого ресурса
 const START_STORAGE := {I_COPPER: 150, I_IRON: 80, I_SILICON: 30}
@@ -312,6 +316,7 @@ const FILTER_GROUPS := [
 	["Топливо", [I_HELIUM_ORE, I_FUEL]],
 	["Лёд", [I_ICE]],
 	["Микросхемы", [I_CHIP, I_ALLOY]],
+	["Материя", [I_UNIQUE]],
 ]
 
 const T_NEUTRAL := 2               # команда нейтральных баз
@@ -456,13 +461,36 @@ const DV_LAND := 30
 const GIANT_MU := 6.0e6            # гравитационный параметр гиганта
 const HOME_PLANET := 1             # на какой планете ядра и старт
 const PLANETS := [
-	{"name": "Kepler-22b", "a": 1700.0, "phase": 0.6},
-	{"name": "Kepler-186f (синие)", "a": 2400.0, "phase": 0.0},
-	{"name": "Kepler-452b", "a": 3300.0, "phase": 2.6},
-	{"name": "Kepler-62f (красные)", "a": 4500.0, "phase": 4.4},
-	{"name": "Kepler-442b", "a": 6000.0, "phase": 1.9},
+# r — радиус, subdiv — детализация сетки (клетка ~2 м), g — гравитация (×), kind: 0 обычная,
+# 1 малая токсичная (зеленоватая, жгучие клетки, уникальная материя), 2 большая (желтоватая, атмосфера, все ресурсы редко);
+# soi — сфера притяжения, м (подобрано, чтобы сферы соседей не перекрывались)
+	{"name": "Kepler-22b", "a": 1700.0, "phase": 0.6, "r": 50.0, "subdiv": 25, "g": 0.5, "kind": 1, "soi": 140.0},
+	{"name": "Kepler-186f (синие)", "a": 2400.0, "phase": 0.0, "r": 84.0, "subdiv": 42, "g": 1.0, "kind": 0, "soi": 331.0},
+	{"name": "Kepler-452b", "a": 3300.0, "phase": 2.6, "r": 168.0, "subdiv": 72, "g": 2.0, "kind": 2, "soi": 550.0},
+	{"name": "Kepler-62f (красные)", "a": 4500.0, "phase": 4.4, "r": 84.0, "subdiv": 42, "g": 1.0, "kind": 0, "soi": 620.0},
+	{"name": "Kepler-442b", "a": 6000.0, "phase": 1.9, "r": 50.0, "subdiv": 25, "g": 0.5, "kind": 1, "soi": 420.0},
 ]
 const SOI_FRAC := 0.138            # сфера влияния = орбита * (μ планеты / μ гиганта)^0.4
+const HAZARD_DMG := 4              # жгучая клетка: урон игроку раз в 0.5 с
+const PLANET_TINT := [Vector3(1, 1, 1), Vector3(0.75, 1.15, 0.7), Vector3(1.3, 1.12, 0.62)]   # оттенок поверхности по kind
+
+
+static func planet_r(pn: int) -> float:
+	if pn < 0:
+		return GIANT_R
+	return float(PLANETS[pn].get("r", PLANET_R))
+
+
+## Гравитационный параметр планеты: g_поверхности × R² (у базовой g = 6 м/с²).
+static func planet_mu(pn: int) -> float:
+	if pn < 0:
+		return GIANT_MU
+	var r := planet_r(pn)
+	return float(PLANETS[pn].get("g", 1.0)) * 6.0 * r * r
+
+
+static func planet_kind(pn: int) -> int:
+	return int(PLANETS[pn].get("kind", 0)) if pn >= 0 else 0
 
 # Типы кораблей (собираются на стартовой площадке). Тяга подобрана так, чтобы на полном баке
 # ускорение было ~7.4 м/с² при g = 6. cargo — мест для юнитов.

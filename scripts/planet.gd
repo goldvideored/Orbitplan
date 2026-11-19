@@ -10,6 +10,10 @@ var nbrs: Array = []               # [PackedInt32Array] соседи, по кр�
 var corners: Array = []            # [PackedVector3Array] углы (единичные), по кругу
 var level := PackedInt32Array()    # высота террасы
 var ore := PackedInt32Array()      # тип залежи (D.I_*) или D.I_NONE
+var radius: float = D.PLANET_R
+var subdiv: int = D.SUBDIV
+var kind := 0                       # 0 обычная, 1 малая токсичная, 2 большая с атмосферой
+var hazard := PackedByteArray()     # жгучие клетки (светятся красным, жгут игрока)
 var core_center := [0, 0, 0]   # центр площадки под базу (по D.CORE_DIRS)
 var spawn_cell := [0, 0, 0]
 
@@ -21,7 +25,11 @@ var _mu := PackedVector2Array()    # UV: пиксельные координат
 var _mu2 := PackedVector2Array()   # UV2: (уровень, вид грани * 16 + руда + 1) — для шейдера
 
 
-func generate(seed_val: int) -> void:
+func generate(seed_val: int, pn: int = D.HOME_PLANET) -> void:
+	var spec: Dictionary = D.PLANETS[pn]
+	radius = float(spec.get("r", D.PLANET_R))
+	subdiv = int(spec.get("subdiv", D.SUBDIV))
+	kind = int(spec.get("kind", 0))
 	_build_geometry()
 	_build_relief(seed_val)
 
@@ -31,7 +39,7 @@ func count() -> int:
 
 
 func top_r(c: int) -> float:
-	return D.PLANET_R + level[c] * D.LEVEL_STEP
+	return radius + level[c] * D.LEVEL_STEP
 
 
 func top_pos(c: int) -> Vector3:
@@ -105,7 +113,7 @@ func _build_geometry() -> void:
 		[3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
 		[4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
 	]
-	var n: int = D.SUBDIV
+	var n: int = subdiv
 	var index := {}
 	var tri := PackedInt32Array()
 	for f in faces:
@@ -182,7 +190,7 @@ func _build_relief(seed_val: int) -> void:
 	hn.frequency = 0.03
 	hn.fractal_octaves = 3
 	for i in cnt:
-		var h := hn.get_noise_3dv(dirs[i] * D.PLANET_R)
+		var h := hn.get_noise_3dv(dirs[i] * radius)
 		# пороги разнесены широко: больше ровных участков, скалы — редкость
 		var lv := 1
 		if h > 0.45:
@@ -229,6 +237,7 @@ func _build_relief(seed_val: int) -> void:
 			_vein(c, heading, starter[i], 6, 0.3, rng)
 
 	# жилы по всей планете: [тип, сколько жил, длина от, длина до, толщина, далеко от баз?]
+	var area := float(cnt) / 17642.0   # число жил — по площади планеты
 	var plan := [
 		[D.I_COPPER_ORE, 26, 8, 18, 0.35, false],
 		[D.I_IRON_ORE, 26, 8, 18, 0.35, false],
@@ -239,19 +248,29 @@ func _build_relief(seed_val: int) -> void:
 		[D.I_URANIUM_ORE, 6, 3, 6, 0.1, true],
 		[D.I_HELIUM_ORE, 6, 3, 6, 0.1, true],
 	]
+	if kind == 1:
+		plan.append([D.I_UNIQUE_ORE, 7, 3, 5, 0.25, true])   # малые: уникальная материя
+	elif kind == 2:
+		# большая: есть все типы, но встречаются редко
+		plan = []
+		for t in [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ, D.I_ICE, D.I_LEAD_ORE,
+				D.I_URANIUM_ORE, D.I_HELIUM_ORE, D.I_UNIQUE_ORE]:
+			plan.append([t, 5, 3, 6, 0.15, true])
+		area = 1.0
 	for row in plan:
 		var placed := 0
 		var tries := 0
-		while placed < int(row[1]) and tries < 400:
+		var want := maxi(1, int(round(float(row[1]) * area)))
+		while placed < want and tries < 600:
 			tries += 1
 			var c := rng.randi_range(0, cnt - 1)
 			if ore[c] != D.I_NONE or level[c] >= D.MAX_LEVEL:
 				continue
 			# у баз чисто; редкие — ещё дальше
-			var min_d := 70.0 if row[5] else 22.0
+			var min_d := (70.0 if row[5] else 22.0) * radius / D.PLANET_R
 			var ok := true
 			for d in D.CORE_DIRS:
-				if dirs[c].angle_to(d) * D.PLANET_R < min_d:
+				if dirs[c].angle_to(d) * radius < min_d:
 					ok = false
 			# лёд чаще ближе к полюсам
 			if row[0] == D.I_ICE and absf(dirs[c].y) < 0.5 and rng.randf() < 0.7:
@@ -262,6 +281,29 @@ func _build_relief(seed_val: int) -> void:
 			var heading := dirs[nb[rng.randi_range(0, nb.size() - 1)]] - dirs[c]
 			_vein(c, heading, row[0], rng.randi_range(row[2], row[3]), row[4], rng)
 			placed += 1
+
+	# малые планеты: жгучие пятна (не у баз)
+	hazard.resize(cnt)
+	hazard.fill(0)
+	if kind == 1:
+		var spots := 0
+		var tries := 0
+		while spots < 18 and tries < 500:
+			tries += 1
+			var c := rng.randi_range(0, cnt - 1)
+			if ore[c] != D.I_NONE or level[c] >= D.MAX_LEVEL:
+				continue
+			var near_base := false
+			for d in D.CORE_DIRS:
+				if dirs[c].angle_to(d) * radius < 18.0:
+					near_base = true
+			if near_base:
+				continue
+			var r := rings(c, rng.randi_range(0, 2))
+			for x in r:
+				if ore[x] == D.I_NONE and level[x] < D.MAX_LEVEL and rng.randf() < 0.8:
+					hazard[x] = 1
+			spots += 1
 
 
 ## Шаг на соседнюю клетку, которая ближе всего к направлению heading.
@@ -326,6 +368,8 @@ func build_mesh() -> Array:
 		var t2 := n.cross(t1)
 		var off := Vector2(float(c % 97), float(c % 89)) * 3.7   # чтобы соседние клетки не повторялись
 		var ore_code: int = ore[c] + 1
+		if hazard.size() > c and hazard[c] == 1:
+			ore_code = 15   # жгучая клетка
 		var top2 := Vector2(level[c], 0 * 16 + ore_code)
 		var rim2 := Vector2(level[c], 1 * 16 + ore_code)
 		var wall2 := Vector2(level[c], 2 * 16)

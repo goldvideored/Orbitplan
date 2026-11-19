@@ -28,6 +28,7 @@ const TERRAIN_SHADER = preload("res://shaders/terrain.gdshader")
 const RINGS_SHADER = preload("res://shaders/rings.gdshader")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const ORBIT_SHADER = preload("res://shaders/orbit.gdshader")
+const ATMO_SHADER = preload("res://shaders/atmo.gdshader")
 const NO_CELL := -1
 # цвета орбит планет на карте (и подписи того же цвета)
 const PLANET_COLORS := [Color(1.0, 0.6, 0.3), Color(0.35, 0.8, 1.0), Color(0.45, 1.0, 0.45),
@@ -52,7 +53,9 @@ const IND_H := {
 var my_team := 0
 var is_server := false
 var headless := false
-var planet: Planet
+var planet: Planet          # планета, на которой сейчас этот клиент (= planets[my_pn])
+var planets: Array = []     # у каждой планеты своя геометрия: размер, рельеф, руды
+var aim_r := 84.0           # сервер: радиус планеты для баллистики текущей турели
 
 # --- общее состояние (есть у всех) ---
 var grid := {}       # ключ _k(pn, клетка) -> id постройки (у каждой планеты своя сетка)
@@ -226,30 +229,33 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 	my_team = team
 	is_server = server
 	headless = dedicated
-	planet = Planet.new()
-	planet.generate(seed_val)
+	for j in D.PLANETS.size():
+		var pl := Planet.new()
+		pl.generate(seed_val + j * 7919, j)
+		planets.append(pl)
 	for cat in D.CATEGORIES:
 		all_slots.append_array(cat[1])
 	all_slots.append(D.WEAPON)
 	if team >= 0:
 		my_pn = D.TEAM_HOME[team]
+	planet = _pl(my_pn)
 	if not headless:
 		_build_scene()
 	if is_server:
 		# главные базы команд — на своих планетах
 		for t in 2:
-			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0,
-				"pn": D.TEAM_HOME[t], "main": true})
+			_add_building({"id": _new_id(), "type": D.CORE, "team": t,
+				"cell": _pl(D.TEAM_HOME[t]).core_center[t], "dir": 0, "pn": D.TEAM_HOME[t], "main": true})
 		# нейтральная база на каждой планете: ядро + готовая оборона
-		var site: int = planet.core_center[D.T_NEUTRAL]
-		var rings_by := {}   # кольцо -> клетки
-		var r := planet.rings(site, 6)
-		for c in r:
-			var dist: int = r[c]
-			if not rings_by.has(dist):
-				rings_by[dist] = []
-			rings_by[dist].append(c)
 		for pn in D.PLANETS.size():
+			var site: int = _pl(pn).core_center[D.T_NEUTRAL]
+			var rings_by := {}   # кольцо -> клетки
+			var r := _pl(pn).rings(site, 6)
+			for c in r:
+				var dist: int = r[c]
+				if not rings_by.has(dist):
+					rings_by[dist] = []
+				rings_by[dist].append(c)
 			_add_building({"id": _new_id(), "type": D.CORE, "team": D.T_NEUTRAL, "cell": site, "dir": 0, "pn": pn})
 			_place_defense(D.TURRET, rings_by[3], D.NEUTRAL_LASERS, pn)
 			_place_defense(D.TURRET2, rings_by[6], D.NEUTRAL_GUNS, pn)
@@ -265,10 +271,10 @@ func _place_defense(type: int, ring: Array, count: int, pn: int) -> void:
 		var start := k * n / count
 		for t in n / count:
 			var cell: int = ring[(start + t) % n]
-			var foot := _footprint(type, cell, 0)
+			var foot := _footprint(type, cell, 0, pn)
 			var ok := foot.size() == _size_of(type)
 			for c in foot:
-				if grid.has(_k(pn, c)) or planet.level[c] >= D.MAX_LEVEL:
+				if grid.has(_k(pn, c)) or _pl(pn).level[c] >= D.MAX_LEVEL:
 					ok = false
 			if ok:
 				_add_building({"id": _new_id(), "type": type, "team": D.T_NEUTRAL, "cell": cell, "dir": 0, "pn": pn})
@@ -280,6 +286,13 @@ func _place_defense(type: int, ring: Array, count: int, pn: int) -> void:
 # =====================================================================
 
 ## Ключ клетки с учётом планеты: все 5 планет — клоны одной сетки, поэтому номер клетки один и тот же.
+## Геометрия планеты pn (-1 — та, где сейчас клиент).
+func _pl(pn: int) -> Planet:
+	if pn < 0 or pn >= planets.size():
+		return planet
+	return planets[pn]
+
+
 func _k(pn: int, cell: int) -> int:
 	return pn * 1048576 + cell
 
@@ -302,8 +315,9 @@ func _size_of(type: int) -> int:
 
 
 ## Клетки, которые займёт постройка: 1 клетка, 3 (треугольник), 9 (ромб 3×3), ядро — 7.
-func _footprint(type: int, cell: int, dir: int) -> Array:
-	var nb: PackedInt32Array = planet.nbrs[cell]
+func _footprint(type: int, cell: int, dir: int, pn := -1) -> Array:
+	var P: Planet = _pl(pn)
+	var nb: PackedInt32Array = P.nbrs[cell]
 	var k := nb.size()
 	if type == D.CORE:
 		var core_cells: Array = [cell]
@@ -313,14 +327,14 @@ func _footprint(type: int, cell: int, dir: int) -> Array:
 	if size == 3:
 		return [cell, nb[posmod(dir, k)], nb[posmod(dir + 1, k)]]
 	if size == 9:
-		var o: Vector3 = planet.dirs[cell]
-		var v1: Vector3 = planet.dirs[nb[posmod(dir, k)]] - o
-		var v2: Vector3 = planet.dirs[nb[posmod(dir + 1, k)]] - o
+		var o: Vector3 = P.dirs[cell]
+		var v1: Vector3 = P.dirs[nb[posmod(dir, k)]] - o
+		var v2: Vector3 = P.dirs[nb[posmod(dir + 1, k)]] - o
 		var rhombus: Array = []
 		for a in [-1.0, 0.0, 1.0]:
 			for bb in [-1.0, 0.0, 1.0]:
 				var p: Vector3 = (o + v1 * float(a) + v2 * float(bb)).normalized()
-				var c := planet.walk(cell, p)
+				var c := P.walk(cell, p)
 				if not rhombus.has(c):
 					rhombus.append(c)
 		return rhombus   # у пятиугольника может выйти меньше 9 — тогда ставить нельзя
@@ -328,10 +342,11 @@ func _footprint(type: int, cell: int, dir: int) -> Array:
 
 
 ## Какую руду добывает бур на этих клетках: [тип, сколько клеток с ней].
-func _drill_ore(cells: Array) -> Array:
+func _drill_ore(cells: Array, pn := -1) -> Array:
+	var P: Planet = _pl(pn)
 	var cnt := {}
 	for c in cells:
-		var o: int = planet.ore[c]
+		var o: int = P.ore[c]
 		if o != D.I_NONE:
 			cnt[o] = int(cnt.get(o, 0)) + 1
 	var best := D.I_NONE
@@ -343,31 +358,33 @@ func _drill_ore(cells: Array) -> Array:
 	return [best, bn]
 
 
-func _foot_center(cells: Array) -> Vector3:
+func _foot_center(cells: Array, pn := -1) -> Vector3:
+	var P: Planet = _pl(pn)
 	var d := Vector3.ZERO
 	var r := 0.0
 	for c in cells:
-		d += planet.dirs[c]
-		r = maxf(r, planet.top_r(c))
+		d += P.dirs[c]
+		r = maxf(r, P.top_r(c))
 	return d.normalized() * r
 
 
-func _arc(a: int, b: int) -> float:
-	return planet.dirs[a].angle_to(planet.dirs[b]) * D.PLANET_R
+func _arc(a: int, b: int, pn := -1) -> float:
+	var P: Planet = _pl(pn)
+	return P.dirs[a].angle_to(P.dirs[b]) * P.radius
 
 
 func _bpos(b: Dictionary) -> Vector3:
-	return planet.top_pos(b.cell)
+	return _pl(int(b.pn)).top_pos(b.cell)
 
 
 func _out_cell(b: Dictionary) -> int:
-	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var nb: PackedInt32Array = _pl(int(b.pn)).nbrs[b.cell]
 	return nb[int(b.dir) % nb.size()]
 
 
 func _upos(u: Dictionary) -> Vector3:
 	var d: Vector3 = u.dir
-	return d * (planet.top_r(u.cell) + 0.3)
+	return d * (_pl(int(u.pn)).top_r(u.cell) + 0.3)
 
 
 ## Ядро команды для возрождения: главное, если ещё наше, иначе любое своё.
@@ -388,15 +405,15 @@ func _spawn_pn(team: int) -> int:
 
 func _spawn_pos(team: int) -> Vector3:
 	var hc = _home_core(team)
-	var c: int = planet.spawn_cell[maxi(team, 0) % 2]
+	var c: int = _pl(_spawn_pn(team)).spawn_cell[maxi(team, 0) % 2]
 	if hc != null:
 		# клетка на втором кольце вокруг ядра
-		var r := planet.rings(int(hc.cell), 2)
+		var r := _pl(_spawn_pn(team)).rings(int(hc.cell), 2)
 		for x in r:
 			if int(r[x]) == 2:
 				c = x
 				break
-	return planet.dirs[c] * (planet.top_r(c) + 1.0)
+	return _pl(_spawn_pn(team)).dirs[c] * (_pl(_spawn_pn(team)).top_r(c) + 1.0)
 
 
 ## Где возродиться: выбранная база (если она ещё наша), иначе ближайшая к месту гибели —
@@ -424,12 +441,12 @@ func _respawn_core(o: Dictionary):
 ## Точка возрождения у ядра — клетка на втором кольце вокруг него.
 func _spawn_near(core: Dictionary) -> Vector3:
 	var c: int = core.cell
-	var r := planet.rings(c, 2)
+	var r := _pl(int(core.pn)).rings(c, 2)
 	for x in r:
 		if int(r[x]) == 2:
 			c = x
 			break
-	return planet.dirs[c] * (planet.top_r(c) + 1.0)
+	return _pl(int(core.pn)).dirs[c] * (_pl(int(core.pn)).top_r(c) + 1.0)
 
 
 ## Цена модернизации до следующего уровня.
@@ -534,25 +551,27 @@ func _cost_text(type: int) -> String:
 
 
 func _can_place(team: int, type: int, cell: int, dir: int, pn: int) -> bool:
-	if team < 0 or finished or cell < 0 or cell >= planet.count():
+	if team < 0 or finished or cell < 0 or cell >= _pl(pn).count():
 		return false
 	if not D.COST.has(type):
 		return false
-	var foot := _footprint(type, cell, dir)
+	var foot := _footprint(type, cell, dir, pn)
 	if foot.size() != _size_of(type):
 		return false
 	for c in foot:
-		if grid.has(_k(pn, c)) or planet.level[c] >= D.MAX_LEVEL:
+		if grid.has(_k(pn, c)) or _pl(pn).level[c] >= D.MAX_LEVEL:
 			return false
 	for b in buildings.values():
-		if b.type == D.CORE and b.pn == pn and b.team != team and _arc(cell, b.cell) < D.ENEMY_ZONE:
+		if b.type == D.CORE and b.pn == pn and b.team != team and _arc(cell, b.cell, pn) < D.ENEMY_ZONE:
 			return false
 	if _is_drill(type):
-		var dep: int = _drill_ore(foot)[0]
+		var dep: int = _drill_ore(foot, pn)[0]
 		if dep == D.I_NONE:
 			return false
 		if type == D.DRILL and D.RARE_ORES.has(dep):
 			return false
+		if dep == D.I_UNIQUE_ORE and type != D.DRILL3:
+			return false   # уникальную материю берёт только Бур III
 	return _can_afford(team, type)
 
 
@@ -576,12 +595,12 @@ func _add_building(d: Dictionary) -> void:
 		"bt": float(d.get("bt", 1.0)), "decon": bool(d.get("decon", false)), "by": int(d.get("by", 0)),
 		"refund_full": false,
 	}
-	var cells := _footprint(b.type, b.cell, b.dir)
+	var cells := _footprint(b.type, b.cell, b.dir, b.pn)
 	b["cells"] = cells
 	# соседние клетки снаружи контура — сюда машина отдаёт продукт
 	var outs: Array = []
 	for c in cells:
-		var nb: PackedInt32Array = planet.nbrs[c]
+		var nb: PackedInt32Array = _pl(b.pn).nbrs[c]
 		for x in nb:
 			if not cells.has(x) and not outs.has(x):
 				outs.append(x)
@@ -589,7 +608,7 @@ func _add_building(d: Dictionary) -> void:
 	if D.RECIPES.has(b.type):
 		b["fouts"] = _front_cells(b)   # завод отдаёт продукт только вперёд
 	if _is_drill(b.type):
-		var info := _drill_ore(cells)
+		var info := _drill_ore(cells, b.pn)
 		b["ore"] = info[0]
 		b["ore_n"] = info[1]
 	buildings[b.id] = b
@@ -649,13 +668,13 @@ func _in_reach(peer: int, cell: int, pn: int) -> bool:
 	var pl: Dictionary = players[peer]
 	if int(pl.get("pn", -1)) != pn or pl.hp <= 0:
 		return false
-	return Vector3(pl.pos).distance_to(planet.top_pos(cell)) <= D.BUILD_REACH + 4.0
+	return Vector3(pl.pos).distance_to(_pl(pn).top_pos(cell)) <= D.BUILD_REACH + 4.0
 
 
 func server_place(team: int, type: int, cell: int, dir: int, pn: int, peer := 0) -> void:
 	if not D.COST.has(type) or type == D.CORE:
 		return
-	var nb0: PackedInt32Array = planet.nbrs[cell]
+	var nb0: PackedInt32Array = _pl(pn).nbrs[cell]
 	dir = posmod(dir, nb0.size())
 	if not _can_place(team, type, cell, dir, pn):
 		return
@@ -664,7 +683,7 @@ func server_place(team: int, type: int, cell: int, dir: int, pn: int, peer := 0)
 		var cost: Dictionary = D.COST[type]
 		for it in cost:
 			st[it] = int(st.get(it, 0)) - int(cost[it])
-	var nb: PackedInt32Array = planet.nbrs[cell]
+	var nb: PackedInt32Array = _pl(pn).nbrs[cell]
 	var d := {"id": _new_id(), "type": type, "team": team, "cell": cell, "dir": posmod(dir, nb.size()), "pn": pn,
 		"bt": 0.0, "by": peer}
 	_add_building(d)
@@ -1485,7 +1504,7 @@ func _rebuild_power() -> void:
 			continue
 		var covered := {}
 		for c in b.cells:
-			var r := planet.rings(c, ring)
+			var r := _pl(int(b.pn)).rings(c, ring)
 			for x in r:
 				covered[x] = true
 		for x in covered:
@@ -1537,7 +1556,7 @@ func _sim_tick() -> void:
 		if t == D.SOLAR:
 			if not skies.has(b.pn):
 				skies[b.pn] = SkyCalc.state(world_time, b.pn)
-			var lvl := SkyCalc.level_at(planet.dirs[b.cell], skies[b.pn])
+			var lvl := SkyCalc.level_at(_pl(int(b.pn)).dirs[b.cell], skies[b.pn])
 			out = D.SOLAR_POWER * float(lvl) / float(D.LIGHT_LEVELS)
 		elif t == D.COAL_PLANT:
 			if b.burn <= 0 and _buf_take(b, D.I_COAL, 1):
@@ -1615,6 +1634,7 @@ func _sim_tick() -> void:
 		if _busy(b):
 			_build_tick(b)
 			continue
+		aim_r = _pl(int(b.pn)).radius
 		var t: int = b.type
 		var r := 1.0
 		if D.POWER_USE.has(t):
@@ -1697,7 +1717,7 @@ func _cost_dict_text(cost: Dictionary) -> String:
 
 ## Где стоит корабль на площадке: центр контура, поверх основания.
 func _pad_spot(b: Dictionary) -> Vector3:
-	var c := _foot_center(b.cells)
+	var c := _foot_center(b.cells, int(b.pn))
 	return c + c.normalized() * 0.5
 
 
@@ -1780,9 +1800,9 @@ func server_ship_unload(peer: int, id: int) -> void:
 	var sh: Dictionary = ships[id]
 	if sh.cargo.is_empty():
 		return
-	var c0 := planet.nearest_cell(Vector3(sh.pos).normalized())
+	var c0 := _pl(int(sh.pn)).nearest_cell(Vector3(sh.pos).normalized())
 	var around: Array = []
-	var r := planet.rings(c0, 3)
+	var r := _pl(int(sh.pn)).rings(c0, 3)
 	for x in r:
 		if int(r[x]) >= 2:
 			around.append(x)
@@ -1875,7 +1895,7 @@ func _unloader_tick(b: Dictionary) -> void:
 
 
 func _spawn_rover(home: Dictionary) -> void:
-	var d: Vector3 = planet.dirs[home.cell]
+	var d: Vector3 = _pl(int(home.pn)).dirs[home.cell]
 	rovers.append({"id": next_rover_id, "team": home.team, "home": home.id, "dir": d, "pn": home.pn,
 		"cell": home.cell, "fwd": _up_basis(d).x, "state": 0, "hp": D.ROVER_HP,
 		"kind": 1 if home.type == D.FUEL_DEPOT else 0,   # 0 — курьер, 1 — заправщик
@@ -1885,7 +1905,7 @@ func _spawn_rover(home: Dictionary) -> void:
 
 func _rpos(r: Dictionary) -> Vector3:
 	var d: Vector3 = r.dir
-	return d * planet.top_r(r.cell)
+	return d * _pl(int(r.pn)).top_r(r.cell)
 
 
 ## Куда можно отвезти item: точка выгрузки с этим фильтром, а топливо — ещё и стартовая площадка.
@@ -1942,8 +1962,8 @@ func _rover_move(r: Dictionary, target: Vector3) -> bool:
 	if tangent.length() > 0.00001:
 		var step: float = minf(D.ROVER_SPEED, dist - D.ROVER_REACH + 0.01)
 		r.fwd = tangent.normalized()
-		r.dir = (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
-		r.cell = planet.walk(r.cell, r.dir)
+		r.dir = (ud + tangent.normalized() * (step / _pl(int(r.pn)).radius)).normalized()
+		r.cell = _pl(int(r.pn)).walk(r.cell, r.dir)
 	return false
 
 
@@ -2233,7 +2253,7 @@ func _update_couriers() -> void:
 			if model.visible:
 				var up: Vector3 = planet.dirs[at_cell]
 				model.transform = Transform3D(_up_basis(up).scaled(Vector3.ONE * 0.8), planet.top_pos(at_cell) + up * 0.55)
-			lbl.position = SkyCalc.planet_pos(at_pn, world_time) + Vector3.UP * D.PLANET_R * 2.0
+			lbl.position = SkyCalc.planet_pos(at_pn, world_time) + Vector3.UP * D.planet_r(at_pn) * 2.0
 			continue
 		var fpn: int = e[4]
 		var tpn: int = e[5]
@@ -2263,7 +2283,7 @@ func _update_couriers() -> void:
 		var a0 := atan2(pf.z, pf.x)
 		var da := fposmod(atan2(pt.z, pt.x) - a0, TAU)
 		var rr := lerpf(pf.length(), pt.length(), s)
-		lbl.position = Vector3(cos(a0 + da * s), 0.0, sin(a0 + da * s)) * rr + Vector3.UP * D.PLANET_R
+		lbl.position = Vector3(cos(a0 + da * s), 0.0, sin(a0 + da * s)) * rr + Vector3.UP * 80.0
 	for team in courier_nodes.keys():
 		if not seen.has(team):
 			for nd in courier_nodes[team]:
@@ -2326,7 +2346,7 @@ func _drill_tick(b: Dictionary, r: float) -> void:
 	var ore: int = b.ore
 	if b.blocked:
 		# выход забит — пробуем выгрузить готовую руду
-		if _output(b, ore):
+		if _output(b, int(D.ORE_PRODUCT.get(ore, ore))):
 			b.blocked = false
 			b.prog = 0.0
 		return
@@ -2343,7 +2363,7 @@ func _drill_tick(b: Dictionary, r: float) -> void:
 			if b.wuse >= D.DRILL3_WATER_PER:
 				b.wuse = 0
 				b.water -= 1
-		if _output(b, ore):
+		if _output(b, int(D.ORE_PRODUCT.get(ore, ore))):
 			b.prog = 0.0
 		else:
 			b.blocked = true
@@ -2583,7 +2603,7 @@ func _hit_target(tgt: Dictionary, dmg: int) -> void:
 
 ## Откуда стреляет турель (над центром её контура).
 func _muzzle(b: Dictionary, h: float) -> Vector3:
-	var c := _foot_center(b.cells)
+	var c := _foot_center(b.cells, int(b.pn))
 	return c + c.normalized() * h
 
 
@@ -2659,7 +2679,7 @@ func _logistic_tick(b: Dictionary) -> void:
 	var t: int = b.type
 	if t == D.SPLITTER:
 		# по кругу во все соседние клетки, кроме той постройки, откуда пришло
-		var nb: PackedInt32Array = planet.nbrs[b.cell]
+		var nb: PackedInt32Array = _pl(int(b.pn)).nbrs[b.cell]
 		var k := nb.size()
 		for i in k:
 			var idx: int = (b.rr + i) % k
@@ -2686,10 +2706,10 @@ func _logistic_tick(b: Dictionary) -> void:
 
 ## Следующий свой мост по направлению моста (до BRIDGE_RANGE клеток).
 func _bridge_target(b: Dictionary):
-	var heading: Vector3 = planet.dirs[_out_cell(b)] - planet.dirs[b.cell]
+	var heading: Vector3 = _pl(int(b.pn)).dirs[_out_cell(b)] - _pl(int(b.pn)).dirs[b.cell]
 	var c: int = b.cell
 	for i in D.BRIDGE_RANGE:
-		c = planet._step(c, heading)
+		c = _pl(int(b.pn))._step(c, heading)
 		var id := int(grid.get(_k(b.pn, c), -1))
 		if id != -1 and id != b.id:
 			var o: Dictionary = buildings[id]
@@ -2700,7 +2720,7 @@ func _bridge_target(b: Dictionary):
 
 ## Перекрёсток: куда выпустить груз — в клетку напротив той, откуда он пришёл.
 func _junction_out(o: Dictionary, src_id: int, pn: int) -> int:
-	var nb: PackedInt32Array = planet.nbrs[o.cell]
+	var nb: PackedInt32Array = _pl(pn).nbrs[o.cell]
 	var k := nb.size()
 	for d in k:
 		if int(grid.get(_k(pn, nb[d]), -1)) == src_id:
@@ -2955,14 +2975,14 @@ func _miss(from: Vector3, h: Vector3, up: Vector3, th: float, speed: float, targ
 			best = d
 		elif early and d > best + 5.0:
 			break   # уже удаляемся
-		if p.length() < D.PLANET_R - 1.0:
+		if p.length() < aim_r - 1.0:
 			break   # ушёл под землю
 	return best
 
 
 func _spawn_proj(from: Vector3, vel: Vector3, team: int, kind: int, dmg: int, ttl: float, cell: int, pn: int) -> void:
 	projectiles.append({"pos": from, "vel": vel, "team": team, "kind": kind, "dmg": dmg,
-		"ttl": ttl, "cell": planet.walk(cell, from.normalized()), "pn": pn})
+		"ttl": ttl, "cell": _pl(pn).walk(cell, from.normalized()), "pn": pn})
 
 
 ## Полёт снарядов: несколько шагов физики за тик, пули бьют при касании, снаряды взрываются о землю.
@@ -2985,8 +3005,8 @@ func _proj_tick() -> void:
 				_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
 				alive = false
 				break
-			pr.cell = planet.walk(pr.cell, b.normalized())
-			if b.length() < planet.top_r(pr.cell):
+			pr.cell = _pl(int(pr.pn)).walk(pr.cell, b.normalized())
+			if b.length() < _pl(int(pr.pn)).top_r(pr.cell):
 				if pr.kind >= 3:
 					_explode_flak(b, pr.team, pr.kind == 4, pr.pn)
 				elif pr.kind != 0:
@@ -3108,15 +3128,15 @@ func _assembler_tick(b: Dictionary) -> void:
 
 ## Клетки перед постройкой (со стороны, куда она повёрнута) — туда завод выдаёт продукт.
 func _front_cells(b: Dictionary) -> Array:
-	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var nb: PackedInt32Array = _pl(int(b.pn)).nbrs[b.cell]
 	var toward: int = nb[int(b.dir) % nb.size()]
-	var c := _foot_center(b.cells)
+	var c := _foot_center(b.cells, int(b.pn))
 	var up := c.normalized()
-	var f := planet.top_pos(toward) - planet.top_pos(b.cell)
+	var f := _pl(int(b.pn)).top_pos(toward) - _pl(int(b.pn)).top_pos(b.cell)
 	f = (f - up * f.dot(up)).normalized()
 	var res: Array = []
 	for x in b.outs:
-		var v := planet.top_pos(x) - c
+		var v := _pl(int(b.pn)).top_pos(x) - c
 		if (v - up * v.dot(up)).normalized().dot(f) > 0.55:
 			res.append(x)
 	if res.is_empty():
@@ -3126,16 +3146,16 @@ func _front_cells(b: Dictionary) -> Array:
 
 ## Площадка сборки юнита — клетка рядом со сборщиком, со стороны, куда он смотрит.
 func _bay_cell(b: Dictionary) -> int:
-	var nb: PackedInt32Array = planet.nbrs[b.cell]
+	var nb: PackedInt32Array = _pl(int(b.pn)).nbrs[b.cell]
 	var toward: int = nb[int(b.dir) % nb.size()]
-	var c := _foot_center(b.cells)
+	var c := _foot_center(b.cells, int(b.pn))
 	var up := c.normalized()
-	var f := planet.top_pos(toward) - planet.top_pos(b.cell)
+	var f := _pl(int(b.pn)).top_pos(toward) - _pl(int(b.pn)).top_pos(b.cell)
 	f = (f - up * f.dot(up)).normalized()
 	var best: int = b.cell
 	var best_d := -INF
 	for x in b.outs:
-		var v := planet.top_pos(x) - c
+		var v := _pl(int(b.pn)).top_pos(x) - c
 		var d := (v - up * v.dot(up)).normalized().dot(f)
 		if d > best_d:
 			best_d = d
@@ -3144,13 +3164,13 @@ func _bay_cell(b: Dictionary) -> int:
 
 
 func _spawn_unit(team: int, cell: int, pn: int, kind := 0, hp := -1) -> void:
-	var d: Vector3 = planet.dirs[cell]
+	var d: Vector3 = _pl(pn).dirs[cell]
 	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * 0.01
 	d = (d + jitter).normalized()
 	var full: int = D.UNIT_STATS[kind].hp
 	units.append({"id": next_unit_id, "team": team, "dir": d, "cell": cell, "hp": hp if hp > 0 else full,
 		"cd": 0, "poison": 0, "pn": pn, "kind": kind, "mode": D.MODE_GUARD,
-		"guard": d * planet.top_r(cell)})
+		"guard": d * _pl(pn).top_r(cell)})
 	next_unit_id += 1
 
 
@@ -3164,6 +3184,16 @@ func _players_tick() -> void:
 			if int(o.get("poison", 0)) > 0:
 				o.poison -= 1
 				_damage_player(pid, D.POISON_DMG)
+			# жгучие клетки малых планет
+			var opn: int = int(o.get("pn", -1))
+			if opn >= 0 and int(o.get("held", 0)) != IN_SHIP:
+				var P: Planet = _pl(opn)
+				var oc: int = P.walk(int(o.get("cell", -1)), Vector3(o.pos).normalized())
+				o["cell"] = oc
+				o["hz"] = int(o.get("hz", 0)) + 1
+				if P.hazard.size() > oc and P.hazard[oc] == 1 and int(o.hz) % 5 == 0 \
+						and Vector3(o.pos).length() < P.top_r(oc) + 1.2:
+					_damage_player(pid, D.HAZARD_DMG)
 			continue
 		o.dead_t -= 1
 		if o.dead_t <= 0:
@@ -3298,8 +3328,8 @@ func _unit_step(u: Dictionary, tpos: Vector3, speed: float, reach: float) -> voi
 	if tangent.length() > 0.00001:
 		var step: float = minf(speed, dist - reach + 0.01)
 		if step > 0.0:
-			var nd := (ud + tangent.normalized() * (step / D.PLANET_R)).normalized()
-			var nc := planet.walk(u.cell, nd)
+			var nd := (ud + tangent.normalized() * (step / _pl(int(u.pn)).radius)).normalized()
+			var nc := _pl(int(u.pn)).walk(u.cell, nd)
 			if u.kind != D.U_DRONE and nc != u.cell:
 				var wid := int(grid.get(_k(u.pn, nc), -1))
 				if wid != -1 and buildings[wid].type == D.WALL and buildings[wid].team != u.team:
@@ -3487,8 +3517,8 @@ func _snap_data(pn: int) -> Dictionary:
 			continue
 		if (b.type == D.CONVEYOR or b.type == D.PIPE or b.type == D.SORTER) and b.item != D.I_NONE:
 			var a := _bpos(b)
-			var nxt := planet.top_pos(_out_cell(b))
-			var up: Vector3 = planet.dirs[b.cell]
+			var nxt := _pl(pn).top_pos(_out_cell(b))
+			var up: Vector3 = _pl(pn).dirs[b.cell]
 			it.append(a + (nxt - a) * (float(b.prog) - 0.5) + up * 0.3)
 			itt.append(b.item)
 		if b.has("aim"):
@@ -3636,22 +3666,8 @@ func _build_scene() -> void:
 	add_child(we)
 	# ламп нет: весь свет считает шейдер lit16 по положению солнца и гиганта
 
-	# поверхность планеты: меш + коллизия
-	var built: Array = planet.build_mesh()
-	var terrain := MeshInstance3D.new()
-	terrain.mesh = built[0]
-	var tmat := ShaderMaterial.new()
-	tmat.shader = TERRAIN_SHADER
-	terrain.material_override = tmat
-	local_root.add_child(terrain)
-	terrain_body = StaticBody3D.new()
-	var tcol := CollisionShape3D.new()
-	var tshape := ConcavePolygonShape3D.new()
-	tshape.backface_collision = true
-	tshape.set_faces(built[1])
-	tcol.shape = tshape
-	terrain_body.add_child(tcol)
-	local_root.add_child(terrain_body)
+	# поверхность планеты: меш + коллизия (своя у каждой планеты, пересобирается при перелёте)
+	_build_terrain()
 
 	# газовый гигант, вокруг которого мы крутимся, и звёзды
 	giant_node = MeshInstance3D.new()
@@ -3885,6 +3901,7 @@ func _build_scene() -> void:
 	# персонаж
 	if my_team >= 0:
 		player = Player.new()
+		player.gmul = float(D.PLANETS[my_pn].get("g", 1.0))
 		add_child(player)
 		player.teleport(_spawn_pos(my_team))
 		_build_viewmodel()
@@ -3895,16 +3912,103 @@ func _build_scene() -> void:
 
 
 ## Обычные поверхности — шейдер с 16 уровнями света. Светящиеся (glow) — сами светятся в темноте.
+var terrain_node: Node3D = null
+var terrain_cache := {}   # планета -> [меш, треугольники коллизии]
+
+
+## Поверхность текущей планеты: меш с оттенком, коллизия, у малых — красные искры над жгучими клетками,
+## у большой — атмосфера.
+func _build_terrain() -> void:
+	if terrain_node != null:
+		terrain_node.queue_free()
+	terrain_node = Node3D.new()
+	local_root.add_child(terrain_node)
+	if not terrain_cache.has(my_pn):
+		terrain_cache[my_pn] = planet.build_mesh()
+	var built: Array = terrain_cache[my_pn]
+	var terrain := MeshInstance3D.new()
+	terrain.mesh = built[0]
+	var tmat := ShaderMaterial.new()
+	tmat.shader = TERRAIN_SHADER
+	tmat.set_shader_parameter("tint", D.PLANET_TINT[planet.kind])
+	terrain.material_override = tmat
+	terrain_node.add_child(terrain)
+	terrain_body = StaticBody3D.new()
+	var tcol := CollisionShape3D.new()
+	var tshape := ConcavePolygonShape3D.new()
+	tshape.backface_collision = true
+	tshape.set_faces(built[1])
+	tcol.shape = tshape
+	terrain_body.add_child(tcol)
+	terrain_node.add_child(terrain_body)
+	if planet.kind == 2:
+		terrain_node.add_child(_atmo_shell(planet.radius))
+	if planet.kind == 1:
+		var pts := PackedVector3Array()
+		var nrm := PackedVector3Array()
+		for c in planet.count():
+			if planet.hazard[c] == 1:
+				pts.append(planet.top_pos(c) + planet.dirs[c] * 0.1)
+				nrm.append(planet.dirs[c])
+		if not pts.is_empty():
+			var ps := CPUParticles3D.new()
+			ps.amount = mini(500, pts.size() * 3)
+			ps.lifetime = 2.2
+			ps.emission_shape = CPUParticles3D.EMISSION_SHAPE_DIRECTED_POINTS
+			ps.emission_points = pts
+			ps.emission_normals = nrm
+			ps.direction = Vector3(1, 0, 0)
+			ps.spread = 25.0
+			ps.gravity = Vector3.ZERO
+			ps.initial_velocity_min = 0.6
+			ps.initial_velocity_max = 1.8
+			ps.scale_amount_min = 0.6
+			ps.scale_amount_max = 1.2
+			var grad := Gradient.new()
+			grad.set_color(0, Color(1.0, 0.35, 0.15, 1.0))
+			grad.set_color(1, Color(0.8, 0.05, 0.02, 0.0))
+			ps.color_ramp = grad
+			var qm := QuadMesh.new()
+			qm.size = Vector2(0.16, 0.16)
+			var pm := StandardMaterial3D.new()
+			pm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			pm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+			pm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			pm.vertex_color_use_as_albedo = true
+			pm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+			qm.material = pm
+			ps.mesh = qm
+			ps.visibility_aabb = AABB(Vector3.ONE * -planet.radius * 1.5, Vector3.ONE * planet.radius * 3.0)
+			terrain_node.add_child(ps)
+
+
+func _atmo_shell(r: float) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var sp := SphereMesh.new()
+	sp.radius = r * 1.14
+	sp.height = r * 2.28
+	sp.radial_segments = 64
+	sp.rings = 32
+	mi.mesh = sp
+	var m := ShaderMaterial.new()
+	m.shader = ATMO_SHADER
+	mi.material_override = m
+	return mi
+
+
 ## Планеты в небе, вид звёздной системы (гигант, планеты, орбиты, сферы влияния), карта.
 func _build_space() -> void:
-	var moon_mat := ShaderMaterial.new()
-	moon_mat.shader = MOON_SHADER
 	for j in D.PLANETS.size():
+		var moon_mat := ShaderMaterial.new()
+		moon_mat.shader = MOON_SHADER
+		var tv: Vector3 = D.PLANET_TINT[D.planet_kind(j)]
+		moon_mat.set_shader_parameter("albedo", Color(0.55 * tv.x, 0.53 * tv.y, 0.58 * tv.z))
+		var rj := D.planet_r(j)
 		# планета в небе над текущей
 		var sm := MeshInstance3D.new()
 		var sp := SphereMesh.new()
-		sp.radius = D.PLANET_R
-		sp.height = D.PLANET_R * 2.0
+		sp.radius = rj
+		sp.height = rj * 2.0
 		sp.radial_segments = 32
 		sp.rings = 16
 		sm.mesh = sp
@@ -3926,11 +4030,14 @@ func _build_space() -> void:
 		lbl.font_size = 22
 		lbl.outline_size = 6
 		lbl.no_depth_test = true
-		lbl.position = Vector3(0, D.PLANET_R * 1.6, 0)
+		lbl.position = Vector3(0, rj * 1.6, 0)
 		node.add_child(lbl)
 		node.add_child(_circle_mesh(SkyCalc.soi(j), Color(0.5, 0.7, 1.0, 0.5)))
 		var warn := _marker_label("⚠ тревога", Color(1.0, 0.3, 0.2))
-		warn.position = Vector3(0, -D.PLANET_R * 1.6, 0)
+		warn.position = Vector3(0, -rj * 1.6, 0)
+		if D.planet_kind(j) == 2:
+			node.add_child(_atmo_shell(rj))
+			sm.add_child(_atmo_shell(rj))
 		node.add_child(warn)
 		alert_labels.append(warn)
 		space_root.add_child(node)
@@ -4396,7 +4503,7 @@ func _vis_add(b: Dictionary) -> void:
 	var toward: int = nb[int(b.dir) % nb.size()]
 	if multi:
 		# декор — в центре контура, поверх основания, крупнее
-		var center := _foot_center(cells)
+		var center := _foot_center(cells, int(b.pn))
 		var up := center.normalized()
 		var f := planet.top_pos(toward) - planet.top_pos(b.cell)
 		f = (f - up * f.dot(up)).normalized()
@@ -5044,7 +5151,7 @@ func _update_assembly() -> void:
 		if holder == null:
 			var bay := _bay_cell(b)
 			var up: Vector3 = planet.dirs[bay]
-			var away := planet.top_pos(bay) - _foot_center(b.cells)
+			var away := planet.top_pos(bay) - _foot_center(b.cells, int(b.pn))
 			away = (away - up * away.dot(up)).normalized()
 			holder = Node3D.new()
 			holder.transform = Transform3D(Basis(up.cross(-away), up, -away).orthonormalized(), planet.top_pos(bay))
@@ -5682,7 +5789,7 @@ func _update_orbit_cam() -> void:
 
 func _update_client(delta: float) -> void:
 	if not fps_mode:
-		var sp := delta * 0.6 * ((orbit_dist - D.PLANET_R) / 150.0)
+		var sp := delta * 0.6 * ((orbit_dist - planet.radius) / 150.0)
 		if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
 			orbit_pitch += sp
 		if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
@@ -5695,7 +5802,7 @@ func _update_client(delta: float) -> void:
 
 	if player:
 		# провалился сквозь землю — вернуть на поверхность
-		if player.global_position.length() < D.PLANET_R - 2.0:
+		if player.global_position.length() < planet.radius - 2.0:
 			player.teleport(_spawn_pos(my_team))
 		send_acc += delta
 		if send_acc >= 0.05:
@@ -5818,7 +5925,7 @@ func _update_sky() -> void:
 			if j < orbit_ribbons.size():
 				var om: ShaderMaterial = orbit_ribbons[j].material_override
 				om.set_shader_parameter("hole", space_moons[j].global_position)
-				om.set_shader_parameter("hole_r", D.PLANET_R * 1.6 + orbit_width)
+				om.set_shader_parameter("hole_r", D.planet_r(j) * 1.6 + orbit_width)
 			alert_labels[j].visible = float(alert_marks.get(j, 0.0)) > now
 		return
 	var st := SkyCalc.state(world_time, my_pn)
@@ -6217,7 +6324,7 @@ func _predict() -> Dictionary:
 	for step in 900:
 		if cur >= 0:
 			var rl := r.length()
-			if rl < D.PLANET_R:
+			if rl < D.planet_r(cur):
 				res.impact = true
 				break
 			if rl > SkyCalc.soi(cur):
@@ -6229,7 +6336,7 @@ func _predict() -> Dictionary:
 				cur = -1
 				continue
 			var dt := 0.25
-			v -= r.normalized() * (D.SHIP_MU / (rl * rl)) * dt
+			v -= r.normalized() * (D.planet_mu(cur) / (rl * rl)) * dt
 			r += v * dt
 			t += dt
 			if cur == start_pn and int(res.enc) == -1:
@@ -6320,9 +6427,10 @@ func _plan() -> Dictionary:
 		wait -= syn   # окно только что было — ещё можно успеть
 	var vinf := sqrt(mu / r1) * (sqrt(2.0 * r2 / (r1 + r2)) - 1.0)   # > 0 — наружу, < 0 — внутрь
 	var vinf2 := absf(sqrt(mu / r2) * (1.0 - sqrt(2.0 * r1 / (r1 + r2))))
-	var rp := maxf(sh.global_position.length(), D.PLANET_R + 5.0)
-	var dv_ej := sqrt(vinf * vinf + 2.0 * D.SHIP_MU / rp) - sqrt(D.SHIP_MU / rp)
-	var dv_land := sqrt(vinf2 * vinf2 + 2.0 * D.SHIP_MU / D.PLANET_R)
+	var mu1 := D.planet_mu(sh.pn)
+	var rp := maxf(sh.global_position.length(), D.planet_r(sh.pn) + 5.0)
+	var dv_ej := sqrt(vinf * vinf + 2.0 * mu1 / rp) - sqrt(mu1 / rp)
+	var dv_land := sqrt(vinf2 * vinf2 + 2.0 * D.planet_mu(nav_target) / D.planet_r(nav_target))
 	# куда жечь: по движению планеты вокруг гиганта (наружу) или против него (внутрь)
 	var vm := (SkyCalc.frame(sh.pn, world_time) * SkyCalc.planet_vel(sh.pn, world_time)).normalized()
 	var burn := vm if vinf > 0.0 else -vm
@@ -6372,7 +6480,7 @@ func _draw_plan() -> void:
 		pts.append(Vector3(cos(ang), 0.0, sin(ang)) * rr)
 	var w := maxf(orbit_width, 6.0) * 0.8
 	_strip(plan_traj, pts, -1, Color(1.0, 0.75, 0.3), Color(1.0, 0.75, 0.3), Vector3.UP, w)
-	plan_label.position = plan.arrive + Vector3.UP * D.PLANET_R * 1.6
+	plan_label.position = plan.arrive + Vector3.UP * D.planet_r(nav_target) * 1.6
 	plan_label.text = "◎ " + String(D.PLANETS[nav_target].name) + " при прилёте"
 	plan_label.visible = true
 
@@ -6567,6 +6675,10 @@ func _switch_planet(pn: int) -> void:
 	if pn == my_pn or pn < 0:
 		return
 	my_pn = pn
+	planet = _pl(pn)
+	_build_terrain()
+	if player:
+		player.gmul = float(D.PLANETS[pn].get("g", 1.0))
 	for id in bnodes.keys():
 		bnodes[id].queue_free()
 	bnodes.clear()
@@ -6943,7 +7055,7 @@ func _update_lights() -> void:
 				var up: Vector3 = planet.dirs[b.cell]
 				lamps.append(planet.top_pos(b.cell) + up * 2.2)
 		elif not BELT_TYPES.has(t) and t != D.WALL and t != D.POWER_POLE:
-			var c := _foot_center(b.cells)
+			var c := _foot_center(b.cells, int(b.pn))
 			glows.append([c.distance_squared_to(cam_p), c + c.normalized() * 1.0, b.cells.size()])
 	glows.sort_custom(func(x, y): return x[0] < y[0])
 	var n := 0
@@ -8179,12 +8291,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			if fps_mode:
 				_cycle_slot(-1)
 			else:
-				orbit_dist = maxf(D.PLANET_R + 10.0, orbit_dist - (orbit_dist - D.PLANET_R) * 0.12)
+				orbit_dist = maxf(planet.radius + 10.0, orbit_dist - (orbit_dist - planet.radius) * 0.12)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			if fps_mode:
 				_cycle_slot(1)
 			else:
-				orbit_dist = minf(800.0, orbit_dist + (orbit_dist - D.PLANET_R) * 0.12 + 1.0)
+				orbit_dist = minf(800.0 * planet.radius / D.PLANET_R, orbit_dist + (orbit_dist - planet.radius) * 0.12 + 1.0)
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			# вид сверху: Ctrl + рамка — выделить юнитов
 			if not fps_mode and mb.pressed and Input.is_key_pressed(KEY_CTRL):

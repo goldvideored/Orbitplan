@@ -6,7 +6,7 @@ extends RefCounted
 const D = preload("res://scripts/defs.gd")
 
 const COLS := 8   # значков в строке атласа
-const ROWS := 4
+const ROWS := 5
 const SIZE := 8
 
 # значки интерфейса (не предметы) — номера от 100, чтобы не пересекаться с предметами
@@ -278,6 +278,8 @@ const ICONS := {
 	D.I_WATER: ["drop", Color(0.2, 0.5, 1.0), Color(0.7, 0.9, 1.0)],
 	D.I_CHIP: ["chip", Color(0.15, 0.5, 0.25), Color(0.95, 0.8, 0.3)],
 	D.I_ALLOY: ["ingot", Color(0.32, 0.4, 0.35), Color(0.5, 1.0, 0.35)],
+	D.I_UNIQUE_ORE: ["ore", Color(0.3, 0.38, 0.42), Color(0.35, 1.0, 0.95)],
+	D.I_UNIQUE: ["crystal", Color(0.35, 0.95, 0.95), Color(1.0, 0.5, 1.0)],
 	UI_HEART: ["heart", Color(0.9, 0.2, 0.25), Color(1, 1, 1)],
 	UI_SUN: ["sun", Color(1.0, 0.85, 0.3), Color(1.0, 0.75, 0.2)],
 	UI_BOLT: ["bolt", Color(1.0, 0.85, 0.2), Color(1, 1, 1)],

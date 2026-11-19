@@ -14,6 +14,8 @@ const vec3 LEVEL_COL[5] = vec3[5](
 	vec3(0.70, 0.68, 0.66)    // скалы
 );
 
+uniform vec3 tint = vec3(1.0);   // оттенок поверхности планеты (зеленоватая, желтоватая)
+
 varying vec3 wpos;
 varying vec3 wnrm;
 
@@ -30,7 +32,7 @@ void fragment() {
 	int kind = code / 16;          // 0 верх клетки, 1 рамка, 2 стенка
 	int ore = code % 16 - 1;       // -1 — нет руды
 
-	vec3 base = LEVEL_COL[lv];
+	vec3 base = LEVEL_COL[lv] * tint;
 	vec3 col = base * (0.86 + 0.14 * h);                 // зерно реголита
 	if (hash2(px * 1.7 + 3.1) > 0.94) {
 		col *= 0.72;                                     // камешки
@@ -72,6 +74,15 @@ void fragment() {
 				col = vec3(0.75, 0.45, 0.95);
 				glow = vec3(0.22, 0.08, 0.32);
 			}
+		} else if (ore == 8) {   // уникальная материя: бирюзовые кристаллы, мерцают
+			if (cl > 0.55) {
+				col = vec3(0.25, 0.85, 0.9);
+				glow = vec3(0.1, 0.4, 0.45) * (0.6 + 0.4 * sin(TIME * 2.0 + h * 12.0));
+			}
+		} else if (ore == 14) {  // жгучая клетка: раскалённая, пульсирует красным
+			col = vec3(0.45, 0.06, 0.03) * (0.8 + 0.2 * h);
+			if (cl > 0.6) col = vec3(0.9, 0.2, 0.08);
+			glow = vec3(0.55, 0.06, 0.02) * (0.6 + 0.4 * sin(TIME * 3.0 + cl * 6.0));
 		}
 	}
 	if (kind == 1) {

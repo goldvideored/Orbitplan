@@ -26,7 +26,7 @@ static func period(pl: int) -> float:
 
 
 static func soi(pl: int) -> float:
-	return float(D.PLANETS[pl].a) * D.SOI_FRAC
+	return float(D.PLANETS[pl].get("soi", float(D.PLANETS[pl].a) * D.SOI_FRAC))
 
 
 ## Поворот «неподвижная система -> система планеты»: local = frame * (inertial - planet_pos).
