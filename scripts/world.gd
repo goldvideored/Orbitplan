@@ -29,7 +29,7 @@ const RINGS_SHADER = preload("res://shaders/rings.gdshader")
 const SKY_SHADER = preload("res://shaders/sky.gdshader")
 const ORBIT_SHADER = preload("res://shaders/orbit.gdshader")
 const NO_CELL := -1
-# цвета орбит лун на карте (и подписи того же цвета)
+# цвета орбит планет на карте (и подписи того же цвета)
 const PLANET_COLORS := [Color(1.0, 0.6, 0.3), Color(0.35, 0.8, 1.0), Color(0.45, 1.0, 0.45),
 	Color(0.8, 0.5, 1.0), Color(1.0, 0.9, 0.35)]
 const CORE_H := 1.1   # высота основания ядра
@@ -55,18 +55,18 @@ var headless := false
 var planet: Planet
 
 # --- общее состояние (есть у всех) ---
-var grid := {}       # ключ _k(pn, клетка) -> id постройки (у каждой луны своя сетка)
-var my_pn := D.HOME_PLANET   # на какой луне сейчас этот клиент
+var grid := {}       # ключ _k(pn, клетка) -> id постройки (у каждой планеты своя сетка)
+var my_pn := D.HOME_PLANET   # на какой планете сейчас этот клиент
 var buildings := {}  # id -> Dictionary
 var storage := [D.START_STORAGE.duplicate(), D.START_STORAGE.duplicate(), {}]   # предмет -> количество (нейтралам не нужен)
 var power_stats := [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]   # [выработка, спрос] по командам
 var base_count := [1, 1, D.PLANETS.size()]   # сколько ядер у каждой команды
 var cur_caps: Array = []
 var unit_stat: Array = []     # [[танки, дроны, мехи, лимит×3] по командам]
-var alert_last := {}          # сервер: когда последний раз тревожили «команда:луна»
+var alert_last := {}          # сервер: когда последний раз тревожили «команда:планета»
 var alerts: Array = []        # клиент: [текст, до какого времени показывать]
-var alert_marks := {}         # клиент: луна -> до какого времени показывать ⚠ на карте
-var alert_labels: Array = []  # метки ⚠ у лун в виде системы      # захваты на моей луне: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
+var alert_marks := {}         # клиент: планета -> до какого времени показывать ⚠ на карте
+var alert_labels: Array = []  # метки ⚠ у планет в виде системы      # захваты на моей планете: [id ядра, команда, кто захватывает, прогресс 0..1, прочность 0..1]
 var finished := false
 
 # --- только сервер ---
@@ -87,8 +87,8 @@ var power_has_gen := {} # корень -> есть ли в сети генера
 var building_set := {}  # id построек, которые сейчас строятся или сносятся
 var asm_nodes := {}     # клиент: id сборщика -> узел с собираемым юнитом
 var asm_prog := {}      # клиент: id сборщика -> [готовность 0..1, тип юнита]
-var threat_pns := PackedInt32Array()   # клиент: луны, где сейчас вражеский корабль у нас (баннер тревоги)
-var nav_target := -1    # помощник перелёта: луна-цель (-1 — выключен)
+var threat_pns := PackedInt32Array()   # клиент: планеты, где сейчас вражеский корабль у нас (баннер тревоги)
+var nav_target := -1    # помощник перелёта: планета-цель (-1 — выключен)
 var plan := {}          # расчёт перелёта к цели
 var plan_traj: MeshInstance3D
 var plan_label: Label3D
@@ -161,23 +161,23 @@ var piloting_id := -1
 var ship_send_acc := 0.0
 
 # --- поверхность и космос ---
-var local_root: Node3D         # всё, что на поверхности текущей луны (и её небо)
-var space_root: Node3D         # вид звёздной системы: гигант, луны, орбиты (в космосе и на карте)
-var sky_moons: Array = []      # соседние луны в небе над текущей
-var space_moons: Array = []    # луны в виде системы
-var map_mode := 0              # 0 — нет карты, 1 — орбита вокруг луны, 2 — вся система
+var local_root: Node3D         # всё, что на поверхности текущей планеты (и её небо)
+var space_root: Node3D         # вид звёздной системы: гигант, планеты, орбиты (в космосе и на карте)
+var sky_moons: Array = []      # соседние планеты в небе над текущей
+var space_moons: Array = []    # планеты в виде системы
+var map_mode := 0              # 0 — нет карты, 1 — орбита вокруг планеты, 2 — вся система
 var map_cam: Camera3D
 var map_zoom := 1.0
 var local_traj: MeshInstance3D
 var sys_traj: MeshInstance3D
-var enc_label: Label3D        # «призрак» луны-цели в точке встречи
+var enc_label: Label3D        # «призрак» планеты-цели в точке встречи
 var map_ship_label: Label3D
 var sys_ship_label: Label3D
 var compass: Compass
 var navball: Navball
-var ap_labels: Array = []      # метки «Ап»/«Пе»: [у луны Ап, у луны Пе, в системе Ап, в системе Пе]
+var ap_labels: Array = []      # метки «Ап»/«Пе»: [у планеты Ап, у планеты Пе, в системе Ап, в системе Пе]
 var destruct_armed := 0.0      # до какого момента ждём второе нажатие самоуничтожения
-var orbit_ribbons: Array = []  # орбиты лун — ленты, толщина подстраивается под масштаб
+var orbit_ribbons: Array = []  # орбиты планет — ленты, толщина подстраивается под масштаб
 var orbit_width := -1.0
 var pred := {}                 # прогноз траектории корабля
 var pred_acc := 0.0
@@ -228,11 +228,11 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 	if not headless:
 		_build_scene()
 	if is_server:
-		# главные базы команд — на своих лунах
+		# главные базы команд — на своих планетах
 		for t in 2:
 			_add_building({"id": _new_id(), "type": D.CORE, "team": t, "cell": planet.core_center[t], "dir": 0,
 				"pn": D.TEAM_HOME[t], "main": true})
-		# нейтральная база на каждой луне: ядро + готовая оборона
+		# нейтральная база на каждой планете: ядро + готовая оборона
 		var site: int = planet.core_center[D.T_NEUTRAL]
 		var rings_by := {}   # кольцо -> клетки
 		var r := planet.rings(site, 6)
@@ -271,12 +271,12 @@ func _place_defense(type: int, ring: Array, count: int, pn: int) -> void:
 # Помощники
 # =====================================================================
 
-## Ключ клетки с учётом луны: все 5 лун — клоны одной сетки, поэтому номер клетки один и тот же.
+## Ключ клетки с учётом планеты: все 5 планет — клоны одной сетки, поэтому номер клетки один и тот же.
 func _k(pn: int, cell: int) -> int:
 	return pn * 1048576 + cell
 
 
-## На какой луне игрок (по последнему отчёту клиента).
+## На какой планете игрок (по последнему отчёту клиента).
 func _peer_pn(peer: int) -> int:
 	if players.has(peer):
 		return int(players[peer].get("pn", D.HOME_PLANET))
@@ -392,7 +392,7 @@ func _spawn_pos(team: int) -> Vector3:
 
 
 ## Где возродиться: выбранная база (если она ещё наша), иначе ближайшая к месту гибели —
-## сначала на той же луне, потом главная, потом любая.
+## сначала на той же планете, потом главная, потом любая.
 func _respawn_core(o: Dictionary):
 	var sc: int = int(o.get("spawn_core", -1))
 	if buildings.has(sc) and buildings[sc].type == D.CORE and int(buildings[sc].team) == int(o.team):
@@ -972,7 +972,7 @@ func req_lamp(cell: int, all_on_planet: bool) -> void:
 		server_lamp(Net.team_of(peer), cell, _peer_pn(peer), all_on_planet)
 
 
-## Включить/выключить лампу (или все свои лампы на луне — режим маскировки).
+## Включить/выключить лампу (или все свои лампы на планете — режим маскировки).
 func server_lamp(team: int, cell: int, pn: int, all_on_planet: bool) -> void:
 	if not grid.has(_k(pn, cell)):
 		return
@@ -1476,7 +1476,7 @@ func _uf_union(parent: Dictionary, a: int, b: int) -> void:
 func _sim_tick() -> void:
 	if power_dirty:
 		_rebuild_power()
-	var skies := {}   # небо каждой луны считаем один раз за тик
+	var skies := {}   # небо каждой планеты считаем один раз за тик
 	var prod := [0.0, 0.0]
 	var demand := [0.0, 0.0]
 	var gprod := {}   # корень сети -> выработка
@@ -1767,7 +1767,7 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 	var sh: Dictionary = ships[id]
 	var now := Time.get_ticks_msec() / 1000.0
 	if pn >= 0 and int(sh.pn) != pn:
-		# корабль вошёл в атмосферу луны — тревога другой команде
+		# корабль вошёл в атмосферу планеты — тревога другой команде
 		_alert_team(1 - int(sh.team), "⚠ Вражеский %s вошёл в атмосферу: %s" % [
 			String(D.SHIP_KINDS[int(sh.kind)].name).to_lower(), D.PLANETS[pn].name], pn, 2)
 	var dt_rep := now - float(sh.get("rep_t", now))
@@ -2776,7 +2776,7 @@ func _players_tick() -> void:
 				ev_respawn.rpc_id(pid, o.pos, int(o.pn))
 
 
-## Юниты. Поведение: агрессия — ищет врагов по всей луне; охрана — бьёт врагов возле точки охраны
+## Юниты. Поведение: агрессия — ищет врагов по всей планете; охрана — бьёт врагов возле точки охраны
 ## и возвращается к ней; стоять — не двигается, стреляет в радиусе оружия.
 ## Дрон-камикадзе таранит цель и снимает четверть её максимальной прочности.
 func _units_tick() -> void:
@@ -2933,7 +2933,7 @@ func _damage_building(b: Dictionary, dmg: int) -> void:
 		_destroy(b.id, true)
 
 
-## Тревога игрокам команды (тревоги о разрушениях — не чаще раза в ALERT_COOLDOWN на луну).
+## Тревога игрокам команды (тревоги о разрушениях — не чаще раза в ALERT_COOLDOWN на планету).
 func _alert_team(team: int, text: String, pn: int, kind: int) -> void:
 	if team < 0 or team > 1:
 		return
@@ -2955,7 +2955,7 @@ func ev_alert(text: String, pn: int, kind: int) -> void:
 	_on_alert(text, pn, kind)
 
 
-## Показать тревогу: строка в HUD на 6 с и метка ⚠ у луны на карте на 30 с.
+## Показать тревогу: строка в HUD на 6 с и метка ⚠ у планеты на карте на 30 с.
 func _on_alert(text: String, pn: int, kind: int) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
 	alerts.append([text, now + 6.0])
@@ -3056,7 +3056,7 @@ func _capture_tick() -> void:
 				core.cap_team = -1
 
 
-## Данные одной луны для снапшота (кэшируются: игроки на одной луне получают одно и то же).
+## Данные одной планеты для снапшота (кэшируются: игроки на одной планете получают одно и то же).
 func _snap_data(pn: int) -> Dictionary:
 	var u := PackedFloat32Array()
 	for x in units:
@@ -3118,7 +3118,7 @@ func _snap_data(pn: int) -> Dictionary:
 
 
 func _send_snapshot() -> void:
-	# корабли — все (с номером луны; -1 — в открытом космосе), клиент рисует только свои
+	# корабли — все (с номером планеты; -1 — в открытом космосе), клиент рисует только свои
 	var sv: Array = []
 	for sh in ships.values():
 		sv.append([sh.id, sh.team, sh.pos, sh.quat, sh.thrust, sh.pilot, sh.state, sh.pn, sh.kind, _cargo_used(sh),
@@ -3132,7 +3132,7 @@ func _send_snapshot() -> void:
 		for k in 3:
 			row.append(_unit_limit(t, k))
 		ustat.append(row)
-	# угроза: вражеский корабль в полёте внутри сферы притяжения луны, где у команды ядро или игрок
+	# угроза: вражеский корабль в полёте внутри сферы притяжения планеты, где у команды ядро или игрок
 	var threat := [[], []]
 	for sh in ships.values():
 		var spn: int = int(sh.pn)
@@ -3177,7 +3177,7 @@ func threat_snap(pns: PackedInt32Array) -> void:
 	threat_pns = pns
 
 
-## Есть ли у команды на луне ядро или живой игрок (тогда вражеский корабль там — угроза).
+## Есть ли у команды на планете ядро или живой игрок (тогда вражеский корабль там — угроза).
 func _team_present(team: int, pn: int) -> bool:
 	for pid in players:
 		var o: Dictionary = players[pid]
@@ -3472,12 +3472,12 @@ func _build_scene() -> void:
 
 
 ## Обычные поверхности — шейдер с 16 уровнями света. Светящиеся (glow) — сами светятся в темноте.
-## Луны в небе, вид звёздной системы (гигант, луны, орбиты, сферы влияния), карта.
+## Планеты в небе, вид звёздной системы (гигант, планеты, орбиты, сферы влияния), карта.
 func _build_space() -> void:
 	var moon_mat := ShaderMaterial.new()
 	moon_mat.shader = MOON_SHADER
 	for j in D.PLANETS.size():
-		# луна в небе над текущей
+		# планета в небе над текущей
 		var sm := MeshInstance3D.new()
 		var sp := SphereMesh.new()
 		sp.radius = D.PLANET_R
@@ -3488,7 +3488,7 @@ func _build_space() -> void:
 		sm.material_override = moon_mat
 		local_root.add_child(sm)
 		sky_moons.append(sm)
-		# луна в виде системы: шар, подпись, круг сферы влияния
+		# планета в виде системы: шар, подпись, круг сферы влияния
 		var node := Node3D.new()
 		var ball := MeshInstance3D.new()
 		ball.mesh = sp
@@ -3512,7 +3512,7 @@ func _build_space() -> void:
 		alert_labels.append(warn)
 		space_root.add_child(node)
 		space_moons.append(node)
-		# орбита луны — лента её цвета
+		# орбита планеты — лента её цвета
 		var rib := MeshInstance3D.new()
 		var rmat := ShaderMaterial.new()
 		rmat.shader = ORBIT_SHADER
@@ -5318,7 +5318,7 @@ func _update_sky() -> void:
 	sun_node.global_position = cam_pos + sun * D.SUN_VIS_DIST
 	sun_node.visible = float(st.sun_level) > 0.02
 	stars_node.basis = frame
-	# соседние луны в небе
+	# соседние планеты в небе
 	for j in sky_moons.size():
 		sky_moons[j].visible = false
 	for o in st.others:
@@ -5669,8 +5669,8 @@ func _exit_ship() -> void:
 # Карта, прогноз траектории, компас
 # ---------------------------------------------------------------------
 
-## Прогноз полёта: внутри сферы луны — притяжение луны, снаружи — гиганта.
-## local — точки в системе текущей луны, inertial — в системе гиганта (для карты системы).
+## Прогноз полёта: внутри сферы планеты — притяжение планеты, снаружи — гиганта.
+## local — точки в системе текущей планеты, inertial — в системе гиганта (для карты системы).
 func _predict() -> Dictionary:
 	var res := {"local": PackedVector3Array(), "inertial": PackedVector3Array(), "enc": -1,
 		"enc_t": 0.0, "enc_idx": -1, "exit_t": -1.0, "impact": false}
@@ -5684,8 +5684,8 @@ func _predict() -> Dictionary:
 	var v: Vector3 = piloting.vel
 	var t := world_time
 	var after_enc := 0
-	# орбиту вокруг стартовой луны рисуем относительно её положения СЕЙЧАС (как в KSP),
-	# участок у луны-цели — относительно её положения в момент встречи
+	# орбиту вокруг стартовой планеты рисуем относительно её положения СЕЙЧАС (как в KSP),
+	# участок у планеты-цели — относительно её положения в момент встречи
 	var p_now := SkyCalc.planet_pos(maxi(start_pn, 0), world_time)
 	var ft_now := SkyCalc.frame(maxi(start_pn, 0), world_time).transposed()
 	var p_enc := Vector3.ZERO
@@ -5749,7 +5749,7 @@ func _predict() -> Dictionary:
 
 
 # ---------------------------------------------------------------------
-# Помощник перелёта (T — выбрать луну-цель). Считает самый экономный перелёт по Гоману:
+# Помощник перелёта (T — выбрать планету-цель). Считает самый экономный перелёт по Гоману:
 # когда стартовать (окно), сколько Δv, куда жечь. Управляет игрок сам.
 # ---------------------------------------------------------------------
 
@@ -5799,7 +5799,7 @@ func _plan() -> Dictionary:
 	var rp := maxf(sh.global_position.length(), D.PLANET_R + 5.0)
 	var dv_ej := sqrt(vinf * vinf + 2.0 * D.SHIP_MU / rp) - sqrt(D.SHIP_MU / rp)
 	var dv_land := sqrt(vinf2 * vinf2 + 2.0 * D.SHIP_MU / D.PLANET_R)
-	# куда жечь: по движению луны вокруг гиганта (наружу) или против него (внутрь)
+	# куда жечь: по движению планеты вокруг гиганта (наружу) или против него (внутрь)
 	var vm := (SkyCalc.frame(sh.pn, world_time) * SkyCalc.planet_vel(sh.pn, world_time)).normalized()
 	var burn := vm if vinf > 0.0 else -vm
 	res["wait"] = wait
@@ -5812,7 +5812,7 @@ func _plan() -> Dictionary:
 	res["r1"] = r1
 	res["r2"] = r2
 	res["arrive"] = SkyCalc.planet_pos(nav_target, world_time + maxf(wait, 0.0) + tt)
-	# когда скорость корабля вокруг луны совпадёт с направлением разгона
+	# когда скорость корабля вокруг планеты совпадёт с направлением разгона
 	var v := sh.vel
 	var r := sh.global_position
 	res["align_t"] = -1.0
@@ -5825,7 +5825,7 @@ func _plan() -> Dictionary:
 	return res
 
 
-## Эллипс перелёта на карте системы: от нашей луны в момент окна до цели в момент прилёта.
+## Эллипс перелёта на карте системы: от нашей планеты в момент окна до цели в момент прилёта.
 func _draw_plan() -> void:
 	if plan_traj == null:
 		return
@@ -5859,7 +5859,7 @@ func _plan_lines() -> PackedStringArray:
 	if piloting == null:
 		return out
 	if nav_target < 0:
-		out.append("T — выбрать луну для перелёта")
+		out.append("T — выбрать планету для перелёта")
 		return out
 	out.append("ЦЕЛЬ: %s   (T — сменить)" % D.PLANETS[nav_target].name)
 	var hit := int(pred.get("enc", -1)) == nav_target
@@ -5874,7 +5874,7 @@ func _plan_lines() -> PackedStringArray:
 	elif wait < -5.0:
 		out.append("Окно только что прошло (%d с назад) — жги сейчас, чуть сильнее" % int(-wait))
 	elif wait < 8.0:
-		out.append("ОКНО СЕЙЧАС — разгон ~%d м/с %s" % [int(plan.dv_ej), "по движению луны" if plan.outward else "против движения луны"])
+		out.append("ОКНО СЕЙЧАС — разгон ~%d м/с %s" % [int(plan.dv_ej), "по движению планеты" if plan.outward else "против движения планеты"])
 	else:
 		out.append("Окно перелёта через %d с" % int(wait))
 	if float(plan.align_t) >= 0.0 and not hit:
@@ -5896,14 +5896,14 @@ func _draw_trajectories() -> void:
 		nrm.normalized(), w_local)
 	_strip(sys_traj, pred.get("inertial", PackedVector3Array()), int(pred.get("enc_idx", -1)),
 		Color(0.35, 0.8, 1.0), Color(0.35, 1.0, 0.45), Vector3.UP, w_sys)
-	# «призрак» луны-цели там, где она будет в момент встречи
+	# «призрак» планеты-цели там, где она будет в момент встречи
 	enc_label.visible = pred.has("enc_pos")
 	if enc_label.visible:
 		enc_label.position = pred.enc_pos
 		enc_label.text = "◯ %s при встрече" % D.PLANETS[int(pred.enc)].name
 
 
-## Линия по точкам; после split — другим цветом (участок у луны, к которой летим).
+## Линия по точкам; после split — другим цветом (участок у планеты, к которой летим).
 ## Траектория лентой шириной w в плоскости с нормалью nrm; после split — другим цветом.
 func _strip(mi: MeshInstance3D, pts: PackedVector3Array, split: int, c1: Color, c2: Color,
 		nrm: Vector3, w: float) -> void:
@@ -5941,7 +5941,7 @@ func _ribbon_surface(am: ArrayMesh, pts: PackedVector3Array, from: int, to: int,
 	var m := StandardMaterial3D.new()
 	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
-	m.albedo_color = col   # с проверкой глубины: за луной и внутри неё не видно
+	m.albedo_color = col   # с проверкой глубины: за планетой и внутри неё не видно
 	for vv in [verts, verts2]:
 		var arr := []
 		arr.resize(Mesh.ARRAY_MAX)
@@ -5950,7 +5950,7 @@ func _ribbon_surface(am: ArrayMesh, pts: PackedVector3Array, from: int, to: int,
 		am.surface_set_material(am.get_surface_count() - 1, m)
 
 
-## Камера карты: 1 — вид сверху на орбиту вокруг луны, 2 — вся система сверху.
+## Камера карты: 1 — вид сверху на орбиту вокруг планеты, 2 — вся система сверху.
 func _update_map_view() -> void:
 	var sysv := _system_view()
 	sys_traj.visible = sysv
@@ -5962,7 +5962,7 @@ func _update_map_view() -> void:
 	sys_ship_label.position = ship_i
 	map_ship_label.visible = map_mode == 1
 	map_ship_label.position = piloting.global_position
-	# на карте системы корабль внутри сферы луны рисуем меткой (его модель в координатах луны)
+	# на карте системы корабль внутри сферы планеты рисуем меткой (его модель в координатах планеты)
 	piloting.visible = not (map_mode == 2 and piloting.pn >= 0)
 	var oi := piloting.orbit_info()
 	var show_local := map_mode == 1 and not oi.is_empty()
@@ -5999,7 +5999,7 @@ func _update_map_view() -> void:
 		_set_orbit_width(map_cam.size * 0.004)
 
 
-## Компас: «север» — ось вращения луны (в космосе — ось орбит), курс носа и направление полёта.
+## Компас: «север» — ось вращения планеты (в космосе — ось орбит), курс носа и направление полёта.
 func _update_compass() -> void:
 	var up := piloting.global_position.normalized()
 	var north := Vector3.UP - up * up.y
@@ -6038,7 +6038,7 @@ func _update_compass() -> void:
 	navball.set_data(nose, right, us, up, north, marks, piloting.sas_mode, piloting.power)
 
 
-## Перешли на другую луну: перерисовываем постройки, сбрасываем то, что видели на старой.
+## Перешли на другую планету: перерисовываем постройки, сбрасываем то, что видели на старой.
 func _switch_planet(pn: int) -> void:
 	if pn == my_pn or pn < 0:
 		return
@@ -6070,7 +6070,7 @@ func _switch_planet(pn: int) -> void:
 			_vis_add(b)
 
 
-## Корабль вошёл в сферу влияния луны (или вылетел в открытый космос, pn = -1).
+## Корабль вошёл в сферу влияния планеты (или вылетел в открытый космос, pn = -1).
 func on_ship_soi(pn: int) -> void:
 	if pn >= 0:
 		_switch_planet(pn)
@@ -6383,7 +6383,7 @@ func _cam_dist(p: Vector3) -> float:
 	return c.global_position.distance_to(p) if c else 0.0
 
 
-## Источники света для шейдера: включённые лампы на моей луне и слабое свечение построек
+## Источники света для шейдера: включённые лампы на моей планете и слабое свечение построек
 ## поближе к камере (всего не больше MAX_LIGHTS).
 func _update_lights() -> void:
 	if lamp_img == null:
@@ -6709,7 +6709,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	panel.add_child(root)
 	ui.panel = panel
 
-	# --- состояние: луна, здоровье, свет, энергия, базы
+	# --- состояние: планета, здоровье, свет, энергия, базы
 	var top := _ui_section(root)
 	ui.top = top
 	ui.planet = _ui_label(15, Color(1, 1, 1))
@@ -6900,7 +6900,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	topc.add_child(cap)
 	ui.cap = cap
 
-	# --- баннер тревоги: вражеский корабль в зоне притяжения нашей луны
+	# --- баннер тревоги: вражеский корабль в зоне притяжения нашей планеты
 	var ban := PanelContainer.new()
 	var bsb := StyleBoxFlat.new()
 	bsb.bg_color = Color(0.55, 0.05, 0.03, 0.85)
@@ -6980,7 +6980,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.hint = hint
 
 
-## Мои базы для возрождения: главная первой, потом по лунам.
+## Мои базы для возрождения: главная первой, потом по планетам.
 func _my_cores() -> Array:
 	var out: Array = []
 	for b in buildings.values():
@@ -7098,7 +7098,7 @@ func _update_hud() -> void:
 		ui.cap.visible = false
 		_update_ship_panel()
 		if map_mode != 0:
-			hints.append("КАРТА: %s   M — дальше, колесо — масштаб" % ["", "орбита вокруг луны", "звёздная система"][map_mode])
+			hints.append("КАРТА: %s   M — дальше, колесо — масштаб" % ["", "орбита вокруг планеты", "звёздная система"][map_mode])
 		ui.hint.text = "\n".join(hints)
 		return
 
@@ -7200,7 +7200,7 @@ func _update_hud() -> void:
 			if _hover_own(D.ASSEMBLER):
 				hints.append("E (держать) — выбрать юнита")
 			if _hover_own(D.LAMP):
-				hints.append("E — вкл/выкл лампу,  Shift+E — все свои лампы на луне")
+				hints.append("E — вкл/выкл лампу,  Shift+E — все свои лампы на планете")
 			if _hover_upgradable():
 				if int(b.lvl) >= D.UPG_MAX:
 					hints.append("Максимальный уровень модернизации")
@@ -7235,7 +7235,7 @@ func _update_hud() -> void:
 	ui.hint.text = "\n".join(hints)
 
 
-## Баннер «ВНИМАНИЕ»: пока вражеский корабль в сфере притяжения луны, где наша база или мы сами,
+## Баннер «ВНИМАНИЕ»: пока вражеский корабль в сфере притяжения планеты, где наша база или мы сами,
 ## и ещё 8 с после тревоги о входе в атмосферу. Мигает.
 func _update_banner() -> void:
 	var now := Time.get_ticks_msec() / 1000.0
@@ -7337,7 +7337,7 @@ func _update_ship_panel() -> void:
 	if sh.landed:
 		lines.append("На поверхности")
 	elif orb.is_empty():
-		lines.append("Уход от " + ("луны" if sh.pn >= 0 else "гиганта"))
+		lines.append("Уход от " + ("планеты" if sh.pn >= 0 else "гиганта"))
 	elif float(orb[1]) > 5.0:
 		lines.append("Орбита")
 	else:
@@ -7419,7 +7419,7 @@ func _build_help() -> Control:
 Меню построек               держать Z: мышь — группа, колесо — подтип
 Быстрый выбор группы        1–7,  бластер — 8
 Корабль                     E на площадке — собрать, E рядом — сесть, G — выйти
-Перелёт к другой луне         в корабле T — выбрать цель: окно, Δv, ◆ на навболе — куда жечь
+Перелёт к другой планете         в корабле T — выбрать цель: окно, Δv, ◆ на навболе — куда жечь
 Модернизация завода         U на своём заводе (до ур. 3)
 В полёте                    Shift/Ctrl — дроссель, Z — полный, X — ноль, Space — полная тяга пока держишь
                             W/S A/D Q/E — повороты, мышь — камера
@@ -7493,7 +7493,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif kp.keycode == KEY_T:
 				_cycle_target()
 			elif kp.keycode == KEY_M:
-				# в сфере луны: нет -> орбита -> система; в космосе: нет -> система
+				# в сфере планеты: нет -> орбита -> система; в космосе: нет -> система
 				if piloting.pn >= 0:
 					map_mode = (map_mode + 1) % 3
 				else:
@@ -7545,7 +7545,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			req_upgrade.rpc_id(1, hover_cell)
 		return
-	# --- E на своей лампе: вкл/выкл; Shift+E — все свои лампы на луне (маскировка) ---
+	# --- E на своей лампе: вкл/выкл; Shift+E — все свои лампы на планете (маскировка) ---
 	if kz and kz.keycode == KEY_E and kz.pressed and not kz.echo and e_menu == null and _hover_own(D.LAMP):
 		var all_l := Input.is_key_pressed(KEY_SHIFT)
 		if is_server:

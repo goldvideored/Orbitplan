@@ -1,12 +1,12 @@
 extends RefCounted
-## Небесная механика звёздной системы: гигант в центре, 5 лун на круговых орбитах.
-## У каждой луны своя система координат: луна в начале, оси вращаются вместе с ней (сутки).
+## Небесная механика звёздной системы: гигант в центре, 5 планет на круговых орбитах.
+## У каждой планеты своя система координат: планета в начале, оси вращаются вместе с ней (сутки).
 ## Считается одинаково на сервере (солнечные панели) и клиентах (картинка, полёты).
 
 const D = preload("res://scripts/defs.gd")
 
 
-## Положение луны pl в неподвижной системе гиганта.
+## Положение планеты pl в неподвижной системе гиганта.
 static func planet_pos(pl: int, t: float) -> Vector3:
 	var a: float = D.PLANETS[pl].a
 	var phi: float = float(D.PLANETS[pl].phase) + sqrt(D.GIANT_MU / (a * a * a)) * t
@@ -29,7 +29,7 @@ static func soi(pl: int) -> float:
 	return float(D.PLANETS[pl].a) * D.SOI_FRAC
 
 
-## Поворот «неподвижная система -> система луны»: local = frame * (inertial - planet_pos).
+## Поворот «неподвижная система -> система планеты»: local = frame * (inertial - planet_pos).
 static func frame(pl: int, t: float) -> Basis:
 	var theta := TAU * t / D.DAY_LENGTH + pl * 1.3
 	return Basis(Vector3.UP, -theta) * Basis(Vector3.RIGHT, deg_to_rad(D.AXIS_TILT))
@@ -43,7 +43,7 @@ static func to_inertial(pl: int, t: float, local: Vector3) -> Vector3:
 	return planet_pos(pl, t) + frame(pl, t).transposed() * local
 
 
-## Небо над луной pl: солнце, гигант, затмение, фаза гиганта, где остальные луны.
+## Небо над планетой pl: солнце, гигант, затмение, фаза гиганта, где остальные планеты.
 static func state(t: float, pl: int = D.HOME_PLANET) -> Dictionary:
 	var f := frame(pl, t)
 	var sun: Vector3 = (f * D.SUN_DIR).normalized()
