@@ -5339,7 +5339,10 @@ func _update_assembly() -> void:
 		elif not asm_prog.has(id) or not bnodes.has(id):
 			(hv as Node3D).queue_free()
 			asm_nodes.erase(id)
-	var meshes := [mm_units.mesh, mm_drones.mesh, mm_mechs.mesh, mm_umechs.mesh]
+	var meshes: Array = []
+	for mmx in [mm_units, mm_drones, mm_mechs, mm_umechs, mm_mechs]:
+		if mmx != null:
+			meshes.append((mmx as MultiMesh).mesh)
 	for id in asm_prog:
 		if not bnodes.has(id) or not buildings.has(id):
 			continue
@@ -5578,7 +5581,7 @@ func _smoke(n: Node3D, at: Vector3, col: Color) -> void:
 
 
 ## 4 тир: инопланетный стиль — тёмно-фиолетовый металл, синие светящиеся полосы, парящий кристалл материи.
-func _vis_tier4(n: Node3D, t: int, col: Color) -> void:
+func _vis_tier4(n: Node3D, t: int, _col: Color) -> void:
 	var hull := Color(0.2, 0.15, 0.3)
 	var hull2 := Color(0.3, 0.24, 0.42)
 	var blue := Color(0.35, 0.65, 1.0)
@@ -7876,19 +7879,19 @@ func _icon_rect(id: int, px := 22) -> TextureRect:
 	at.atlas = icon_atlas
 	var c := Icons.cell_of(id)
 	at.region = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
-	var tr := TextureRect.new()
-	tr.texture = at
-	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	tr.custom_minimum_size = Vector2(px, px)
-	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	return tr
+	var trect := TextureRect.new()
+	trect.texture = at
+	trect.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	trect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	trect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	trect.custom_minimum_size = Vector2(px, px)
+	trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return trect
 
 
-func _set_icon(tr: TextureRect, id: int) -> void:
+func _set_icon(trect: TextureRect, id: int) -> void:
 	var c := Icons.cell_of(id)
-	(tr.texture as AtlasTexture).region = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
+	(trect.texture as AtlasTexture).region = Rect2(c.x * Icons.SIZE, c.y * Icons.SIZE, Icons.SIZE, Icons.SIZE)
 
 
 func _ui_label(size := 13, col := Color(0.85, 0.87, 0.9)) -> Label:

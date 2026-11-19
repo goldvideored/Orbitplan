@@ -219,6 +219,7 @@ func _build_planet() -> void:
 	world.mm_units = world._make_mm(world._tank_mesh(umat), 128, false)
 	world.mm_drones = world._make_mm(world._drone_mesh(umat), 64, false)
 	world.mm_mechs = world._make_mm(world._mech_mesh(umat), 16, false)
+	world.mm_umechs = world._make_mm(world._mech_mesh(umat, true), 8, false)
 	mm_kind = [world.mm_units, world.mm_drones, world.mm_mechs]
 
 	var n := planet.count()
