@@ -40,12 +40,17 @@ const I_ALLOY := 18        # свинцово-урановый сплав: дл�
 const I_UNIQUE := 19       # уникальная материя (Бур III с залежи сразу выдаёт её)
 # жидкость — только по трубам
 const I_WATER := 20
+# 4 тир: всё на уникальной материи
+const I_UALLOY := 21       # уникальный сплав: сплав Pb-U + материя
+const I_UCHIP := 22        # уникальный чип: микросхемы + материя
+const I_UFUEL := 23        # уникальное топливо: He-3 + материя (жидкость, по трубам) — для истребителя
 
 const ITEM_NAMES := {
 	I_COAL_ORE: "Угольная руда", I_COPPER_ORE: "Медная руда", I_IRON_ORE: "Железная руда",
 	I_ICE: "Лёд", I_QUARTZ: "Кварцевый песок", I_LEAD_ORE: "Свинцовая руда",
 	I_URANIUM_ORE: "Урановая руда", I_HELIUM_ORE: "Гелиевый реголит", I_UNIQUE_ORE: "Залежь материи",
-	I_UNIQUE: "Уникальная материя",
+	I_UNIQUE: "Уникальная материя", I_UALLOY: "Уникальный сплав", I_UCHIP: "Уникальный чип",
+	I_UFUEL: "Уникальное топливо",
 	I_COAL: "Уголь", I_COPPER: "Медь", I_IRON: "Железо", I_SILICON: "Кремний",
 	I_LEAD: "Свинец", I_URANIUM: "Уран", I_FUEL: "Топливо He-3", I_WATER: "Вода",
 	I_CHIP: "Микросхема", I_ALLOY: "Сплав Pb-U",
@@ -59,8 +64,9 @@ const ITEM_COLORS := {
 	I_SILICON: Color(0.35, 0.4, 0.55), I_LEAD: Color(0.55, 0.55, 0.75), I_URANIUM: Color(0.45, 1.0, 0.3),
 	I_FUEL: Color(0.9, 0.5, 1.0), I_WATER: Color(0.25, 0.55, 1.0), I_CHIP: Color(0.2, 0.6, 0.3),
 	I_ALLOY: Color(0.38, 0.5, 0.42), I_UNIQUE_ORE: Color(0.2, 0.75, 0.8), I_UNIQUE: Color(0.4, 1.0, 0.95),
+	I_UALLOY: Color(0.35, 0.55, 1.0), I_UCHIP: Color(0.3, 0.75, 1.0), I_UFUEL: Color(0.45, 0.6, 1.0),
 }
-const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP, I_ALLOY, I_UNIQUE]
+const CORE_ACCEPT := [I_COAL, I_COPPER, I_IRON, I_SILICON, I_LEAD, I_URANIUM, I_FUEL, I_CHIP, I_ALLOY, I_UNIQUE, I_UALLOY, I_UCHIP, I_UFUEL]
 const RARE_ORES := [I_LEAD_ORE, I_URANIUM_ORE, I_HELIUM_ORE, I_UNIQUE_ORE]   # базовый бур не берёт
 const ORE_PRODUCT := {I_UNIQUE_ORE: I_UNIQUE}   # что бур выдаёт вместо самой руды
 const RARE_SPEED := 0.2        # скорость добычи редких пород относительно обычных
@@ -105,6 +111,11 @@ const BATTERY := 31       # аккумулятор: копит излишек э
 const FUEL_DEPOT := 32    # заправочная станция: топливо из труб, заправщик развозит его по площадкам
 const SORTER := 33        # сортировщик: конвейер, который берёт только один выбранный груз (E — выбрать)
 const SPACE_DOCK := 34    # космопорт: космический курьер возит грузы между планетами сам
+# 4 тир (12 клеток)
+const UALLOY_FORGE := 35  # кузня уникального сплава
+const UCHIP_FAB := 36     # фабрика уникальных чипов
+const UFUEL_REF := 37     # реактор уникального топлива
+const TURRET4 := 38       # уникальная пушка: навесом по любым целям, снаряды самонаводящиеся
 const WEAPON := -1        # не постройка: бластер в руках
 
 const NAMES := {
@@ -117,11 +128,17 @@ const NAMES := {
 	ASSEMBLER: "Сборщик юнитов", LAUNCH_PAD: "Стартовая площадка", AA_GUN: "ПВО",
 	SPLITTER: "Разветвитель", JUNCTION: "Перекрёсток", BRIDGE: "Мост", POWER_POLE: "Энергостолб",
 	REPAIR: "Ремонтная башня", UNIT_REPAIR: "Ремонтная станция", WALL: "Забор", LAMP: "Лампа", BATTERY: "Аккумулятор", FUEL_DEPOT: "Заправочная станция", SORTER: "Сортировщик", SPACE_DOCK: "Космопорт курьера",
+	UALLOY_FORGE: "Кузня уник. сплава", UCHIP_FAB: "Фабрика уник. чипов", UFUEL_REF: "Реактор уник. топлива",
+	TURRET4: "Уникальная пушка",
 	LOADER: "Точка погрузки", UNLOADER: "Точка выгрузки", CHIP_FACTORY: "Завод микросхем",
 }
 const DESC := {
 	CONVEYOR: "везёт твёрдые предметы; воду и топливо He-3 не берёт — только трубы",
 	PIPE: "вода и топливо He-3",
+	UALLOY_FORGE: "4 тир. 1 сплав Pb-U + 1 уникальная материя -> уникальный сплав. 300 энергии",
+	UCHIP_FAB: "4 тир. 2 микросхемы + 1 уникальная материя -> уникальный чип. 250 энергии",
+	UFUEL_REF: "4 тир. 2 топлива He-3 + 1 уникальная материя -> уникальное топливо (по трубам). 400 энергии",
+	TURRET4: "4 тир. Как артиллерия, но по любым целям (и летающим), снаряды самонаводящиеся. Боеприпас — уникальный сплав",
 	SORTER: "конвейер, который берёт на вход только один груз (держи E — выбрать). Например, забирать нужное из космопорта",
 	SPACE_DOCK: "космический курьер (1 на команду) сам летает между космопортами: грузы с конвейеров, топливо по трубе. Полный бак + 1 мин ожидания — вылет. Держи E — куда лететь",
 	DRILL: "медленно, без энергии, редкие руды не берёт",
@@ -186,6 +203,10 @@ const COST := {
 	UNLOADER: {I_IRON: 15, I_CHIP: 5},
 	FUEL_DEPOT: {I_IRON: 30, I_SILICON: 10, I_CHIP: 10},
 	SORTER: {I_COPPER: 3, I_IRON: 2},
+	UALLOY_FORGE: {I_IRON: 250, I_ALLOY: 50, I_UNIQUE: 30, I_CHIP: 30},
+	UCHIP_FAB: {I_SILICON: 150, I_CHIP: 60, I_UNIQUE: 30, I_ALLOY: 20},
+	UFUEL_REF: {I_IRON: 200, I_LEAD: 80, I_UNIQUE: 35, I_CHIP: 30},
+	TURRET4: {I_IRON: 350, I_UALLOY: 40, I_UCHIP: 20, I_UNIQUE: 20},
 	SPACE_DOCK: {I_IRON: 160, I_SILICON: 60, I_CHIP: 40, I_LEAD: 30},
 	CHIP_FACTORY: {I_COPPER: 80, I_IRON: 60, I_SILICON: 20},
 }
@@ -193,17 +214,19 @@ const HP := {
 	CORE: 3000, CONVEYOR: 40, PIPE: 40, DRILL: 150, DRILL2: 200, DRILL3: 250,
 	SOLAR: 80, COAL_PLANT: 300, NUCLEAR: 600, SMELTER: 250, CRUSHER: 200, MELTER: 200,
 	CENTRIFUGE: 300, FUEL_SYNTH: 300, TURRET: 350, ASSEMBLER: 300,
-	LOADER: 250, UNLOADER: 250, FUEL_DEPOT: 250, SORTER: 60, SPACE_DOCK: 1200, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
+	LOADER: 250, UNLOADER: 250, FUEL_DEPOT: 250, SORTER: 60, SPACE_DOCK: 1200, UALLOY_FORGE: 1500, UCHIP_FAB: 1500, UFUEL_REF: 1500, TURRET4: 2500, CHIP_FACTORY: 300, TURRET2: 600, TURRET3: 1200, LAUNCH_PAD: 1500, AA_GUN: 500,
 	SPLITTER: 60, JUNCTION: 60, BRIDGE: 80, POWER_POLE: 80, REPAIR: 300, UNIT_REPAIR: 300, WALL: 800, LAMP: 60, BATTERY: 200,
 }
 # размер в клетках: базовые — 1, второй уровень — 3 (треугольник), третий — 9 (ромб 3×3)
 const SIZE := {
 	DRILL2: 3, DRILL3: 9, COAL_PLANT: 3, NUCLEAR: 9,
+	UALLOY_FORGE: 12, UCHIP_FAB: 12, UFUEL_REF: 12, TURRET4: 12,
 	SPACE_DOCK: 3, CENTRIFUGE: 3, FUEL_SYNTH: 9, ASSEMBLER: 3, CHIP_FACTORY: 3, TURRET2: 3, TURRET3: 9, LAUNCH_PAD: 9, AA_GUN: 3,
 }
 # время стройки, сек (снос — столько же); не указано — по размеру: 1 клетка 2.5 с, 3 — 6 с, 9 — 14 с
 const BUILD_TIME := {
 	CONVEYOR: 0.4, PIPE: 0.4, WALL: 1.0, POWER_POLE: 0.8, LAMP: 0.8,
+	UALLOY_FORGE: 30.0, UCHIP_FAB: 30.0, UFUEL_REF: 30.0, TURRET4: 30.0,
 	SORTER: 0.6, SPLITTER: 0.8, JUNCTION: 0.8, BRIDGE: 1.2, TURRET3: 20.0, NUCLEAR: 20.0, LAUNCH_PAD: 20.0,
 }
 
@@ -231,9 +254,9 @@ const CATEGORIES := [
 	["Транспорт", [CONVEYOR, SORTER, PIPE, SPLITTER, JUNCTION, BRIDGE]],
 	["Добыча", [DRILL, DRILL2, DRILL3]],
 	["Энергия", [SOLAR, COAL_PLANT, NUCLEAR, BATTERY, POWER_POLE, LAMP]],
-	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY]],
+	["Переработка", [SMELTER, CRUSHER, MELTER, CENTRIFUGE, FUEL_SYNTH, CHIP_FACTORY, UALLOY_FORGE, UCHIP_FAB, UFUEL_REF]],
 	["Логистика", [LOADER, UNLOADER, FUEL_DEPOT]],
-	["Оборона", [TURRET, TURRET2, TURRET3, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
+	["Оборона", [TURRET, TURRET2, TURRET3, TURRET4, AA_GUN, WALL, REPAIR, UNIT_REPAIR, ASSEMBLER]],
 	["Космос", [LAUNCH_PAD, SPACE_DOCK]],
 ]
 
@@ -247,7 +270,8 @@ const DRILL_TICKS := {DRILL: 16.0, DRILL2: 6.0, DRILL3: 2.5}   # тиков на
 const DRILL3_WATER_PER := 4            # бур III тратит 1 воду на 4 руды
 
 const POWER_USE := {DRILL2: 50.0, DRILL3: 150.0, SMELTER: 60.0, CRUSHER: 40.0,
-	MELTER: 30.0, CENTRIFUGE: 200.0, FUEL_SYNTH: 150.0, CHIP_FACTORY: 80.0, REPAIR: 40.0, UNIT_REPAIR: 60.0}
+	MELTER: 30.0, CENTRIFUGE: 200.0, FUEL_SYNTH: 150.0, CHIP_FACTORY: 80.0, REPAIR: 40.0, UNIT_REPAIR: 60.0,
+	UALLOY_FORGE: 300.0, UCHIP_FAB: 250.0, UFUEL_REF: 400.0}
 const POLE_RING := 5               # энергостолб связывает всё в 5 кольцах вокруг себя
 const LAMP_RADIUS := 16.0          # радиус света лампы, м
 const GLOW_RADIUS := 4.0           # слабое свечение вокруг постройки, м
@@ -283,6 +307,9 @@ const RECIPES := {
 	CENTRIFUGE: [{"in": {I_URANIUM_ORE: 4}, "out": I_URANIUM, "n": 1, "t": 40.0}],
 	FUEL_SYNTH: [{"in": {I_HELIUM_ORE: 2, I_WATER: 2}, "out": I_FUEL, "n": 1, "t": 30.0}],
 	CHIP_FACTORY: [{"in": {I_SILICON: 1, I_COPPER: 1}, "out": I_CHIP, "n": 1, "t": 12.0}],
+	UALLOY_FORGE: [{"in": {I_ALLOY: 1, I_UNIQUE: 1}, "out": I_UALLOY, "n": 1, "t": 40.0}],
+	UCHIP_FAB: [{"in": {I_CHIP: 2, I_UNIQUE: 1}, "out": I_UCHIP, "n": 1, "t": 40.0}],
+	UFUEL_REF: [{"in": {I_FUEL: 2, I_UNIQUE: 1}, "out": I_UFUEL, "n": 1, "t": 40.0}],
 }
 
 # ---------------------------------------------------------------------
@@ -293,7 +320,7 @@ const ROVER_HP := 150          # курьера и заправщика можн
 const ROVER_RESPAWN_TICKS := 600   # новый — через 1 мин
 const TANKER_CAP := 20         # заправщик везёт до 20 топлива
 const DEPOT_CAP := 60          # сколько топлива держит заправочная станция
-const FLUIDS := [I_WATER, I_FUEL]  # текут только по трубам
+const FLUIDS := [I_WATER, I_FUEL, I_UFUEL]  # текут только по трубам
 # космический курьер
 const COURIER_FUEL := 30           # бак: вылетает только с полным
 const COURIER_CARGO := 100         # мест под груз
@@ -316,7 +343,7 @@ const FILTER_GROUPS := [
 	["Топливо", [I_HELIUM_ORE, I_FUEL]],
 	["Лёд", [I_ICE]],
 	["Микросхемы", [I_CHIP, I_ALLOY]],
-	["Материя", [I_UNIQUE]],
+	["Материя", [I_UNIQUE, I_UALLOY, I_UCHIP, I_UFUEL]],
 ]
 
 const T_NEUTRAL := 2               # команда нейтральных баз
@@ -343,20 +370,23 @@ const ENEMY_ZONE := 40.0       # нельзя строить ближе этог
 const U_TANK := 0
 const U_DRONE := 1
 const U_MECH := 2
-const UNIT_NAMES := ["Мини-танк", "Дрон-камикадзе", "Боевой мех"]
+const U_UMECH := 3
+const UNIT_NAMES := ["Мини-танк", "Дрон-камикадзе", "Боевой мех", "Уникальный мех"]
 # hp — прочность, speed — м за тик, range — дальность атаки, dmg/cd — урон и тиков между выстрелами,
 # aggro — с какого расстояния замечает врага, build — тиков сборки, slots — мест в транспорте
 const UNIT_STATS := [
 	{"hp": 120, "speed": 0.3, "range": 9.0, "dmg": 5, "cd": 10, "aggro": 14.0, "build": 30, "slots": 1},
 	{"hp": 30, "speed": 1.2, "range": 1.4, "dmg": 0, "cd": 0, "aggro": 30.0, "build": 25, "slots": 1},
 	{"hp": 1500, "speed": 0.18, "range": 19.0, "dmg": 9, "cd": 2, "aggro": 24.0, "build": 120, "slots": 4},
+	{"hp": 3000, "speed": 0.2, "range": 22.0, "dmg": 14, "cd": 2, "aggro": 28.0, "build": 200, "slots": 4},
 ]
 const UNIT_RECIPES := [
 	{I_IRON: 8, I_COPPER: 4},
 	{I_COPPER: 6, I_SILICON: 4, I_CHIP: 1},
 	{I_IRON: 150, I_LEAD: 50, I_SILICON: 40, I_CHIP: 25},
+	{I_IRON: 100, I_UALLOY: 20, I_UCHIP: 10},
 ]
-const UNIT_LIMIT := [20, 10, 3]     # на одно ядро команды: захватил базу — лимит вырос
+const UNIT_LIMIT := [20, 10, 3, 2]     # на одно ядро команды: захватил базу — лимит вырос
 const KAMIKAZE_FRAC := 0.25         # дрон снимает четверть максимальной прочности цели
 const GUARD_RADIUS := 15.0          # охрана: бьёт врагов в этом радиусе от точки охраны
 const MODE_AGGRO := 0
@@ -398,7 +428,7 @@ const AA_ITEMS_PER_SHOT := 3   # 1 снаряд = 3 любых ресурса
 const AA_AMMO_CAP := 30
 const AA_WATER_CAP := 10
 const DRONE_ALT := 2.5         # на какой высоте летают дроны
-const SHIP_HP := [300, 800]    # прочность разведчика и транспорта
+const SHIP_HP := [300, 800, 1000]   # прочность разведчика, транспорта, истребителя
 
 const POISON_TICKS := 20       # облучение ураном: 2 с
 const POISON_DMG := 1          # урона за тик
@@ -437,6 +467,15 @@ const GIANT_MAX_LEVEL := 4     # гигант даёт максимум 4 уро
 # ---------------------------------------------------------------------
 const SCOUT_COST := {I_IRON: 60, I_COPPER: 30, I_SILICON: 20, I_CHIP: 20}
 const TRANSPORT_COST := {I_IRON: 150, I_COPPER: 60, I_SILICON: 40, I_CHIP: 40, I_LEAD: 20}
+const FIGHTER_COST := {I_IRON: 200, I_UALLOY: 40, I_UCHIP: 25, I_UNIQUE: 20}
+const FIGHTER_CD := 30.0           # бластер истребителя: 2 выстрела в минуту
+const FIGHTER_RANGE := 300.0
+const FIGHTER_DMG := 400
+const T4_DMG := 120                # уникальная пушка: прямое попадание (+ взрыв как у артиллерии)
+const T4_CD := 50
+const T4_SPEED := 30.0
+const T4_AMMO_CAP := 10
+const T4_SHOTS_PER_ITEM := 3
 const SCOUT_BUILD_TICKS := 150     # сборка 15 с
 const SCOUT_DRY := 2.0             # сухая масса, т
 const FUEL_UNIT_MASS := 0.15       # т на 1 единицу топлива
@@ -495,8 +534,11 @@ static func planet_kind(pn: int) -> int:
 # Типы кораблей (собираются на стартовой площадке). Тяга подобрана так, чтобы на полном баке
 # ускорение было ~7.4 м/с² при g = 6. cargo — мест для юнитов.
 const SHIP_KINDS := [
-	{"name": "Разведчик", "dry": 2.0, "tank": 24, "thrust": 41.0, "build": 150, "cargo": 0},
-	{"name": "Транспорт", "dry": 5.0, "tank": 48, "thrust": 90.0, "build": 300, "cargo": 12},
+	{"name": "Разведчик", "dry": 2.0, "tank": 24, "thrust": 41.0, "build": 150, "cargo": 0, "ve": 180.0, "fuel": I_FUEL},
+	{"name": "Транспорт", "dry": 5.0, "tank": 48, "thrust": 90.0, "build": 300, "cargo": 12, "ve": 180.0, "fuel": I_FUEL},
+	# истребитель-НЛО: уникальное топливо, Δv ~1000 м/с, бластер, 2 уникальных меха на борту
+	{"name": "Истребитель", "dry": 3.0, "tank": 30, "thrust": 80.0, "build": 400, "cargo": 8, "ve": 1092.0,
+		"fuel": I_UFUEL, "only": U_UMECH},
 ]
-const SHIP_COSTS := [SCOUT_COST, TRANSPORT_COST]
+const SHIP_COSTS := [SCOUT_COST, TRANSPORT_COST, FIGHTER_COST]
 const LOAD_RADIUS := 12.0          # с какого расстояния транспорт забирает юнитов

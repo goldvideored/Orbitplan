@@ -47,7 +47,7 @@ const IND_H := {
 	D.COAL_PLANT: 1.4, D.NUCLEAR: 2.4, D.SMELTER: 1.45, D.CRUSHER: 1.5, D.MELTER: 1.55,
 	D.CENTRIFUGE: 2.1, D.FUEL_SYNTH: 1.7, D.TURRET: 1.1, D.ASSEMBLER: 1.7,
 	D.LOADER: 1.45, D.UNLOADER: 1.2, D.CHIP_FACTORY: 1.45, D.TURRET2: 1.1, D.TURRET3: 1.3,
-	D.LAUNCH_PAD: 0.4, D.SPACE_DOCK: 1.5, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9, D.BATTERY: 1.55,
+	D.LAUNCH_PAD: 0.4, D.SPACE_DOCK: 1.5, D.UALLOY_FORGE: 1.9, D.UCHIP_FAB: 1.5, D.UFUEL_REF: 2.2, D.TURRET4: 1.9, D.AA_GUN: 1.25, D.REPAIR: 2.0, D.UNIT_REPAIR: 1.35, D.POWER_POLE: 2.9, D.BATTERY: 1.55,
 }
 
 var my_team := 0
@@ -145,6 +145,7 @@ var courier_nodes := {}        # клиент: команда -> [модель, 
 var e_menu: RadialMenu = null  # какое меню сейчас открыто по E
 var mm_drones: MultiMesh
 var mm_mechs: MultiMesh
+var mm_umechs: MultiMesh
 var mm_sel: MultiMesh          # кольца под выделенными юнитами
 var selected := {}             # id выделенных юнитов -> true
 var unit_pos := {}             # id своего юнита -> где он сейчас (для выделения)
@@ -338,6 +339,18 @@ func _footprint(type: int, cell: int, dir: int, pn := -1) -> Array:
 				if not rhombus.has(c):
 					rhombus.append(c)
 		return rhombus   # у пятиугольника может выйти меньше 9 — тогда ставить нельзя
+	if size == 12:
+		var o2: Vector3 = P.dirs[cell]
+		var w1: Vector3 = P.dirs[nb[posmod(dir, k)]] - o2
+		var w2: Vector3 = P.dirs[nb[posmod(dir + 1, k)]] - o2
+		var par: Array = []
+		for a in [-1.0, 0.0, 1.0, 2.0]:
+			for bb in [-1.0, 0.0, 1.0]:
+				var p2: Vector3 = (o2 + w1 * float(a) + w2 * float(bb)).normalized()
+				var c2 := P.walk(cell, p2)
+				if not par.has(c2):
+					par.append(c2)
+		return par   # 4 тир — параллелограмм 4×3
 	return [cell]
 
 
@@ -1064,7 +1077,7 @@ func server_set_unit(team: int, cell: int, kind: int, pn: int) -> void:
 	var b: Dictionary = buildings[grid[_k(pn, cell)]]
 	if b.type != D.ASSEMBLER or b.team != team or b.timer > 0:
 		return
-	b.ukind = clampi(kind, 0, 2)
+	b.ukind = clampi(kind, 0, D.UNIT_NAMES.size() - 1)
 	b.buf = {}
 
 
@@ -1240,11 +1253,13 @@ func _status(b: Dictionary) -> Array:
 				int(100.0 * (1.0 - float(b.timer) / float(D.SHIP_KINDS[bk].build)))]]
 		var sh = _pad_ship(b)
 		if sh == null:
-			return [ST_IDLE, "корабля нет — держи E: собрать разведчика или транспорт"]
+			return [ST_IDLE, "корабля нет — держи E: собрать разведчика, транспорт или истребитель"]
 		var dv := _ship_dv(float(sh.fuel), int(sh.kind))
 		var st_txt: String = "в полёте" if sh.state == 1 else "на площадке"
-		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке He-3: %d" % [
-			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv), fuel_in]]
+		var fit: int = int(D.SHIP_KINDS[int(sh.kind)].get("fuel", D.I_FUEL))
+		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке %s: %d" % [
+			D.SHIP_KINDS[int(sh.kind)].name, st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv),
+			D.ITEM_NAMES[fit], int(b.buf.get(fit, 0)) if fit != D.I_FUEL else fuel_in]]
 	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
 		var what: String = D.ITEM_NAMES[b.item] if b.item != D.I_NONE else "пусто"
 		if t == D.BRIDGE:
@@ -1285,6 +1300,13 @@ func _status(b: Dictionary) -> Array:
 		if not creative and b.team != D.T_NEUTRAL and cu <= 0 and int(b.get("ammo", 0)) <= 0:
 			return [ST_STOP, "нет меди"]
 		return [ST_OK, "медь %d" % cu if not creative else "боеприпасы бесконечны"]
+	if t == D.TURRET4:
+		var ua := int(b.buf.get(D.I_UALLOY, 0))
+		if creative or b.team == D.T_NEUTRAL:
+			return [ST_OK, "боеприпасы бесконечны"]
+		if ua <= 0 and int(b.get("ammo", 0)) <= 0:
+			return [ST_STOP, "нет уникального сплава"]
+		return [ST_OK, "уникальный сплав %d (×%d снаряда)" % [ua, D.T4_SHOTS_PER_ITEM]]
 	if t == D.TURRET3:
 		var lead := int(b.buf.get(D.I_LEAD, 0))
 		var ur := int(b.buf.get(D.I_URANIUM, 0))
@@ -1454,7 +1476,7 @@ func _apply_proj(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteA
 func fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	if pn != my_pn:
 		return
-	_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0)][clampi(kind, 0, 2)])
+	_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0), Color(0.4, 0.6, 1.0)][clampi(kind, 0, 3)])
 
 
 @rpc("authority", "call_remote", "unreliable")
@@ -1658,6 +1680,8 @@ func _sim_tick() -> void:
 			_turret2_tick(b)
 		elif t == D.TURRET3:
 			_turret3_tick(b)
+		elif t == D.TURRET4:
+			_turret4_tick(b)
 		elif t == D.AA_GUN:
 			_aa_tick(b)
 		elif t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
@@ -1694,7 +1718,7 @@ func _sim_tick() -> void:
 
 func _ship_dv(fuel: float, kind := 0) -> float:
 	var dry: float = D.SHIP_KINDS[kind].dry
-	return D.SCOUT_VE * log((dry + fuel * D.FUEL_UNIT_MASS) / dry)
+	return float(D.SHIP_KINDS[kind].get("ve", D.SCOUT_VE)) * log((dry + fuel * D.FUEL_UNIT_MASS) / dry)
 
 
 func _ship_tank(sh) -> float:
@@ -1751,7 +1775,7 @@ func _pad_tick(b: Dictionary) -> void:
 	b.wt += 1
 	if b.wt >= 3:
 		b.wt = 0
-		if _buf_take(b, D.I_FUEL, 1):
+		if _buf_take(b, int(D.SHIP_KINDS[int(sh.kind)].get("fuel", D.I_FUEL)), 1):   # истребителю — уникальное
 			sh.fuel = minf(_ship_tank(sh), float(sh.fuel) + 1.0)
 
 
@@ -1781,9 +1805,12 @@ func server_ship_load(peer: int, id: int) -> void:
 	var sh: Dictionary = ships[id]
 	var cap: int = D.SHIP_KINDS[int(sh.kind)].cargo
 	var used := _cargo_used(sh)
+	var only: int = int(D.SHIP_KINDS[int(sh.kind)].get("only", -1))
 	for u in units:
 		if u.team != sh.team or u.pn != sh.pn or u.hp <= 0:
 			continue
+		if only >= 0 and int(u.kind) != only:
+			continue   # истребитель берёт только уникальных мехов
 		var slots: int = D.UNIT_STATS[u.kind].slots
 		if used + slots > cap or _upos(u).distance_to(sh.pos) > D.LOAD_RADIUS:
 			continue
@@ -1929,7 +1956,7 @@ func _drop_ok(b: Dictionary, item: int) -> bool:
 func _drop_room(b: Dictionary, item: int) -> int:
 	if b.type == D.UNLOADER and b.filter == item:
 		return D.UNLOADER_CAP - int(b.buf.get(item, 0))
-	if b.type == D.LAUNCH_PAD and item == D.I_FUEL:
+	if b.type == D.LAUNCH_PAD and (item == D.I_FUEL or item == D.I_UFUEL):
 		return D.PAD_FUEL_CAP - int(b.buf.get(item, 0))
 	return 0
 
@@ -2454,7 +2481,7 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		var need: Dictionary = D.UNIT_RECIPES[o.ukind]
 		return need.has(item) and int(buf.get(item, 0)) < int(need[item]) * 2
 	if t == D.LAUNCH_PAD:
-		return item == D.I_FUEL and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
+		return (item == D.I_FUEL or item == D.I_UFUEL) and int(buf.get(item, 0)) < D.PAD_FUEL_CAP
 	if t == D.AA_GUN:
 		if item == D.I_WATER:
 			return o.water < D.AA_WATER_CAP
@@ -2464,6 +2491,8 @@ func _accepts(o: Dictionary, item: int) -> bool:
 		return total < D.AA_AMMO_CAP
 	if t == D.TURRET2:
 		return item == D.I_COPPER and int(buf.get(item, 0)) < D.T2_AMMO_CAP
+	if t == D.TURRET4:
+		return item == D.I_UALLOY and int(buf.get(item, 0)) < D.T4_AMMO_CAP
 	if t == D.TURRET3:
 		if item != D.I_LEAD and item != D.I_URANIUM:
 			return false
@@ -2667,6 +2696,127 @@ func _turret3_tick(b: Dictionary) -> void:
 	b["aim"] = vel.normalized()
 	_spawn_proj(from, vel, b.team, kind, D.T3_DMG, 7.0, b.cell, b.pn)
 	b.timer = D.T3_CD
+
+
+## Ближайшая цель любого вида (наземная, летающая, игрок, корабль, курьер, постройка) — с ссылкой,
+## чтобы самонаводящийся снаряд мог за ней следить.
+func _find_any_target(team: int, from: Vector3, rng: float, pn: int) -> Dictionary:
+	var best := {}
+	var bd := rng
+	for u in units:
+		if u.team == team or u.hp <= 0 or u.pn != pn:
+			continue
+		var d := from.distance_to(_tpos({"k": "unit", "ref": u}))
+		if d < bd:
+			bd = d
+			best = {"k": "unit", "ref": u}
+	for pid in players:
+		var o: Dictionary = players[pid]
+		if o.team == team or o.hp <= 0 or int(o.get("pn", -9)) != pn:
+			continue
+		var d := from.distance_to(Vector3(o.pos))
+		if d < bd:
+			bd = d
+			best = {"k": "pid", "ref": pid}
+	for sh in ships.values():
+		if int(sh.team) == team or int(sh.pn) != pn:
+			continue
+		var d := from.distance_to(Vector3(sh.pos))
+		if d < bd:
+			bd = d
+			best = {"k": "ship", "ref": int(sh.id)}
+	for r in rovers:
+		if int(r.team) == team or int(r.pn) != pn:
+			continue
+		var d := from.distance_to(_rpos(r))
+		if d < bd:
+			bd = d
+			best = {"k": "rover", "ref": r}
+	if best.is_empty():
+		for b in buildings.values():
+			if b.team == team or b.pn != pn or b.team == D.T_NEUTRAL and team == D.T_NEUTRAL:
+				continue
+			var d := from.distance_to(_bpos(b))
+			if d < bd:
+				bd = d
+				best = {"k": "bld", "ref": int(b.id)}
+	return best
+
+
+## Где сейчас цель (null — её больше нет).
+func _tpos(t: Dictionary):
+	match String(t.k):
+		"unit":
+			var u: Dictionary = t.ref
+			if int(u.hp) <= 0:
+				return null
+			var p := _upos(u)
+			return p + p.normalized() * (D.DRONE_ALT if int(u.kind) == D.U_DRONE else 0.8)
+		"pid":
+			if not players.has(t.ref) or int(players[t.ref].hp) <= 0:
+				return null
+			var pp: Vector3 = players[t.ref].pos
+			return pp + pp.normalized() * 0.9
+		"ship":
+			if not ships.has(t.ref):
+				return null
+			var sp: Vector3 = ships[t.ref].pos
+			return sp + Basis(Quaternion(ships[t.ref].quat)).y * 2.0
+		"rover":
+			var r: Dictionary = t.ref
+			if bool(r.get("dead", false)):
+				return null
+			return _rpos(r) + _rpos(r).normalized() * 0.6
+		"bld":
+			if not buildings.has(t.ref):
+				return null
+			var bp := _bpos(buildings[t.ref])
+			return bp + bp.normalized() * 1.0
+	return null
+
+
+func _damage_tgt(t: Dictionary, dmg: int) -> void:
+	match String(t.k):
+		"unit":
+			t.ref.hp = int(t.ref.hp) - dmg
+		"pid":
+			_damage_player(int(t.ref), dmg)
+		"ship":
+			if ships.has(t.ref):
+				_damage_ship(ships[t.ref], dmg)
+		"rover":
+			_damage_rover(t.ref, dmg)
+		"bld":
+			if buildings.has(t.ref):
+				_damage_building(buildings[t.ref], dmg)
+
+
+## Уникальная пушка: навесной выстрел по любой цели, снаряд дальше наводится сам.
+func _turret4_tick(b: Dictionary) -> void:
+	if b.timer > 0:
+		b.timer -= 1
+		return
+	var free_ammo: bool = creative or b.team == D.T_NEUTRAL
+	if not free_ammo and int(b.get("ammo", 0)) <= 0:
+		if not _buf_take(b, D.I_UALLOY, 1):
+			return
+		b["ammo"] = D.T4_SHOTS_PER_ITEM
+	var from := _muzzle(b, 3.0)
+	var tgt := _find_any_target(b.team, from, D.T3_RANGE, b.pn)
+	if tgt.is_empty():
+		return
+	var tp = _tpos(tgt)
+	if tp == null:
+		return
+	var up := from.normalized()
+	var dir: Vector3 = (Vector3(tp) - from).normalized()
+	var vel := (dir + up * 0.9).normalized() * D.T4_SPEED   # вверх дугой, дальше наведётся
+	b["aim"] = vel.normalized()
+	_spawn_proj(from, vel, b.team, 5, D.T4_DMG, 9.0, b.cell, b.pn)
+	projectiles[projectiles.size() - 1]["tgt"] = tgt
+	if not free_ammo:
+		b["ammo"] = int(b.ammo) - 1
+	b.timer = D.T4_CD
 
 
 # ---------------------------------------------------------------------
@@ -2993,7 +3143,22 @@ func _proj_tick() -> void:
 		for s_i in steps:
 			var a: Vector3 = pr.pos
 			var v: Vector3 = pr.vel
-			v -= a.normalized() * D.PROJ_G * D.PROJ_DT
+			if int(pr.kind) == 5:
+				# самонаводящийся: поворачивает к цели, у цели — прямое попадание и взрыв
+				var tp = _tpos(pr.tgt) if pr.has("tgt") else null
+				if tp != null:
+					var to_t: Vector3 = Vector3(tp) - a
+					if to_t.length() < 2.0:
+						_damage_tgt(pr.tgt, int(pr.dmg))
+						_explode(a, pr.team, false, pr.pn)
+						alive = false
+						break
+					var want := to_t.normalized() * D.T4_SPEED * 1.3
+					v = v.lerp(want, minf(1.0, 2.5 * D.PROJ_DT))
+				else:
+					v -= a.normalized() * D.PROJ_G * D.PROJ_DT
+			else:
+				v -= a.normalized() * D.PROJ_G * D.PROJ_DT
 			var b := a + v * D.PROJ_DT
 			pr.vel = v
 			pr.pos = b
@@ -3087,7 +3252,7 @@ func _fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	for p in Net.ready_peers:
 		fx_beam.rpc_id(p, from, to, kind, pn)
 	if not headless and pn == my_pn:
-		_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0)][clampi(kind, 0, 2)])
+		_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0), Color(0.4, 0.6, 1.0)][clampi(kind, 0, 3)])
 
 
 func _unit_count(team: int, kind: int) -> int:
@@ -3564,9 +3729,9 @@ func _send_snapshot() -> void:
 	var ustat: Array = []
 	for t in 2:
 		var row: Array = []
-		for k in 3:
+		for k in D.UNIT_NAMES.size():
 			row.append(_unit_count(t, k))
-		for k in 3:
+		for k in D.UNIT_NAMES.size():
 			row.append(_unit_limit(t, k))
 		ustat.append(row)
 	var cv: Array = []
@@ -3771,6 +3936,7 @@ func _build_scene() -> void:
 	mm_units = _make_mm(_tank_mesh(umat), 4096, false)
 	mm_drones = _make_mm(_drone_mesh(umat), 2048, false)
 	mm_mechs = _make_mm(_mech_mesh(umat), 512, false)
+	mm_umechs = _make_mm(_mech_mesh(umat, true), 256, false)
 	var ring := TorusMesh.new()
 	ring.inner_radius = 0.8
 	ring.outer_radius = 1.0
@@ -3862,12 +4028,12 @@ func _build_scene() -> void:
 	layer.add_child(item_radial)
 	unit_radial = RadialMenu.new()
 	var unit_name := func(k): return D.UNIT_NAMES[k]
-	unit_radial.configure([["Мини-танк", [0]], ["Дрон", [1]], ["Мех", [2]]], unit_name, "отпусти E — выбрать")
+	unit_radial.configure([["Мини-танк", [0]], ["Дрон", [1]], ["Мех", [2]], ["Уник. мех", [3]]], unit_name, "отпусти E — выбрать")
 	unit_radial.info_func = _unit_info
 	layer.add_child(unit_radial)
 	ship_radial = RadialMenu.new()
 	var ship_name := func(k): return D.SHIP_KINDS[k].name
-	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]]], ship_name, "отпусти E — собрать")
+	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]], ["Истребитель", [2]]], ship_name, "отпусти E — собрать")
 	ship_radial.info_func = _ship_info
 	layer.add_child(ship_radial)
 	dock_radial = RadialMenu.new()
@@ -4294,9 +4460,13 @@ func _drone_mesh(mat: Material) -> ArrayMesh:
 
 ## Боевой мех-паук: брюшко и головогрудь цвета команды, кабина с визором и фарами,
 ## спаренные пушки сверху, 8 суставчатых ног (ходят двумя группами). Перёд — -Z.
-func _mech_mesh(mat: Material) -> ArrayMesh:
+func _mech_mesh(mat: Material, alien := false) -> ArrayMesh:
 	var dark := Color(0.2, 0.2, 0.22, METAL)
 	var steel := Color(0.48, 0.48, 0.52, METAL)
+	if alien:
+		# уникальный мех: тёмно-фиолетовый инопланетный металл с синими светящимися полосами
+		dark = Color(0.14, 0.1, 0.2, METAL)
+		steel = Color(0.28, 0.22, 0.4, METAL)
 	var team := Color(1, 1, 1, PAINT)
 	var lamp := Color(1.0, 0.92, 0.6, GLOW)
 	var parts := [
@@ -4326,6 +4496,13 @@ func _mech_mesh(mat: Material) -> ArrayMesh:
 			parts.append(_seg(hip, knee, 0.16, steel, leg, hip))
 			parts.append(_seg(knee, foot, 0.12, dark, leg, hip))
 			parts.append([_ps(0.11), knee, Vector3.ZERO, team, leg, hip])   # колено
+			if alien:
+				parts.append(_seg(knee + Vector3(0, 0.1, 0), foot.lerp(knee, 0.5) + Vector3(0, 0.1, 0), 0.05,
+					Color(0.3, 0.6, 1.0, GLOW), leg, hip))   # синяя полоса по ноге
+	if alien:
+		for z in [-0.7, -0.3, 0.1, 0.5]:
+			parts.append([_pb(Vector3(1.05, 0.04, 0.06)), Vector3(0, 1.83, z), Vector3.ZERO, Color(0.3, 0.6, 1.0, GLOW), 30])
+		parts.append([_ps(0.3), Vector3(0, 2.3, 0.75), Vector3.ZERO, Color(0.4, 0.95, 1.0, GLOW), 30])   # кристалл материи
 	return _merge(parts, mat)
 
 
@@ -4509,7 +4686,7 @@ func _vis_add(b: Dictionary) -> void:
 		f = (f - up * f.dot(up)).normalized()
 		n.transform = Transform3D(Basis(f, up, f.cross(up)), center + up * base_h)
 		if t != D.CORE:
-			n.scale = Vector3.ONE * (1.6 if cells.size() == 3 else 2.4)
+			n.scale = Vector3.ONE * (1.6 if cells.size() == 3 else (2.4 if cells.size() == 9 else 2.9))
 	else:
 		_orient(n, b.cell, toward)
 	bnodes[b.id] = root
@@ -5135,14 +5312,14 @@ func _update_assembly() -> void:
 		elif not asm_prog.has(id) or not bnodes.has(id):
 			(hv as Node3D).queue_free()
 			asm_nodes.erase(id)
-	var meshes := [mm_units.mesh, mm_drones.mesh, mm_mechs.mesh]
+	var meshes := [mm_units.mesh, mm_drones.mesh, mm_mechs.mesh, mm_umechs.mesh]
 	for id in asm_prog:
 		if not bnodes.has(id) or not buildings.has(id):
 			continue
 		var b: Dictionary = buildings[id]
 		var e: Array = asm_prog[id]
 		var p := clampf(float(e[0]), 0.0, 1.0)
-		var kind := clampi(int(e[1]), 0, 2)
+		var kind := clampi(int(e[1]), 0, 3)
 		var root: Node3D = bnodes[id]
 		var holder: Node3D = asm_nodes.get(id)
 		if holder != null and int(holder.get_meta("kind")) != kind:
@@ -5171,8 +5348,8 @@ func _update_assembly() -> void:
 			mmi.multimesh = mm
 			holder.add_child(mmi)
 			holder.set_meta("mm", mm)
-			var ch := 2.8 if kind == D.U_MECH else 1.1
-			var cw := 1.3 if kind == D.U_MECH else 0.7
+			var ch := 2.8 if kind >= D.U_MECH else 1.1
+			var cw := 2.4 if kind >= D.U_MECH else 0.7
 			var cage := _make_cage(holder, Transform3D(Basis.IDENTITY, Vector3(0, 0.08, 0)), cw, ch,
 				D.TEAM_COLORS[b.team].lightened(0.3))
 			holder.set_meta("cage", cage)
@@ -5371,6 +5548,61 @@ func _smoke(n: Node3D, at: Vector3, col: Color) -> void:
 		var puff := _box(sm, Vector3(0.22, 0.22, 0.22), Vector3.ZERO, col)
 		puff.material_override = _glow_mat(col, 0.45)
 	_anim(n, sm, "smoke", 1.2, 0.6)
+
+
+## 4 тир: инопланетный стиль — тёмно-фиолетовый металл, синие светящиеся полосы, парящий кристалл материи.
+func _vis_tier4(n: Node3D, t: int, col: Color) -> void:
+	var hull := Color(0.2, 0.15, 0.3)
+	var hull2 := Color(0.3, 0.24, 0.42)
+	var blue := Color(0.35, 0.65, 1.0)
+	if t == D.TURRET4:
+		_cyl(n, 0.75, 0.45, Vector3(0, 0.22, 0), hull, 8).material_override = _pmat(hull, 1)
+		_cyl(n, 0.78, 0.04, Vector3(0, 0.4, 0), blue, 8).material_override = _mat(blue, true)
+		var pitch := _turret_head(n, Vector3(0, 0.75, 0), Vector3(0.1, 0.25, 0))
+		var head: Node3D = n.get_meta("head")
+		_box(head, Vector3(0.8, 0.5, 0.75), Vector3.ZERO, hull2).material_override = _pmat(hull2, 1)
+		_box(head, Vector3(0.82, 0.05, 0.77), Vector3(0, 0.12, 0), blue, true)
+		for sz in [-0.22, 0.22]:
+			_box(pitch, Vector3(1.0, 0.24, 0.24), Vector3(0.45, 0, sz), hull)   # ракетные блоки
+			for k in 3:
+				_box(pitch, Vector3(0.05, 0.06, 0.06), Vector3(0.96, -0.06 + 0.06 * k, sz), blue, true)
+		pitch.rotation_degrees = Vector3(0, 0, 30)
+		return
+	# завод: корпус с синими поясами, сверху — кольцо и парящий кристалл материи
+	_box(n, Vector3(1.35, 0.9, 1.1), Vector3(0, 0.45, 0), hull).material_override = _pmat(hull, 1)
+	for y in [0.25, 0.6]:
+		_box(n, Vector3(1.37, 0.05, 1.12), Vector3(0, y, 0), blue, true)
+	var ring := Node3D.new()
+	ring.position = Vector3(0, 1.25, 0)
+	n.add_child(ring)
+	for k in 6:
+		var a := TAU * k / 6.0
+		_box(ring, Vector3(0.12, 0.08, 0.12), Vector3(cos(a) * 0.45, 0, sin(a) * 0.45), blue, true)
+	_anim(n, ring, "spin", 1.6)
+	var crys := Node3D.new()
+	crys.position = Vector3(0, 1.3, 0)
+	n.add_child(crys)
+	var cc := Color(0.4, 0.95, 1.0)
+	if t == D.UCHIP_FAB:
+		cc = Color(0.45, 0.8, 1.0)
+	elif t == D.UFUEL_REF:
+		cc = Color(0.55, 0.6, 1.0)
+	_box(crys, Vector3(0.28, 0.42, 0.28), Vector3.ZERO, cc, true).rotation = Vector3(0.6, 0, 0.6)
+	_anim(n, crys, "spin", 2.2)
+	_anim(n, crys, "bob", 0.12, 1.5)
+	_anim(n, crys, "pulse", 0.15, 3.0)
+	if t == D.UCHIP_FAB:
+		for i in 3:
+			for j in 2:
+				var sq := _box(n, Vector3(0.18, 0.03, 0.18), Vector3(-0.35 + 0.35 * i, 0.91, -0.2 + 0.4 * j), blue, true)
+				_anim(n, sq, "blink", 1.0, 1.0 + 0.3 * i + 0.2 * j)
+	elif t == D.UFUEL_REF:
+		for sx in [-0.45, 0.45]:
+			_cyl(n, 0.2, 1.4, Vector3(sx, 0.7, 0.35), hull2, 10).material_override = _pmat(hull2, 1)
+			_cyl(n, 0.21, 0.05, Vector3(sx, 1.2, 0.35), blue, 10).material_override = _mat(blue, true)
+	else:
+		var melt := _box(n, Vector3(0.5, 0.12, 0.5), Vector3(0.3, 0.95, -0.2), Color(0.4, 0.75, 1.0), true)
+		_anim(n, melt, "pulse", 0.12, 2.5)
 
 
 ## Поворотная часть турели: head крутится вокруг вертикали, pitch внутри неё поднимает ствол.
@@ -5587,6 +5819,8 @@ func _vis_shape(n: Node3D, t: int, col: Color) -> void:
 		_anim(n, crane, "swing", 0.9, 0.6)
 		_anim(n, hook, "bob", 0.12, 1.2)
 		_box(n, Vector3(0.3, 0.12, 0.12), Vector3(0, 0.66, -0.51), Color(1.0, 0.85, 0.2), true)
+	elif t == D.UALLOY_FORGE or t == D.UCHIP_FAB or t == D.UFUEL_REF or t == D.TURRET4:
+		_vis_tier4(n, t, col)
 	elif t == D.SPACE_DOCK:
 		# космопорт: посадочный круг, башня с огнём, бак топлива, ящики груза
 		_cyl(n, 0.78, 0.12, Vector3(0, 0.06, 0), Color(0.3, 0.3, 0.34), 8).material_override = _pmat(Color(0.3, 0.3, 0.34), 1)
@@ -6003,9 +6237,9 @@ func _update_units() -> void:
 	var stride := 7
 	var n := cur_units.size() / stride
 	var can_lerp := prev_units.size() == cur_units.size()
-	var counts := [0, 0, 0]
-	var mms := [mm_units, mm_drones, mm_mechs]
-	var lifts := [0.0, D.DRONE_ALT, 0.0]   # модели стоят на земле, дроны летают
+	var counts := [0, 0, 0, 0]
+	var mms := [mm_units, mm_drones, mm_mechs, mm_umechs]
+	var lifts := [0.0, D.DRONE_ALT, 0.0, 0.0]   # модели стоят на земле, дроны летают
 	var ns := 0
 	unit_pos.clear()
 	unit_lights.clear()
@@ -6018,7 +6252,7 @@ func _update_units() -> void:
 		var team := int(cur_units[j + 3])
 		var hpf := cur_units[j + 4]
 		var id := int(cur_units[j + 5])
-		var kind := clampi(int(cur_units[j + 6]), 0, 2)
+		var kind := clampi(int(cur_units[j + 6]), 0, 3)
 		seen_ids[id] = true
 		var up := p.normalized()
 		var mm: MultiMesh = mms[kind]
@@ -6052,10 +6286,10 @@ func _update_units() -> void:
 		if team == my_team:
 			unit_pos[id] = p
 			if selected.has(id) and ns < mm_sel.instance_count:
-				var sc := 2.0 if kind == D.U_MECH else 0.8
+				var sc := 2.4 if kind >= D.U_MECH else 0.8
 				mm_sel.set_instance_transform(ns, Transform3D(_up_basis(up).scaled(Vector3.ONE * sc), p + up * 0.1))
 				ns += 1
-	for k in 3:
+	for k in mms.size():
 		mms[k].visible_instance_count = counts[k]
 	mm_sel.visible_instance_count = ns
 	if unit_face.size() > seen_ids.size() + 64:
@@ -6787,6 +7021,8 @@ func _near_ship() -> int:
 ## Разведчик: корпус, обтекатель, иллюминатор, стабилизаторы, сопло, опоры, факел.
 ## Начало координат — низ опор, нос вдоль +Y.
 func _make_ship(team: int, kind := 0) -> Node3D:
+	if kind == 2:
+		return _make_ufo(team)
 	var n := Node3D.new()
 	var col: Color = D.TEAM_COLORS[team]
 	var hull := _pmat(Color(0.86, 0.86, 0.88), 1)
@@ -6861,6 +7097,155 @@ func _make_ship(team: int, kind := 0) -> Node3D:
 	return n
 
 
+## Истребитель-НЛО: тарелка из тёмного инопланетного металла с синими светящимися полосами,
+## стеклянный купол, кольцо свечения снизу (оно же «пламя» двигателя).
+func _make_ufo(team: int) -> Node3D:
+	var n := Node3D.new()
+	var col: Color = D.TEAM_COLORS[team]
+	var hull := _pmat(Color(0.24, 0.2, 0.34), 1)
+	var blue := Color(0.35, 0.65, 1.0)
+	var disc := MeshInstance3D.new()
+	var dm := SphereMesh.new()
+	dm.radius = 2.6
+	dm.height = 1.1
+	dm.radial_segments = 32
+	dm.rings = 10
+	disc.mesh = dm
+	disc.position = Vector3(0, 1.3, 0)
+	disc.material_override = hull
+	n.add_child(disc)
+	for r in [2.55, 1.9, 1.2]:
+		var ring := MeshInstance3D.new()
+		var tm := TorusMesh.new()
+		tm.inner_radius = r - 0.05
+		tm.outer_radius = r
+		tm.rings = 48
+		tm.ring_segments = 6
+		ring.mesh = tm
+		ring.position = Vector3(0, 1.3 + (0.0 if r > 2.5 else 0.33 * (2.55 - r) / 1.35 + 0.12), 0)
+		ring.material_override = _mat(blue, true)
+		n.add_child(ring)
+	var dome := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.9
+	sm.height = 1.0
+	dome.mesh = sm
+	dome.position = Vector3(0, 1.85, 0)
+	var gm := StandardMaterial3D.new()
+	gm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	gm.albedo_color = Color(0.45, 0.85, 1.0, 0.55)
+	dome.material_override = gm
+	n.add_child(dome)
+	_box(n, Vector3(0.5, 0.1, 0.5), Vector3(0, 2.35, 0), col, true)   # метка команды на макушке
+	for i in 3:
+		var a := TAU * i / 3.0
+		_part(n, "box", Vector3(0.1, 0.9, 0.1), Vector3(cos(a) * 1.4, 0.45, sin(a) * 1.4), hull)   # опоры
+		_box(n, Vector3(0.35, 0.06, 0.35), Vector3(cos(a) * 1.4, 0.03, sin(a) * 1.4), Color(0.3, 0.3, 0.35))
+	# кольцо свечения снизу — двигатель (в коде корабля это «пламя»)
+	var flame := MeshInstance3D.new()
+	var fm := CylinderMesh.new()
+	fm.top_radius = 1.3
+	fm.bottom_radius = 0.2
+	fm.height = 1.6
+	flame.mesh = fm
+	flame.position = Vector3(0, 0.1, 0)
+	var fmat := StandardMaterial3D.new()
+	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	fmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	fmat.albedo_color = Color(0.4, 0.7, 1.0, 0.6)
+	flame.material_override = fmat
+	flame.visible = false
+	n.add_child(flame)
+	n.set_meta("flame", flame)
+	var beam := MeshInstance3D.new()
+	var bcm := CylinderMesh.new()
+	bcm.top_radius = 0.6
+	bcm.bottom_radius = 6.0
+	bcm.height = 12.0
+	beam.mesh = bcm
+	beam.position = Vector3(0, -6.0, 0)
+	var bmat := StandardMaterial3D.new()
+	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	bmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	bmat.albedo_color = Color(0.5, 0.8, 1.0, 0.07)
+	beam.material_override = bmat
+	beam.visible = false
+	n.add_child(beam)
+	n.set_meta("beam", beam)
+	return n
+
+
+var fighter_cd := 0.0   # клиент: когда истребитель снова сможет выстрелить (время мира)
+
+
+func _fighter_fire() -> void:
+	if piloting == null or world_time < fighter_cd:
+		return
+	fighter_cd = world_time + D.FIGHTER_CD
+	var from := piloting.global_position + piloting.global_transform.basis.y.normalized() * 1.5
+	var dir := piloting.global_transform.basis.y.normalized()   # стреляет по носу (вверх по оси тарелки)
+	if is_server:
+		server_ship_fire(1, piloting_id, from, dir)
+	else:
+		req_ship_fire.rpc_id(1, piloting_id, from, dir)
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func req_ship_fire(id: int, from: Vector3, dir: Vector3) -> void:
+	if multiplayer.is_server():
+		server_ship_fire(multiplayer.get_remote_sender_id(), id, from, dir)
+
+
+## Бластер истребителя: луч на 300 м, 400 урона — по кораблям, юнитам, игрокам, курьерам, постройкам.
+func server_ship_fire(peer: int, id: int, from: Vector3, dir: Vector3) -> void:
+	if not ships.has(id):
+		return
+	var sh: Dictionary = ships[id]
+	if int(sh.pilot) != peer or int(sh.kind) != 2:
+		return
+	if world_time < float(sh.get("fire_t", -100.0)):
+		return
+	sh["fire_t"] = world_time + D.FIGHTER_CD - 0.5
+	dir = dir.normalized()
+	var pn: int = int(sh.pn)
+	var best_t: float = D.FIGHTER_RANGE
+	var hit := {}
+	var cands: Array = []
+	for o in ships.values():
+		if int(o.team) != int(sh.team) and int(o.pn) == pn:
+			cands.append([{"k": "ship", "ref": int(o.id)}, 2.2])
+	for u in units:
+		if int(u.team) != int(sh.team) and int(u.pn) == pn and int(u.hp) > 0:
+			cands.append([{"k": "unit", "ref": u}, 1.6 if int(u.kind) >= D.U_MECH else 0.8])
+	for pid in players:
+		var po: Dictionary = players[pid]
+		if int(po.team) != int(sh.team) and int(po.get("pn", -9)) == pn and int(po.hp) > 0:
+			cands.append([{"k": "pid", "ref": pid}, 0.8])
+	for r in rovers:
+		if int(r.team) != int(sh.team) and int(r.pn) == pn:
+			cands.append([{"k": "rover", "ref": r}, 1.0])
+	if pn >= 0:
+		for b in buildings.values():
+			if int(b.team) != int(sh.team) and int(b.pn) == pn and _bpos(b).distance_to(from) < D.FIGHTER_RANGE + 5.0:
+				cands.append([{"k": "bld", "ref": int(b.id)}, 1.0 + 0.4 * float(b.cells.size())])
+	for c in cands:
+		var tp = _tpos(c[0])
+		if tp == null:
+			continue
+		var t := _ray_sphere(from, dir, Vector3(tp), float(c[1]))
+		if t > 0.0 and t < best_t:
+			best_t = t
+			hit = c[0]
+	if not hit.is_empty():
+		_damage_tgt(hit, D.FIGHTER_DMG)
+	if pn >= 0:
+		_fx_beam(from, from + dir * best_t, 3, pn)
+
+
 func _update_proj(delta: float) -> void:
 	proj_time += delta
 	var t := proj_time
@@ -6877,6 +7262,8 @@ func _update_proj(delta: float) -> void:
 			col = Color(0.85, 0.85, 0.9)
 		elif k == 4:
 			col = Color(0.5, 1.0, 0.35)
+		elif k == 5:
+			col = Color(0.4, 0.75, 1.0)
 		if k == 1:
 			col = Color(1.0, 0.55, 0.2)
 		elif k == 2:
@@ -7444,7 +7831,7 @@ func _build_panel(layer: CanvasLayer) -> void:
 	var us := _ui_section(root)
 	ui.units_box = us
 	ui.units = [_ui_row(us, Icons.UI_TANK, Color(0.55, 0.8, 0.6)), _ui_row(us, Icons.UI_DRONE, Color(0.55, 0.8, 0.6)),
-		_ui_row(us, Icons.UI_MECH, Color(0.55, 0.8, 0.6))]
+		_ui_row(us, Icons.UI_MECH, Color(0.55, 0.8, 0.6)), _ui_row(us, Icons.UI_MECH, Color(0.4, 0.65, 1.0))]
 
 	# --- в руках: название и цена (значки ресурсов, красным — не хватает)
 	ui.seps.append(_ui_sep(root))
@@ -7806,9 +8193,10 @@ func _update_hud() -> void:
 	# юниты
 	if unit_stat.size() > my_team:
 		var u: Array = unit_stat[my_team]
-		for k in 3:
-			var lim := maxi(int(u[k + 3]), 1)
-			_set_row(ui.units[k], float(u[k]) / float(lim), "%d / %d" % [int(u[k]), int(u[k + 3])])
+		var nk := D.UNIT_NAMES.size()
+		for k in mini(nk, ui.units.size()):
+			var lim := maxi(int(u[k + nk]), 1)
+			_set_row(ui.units[k], float(u[k]) / float(lim), "%d / %d" % [int(u[k]), int(u[k + nk])])
 
 	# в руках
 	if ui.held_key != sel_type:
@@ -7977,8 +8365,8 @@ func _update_ship_panel() -> void:
 				used = int(e[9])
 	_set_row(ui.s_hull, hull, "%d%%" % int(hull * 100.0))
 	_bar_color(ui.s_hull.bar, Color(0.6, 0.7, 0.85) if hull > 0.5 else Color(1.0, 0.3, 0.2))
-	(ui.s_cargo.row as Control).visible = kind == 1
-	var cargo: int = D.SHIP_KINDS[1].cargo
+	var cargo: int = D.SHIP_KINDS[kind].cargo
+	(ui.s_cargo.row as Control).visible = cargo > 0
 	_set_row(ui.s_cargo, float(used) / float(cargo), "%d / %d" % [used, cargo])
 	var soi: float = SkyCalc.soi(sh.pn) if sh.pn >= 0 else 1.0
 	ui.s_alt.num.text = "высота %d м" % int(sh.altitude())
@@ -8014,6 +8402,9 @@ func _update_ship_panel() -> void:
 		lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
 	elif bool(pred.get("impact", false)):
 		lines.append("Траектория пересекает поверхность")
+	if kind == 2:
+		var cdl := fighter_cd - world_time
+		lines.append("Бластер (F): " + ("ГОТОВ" if cdl <= 0.0 else "перезарядка %d с" % int(ceil(cdl))))
 	lines.append("")
 	lines.append_array(_plan_lines())
 	ui.s_text.text = "\n".join(lines)
@@ -8130,7 +8521,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kp and kp.pressed and not kp.echo:
 			if kp.keycode == KEY_G:
 				_exit_ship()
-			elif (kp.keycode == KEY_L or kp.keycode == KEY_U) and piloting.kind == 1 and piloting.landed:
+			elif kp.keycode == KEY_F and piloting.kind == 2:
+				_fighter_fire()
+			elif (kp.keycode == KEY_L or kp.keycode == KEY_U) and int(D.SHIP_KINDS[piloting.kind].cargo) > 0 and piloting.landed:
 				var do_load := kp.keycode == KEY_L
 				if is_server:
 					if do_load:
@@ -8365,7 +8758,8 @@ func _unit_info(k: int) -> Array:
 	var st: Dictionary = D.UNIT_STATS[k]
 	var lim := ""
 	if unit_stat.size() > my_team and my_team >= 0:
-		lim = "   |   Сейчас: %d / %d" % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + 3])]
+		var nk := D.UNIT_NAMES.size()
+		lim = "   |   Сейчас: %d / %d" % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + nk])]
 	var desc := ""
 	if k == D.U_DRONE:
 		desc = "очень быстрый, таранит цель: −25% её прочности, сам погибает"
@@ -8380,6 +8774,8 @@ func _ship_info(k: int) -> Array:
 	var sk: Dictionary = D.SHIP_KINDS[k]
 	var dv := _ship_dv(float(sk.tank), k)
 	var extra := "мест для юнитов: %d (танк и дрон — 1, мех — 4)" % int(sk.cargo) if int(sk.cargo) > 0 else "1 игрок"
+	if k == 2:
+		extra = "уникальное топливо, бластер (F) на %d м раз в %d с, берёт 2 уникальных меха" % [int(D.FIGHTER_RANGE), int(D.FIGHTER_CD)]
 	return [sk.name, "Δv полного бака %d м/с, %s" % [int(dv), extra], "Цена: " + _cost_dict_text(D.SHIP_COSTS[k])]
 
 

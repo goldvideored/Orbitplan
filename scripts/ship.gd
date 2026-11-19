@@ -54,7 +54,7 @@ func mass() -> float:
 
 ## Сколько ещё можно разогнаться (формула Циолковского).
 func dv() -> float:
-	return D.SCOUT_VE * log(mass() / float(D.SHIP_KINDS[kind].dry))
+	return float(D.SHIP_KINDS[kind].get("ve", D.SCOUT_VE)) * log(mass() / float(D.SHIP_KINDS[kind].dry))
 
 
 ## Гравитационный параметр и радиус тела, вокруг которого летим сейчас.
@@ -193,7 +193,7 @@ func _physics_process(dt: float) -> void:
 		var f: float = float(D.SHIP_KINDS[kind].thrust) * power
 		vel += global_transform.basis.y.normalized() * (f / mass()) * dt
 		# расход массы: тяга / скорость истечения
-		fuel = maxf(0.0, fuel - f / D.SCOUT_VE * dt / D.FUEL_UNIT_MASS)
+		fuel = maxf(0.0, fuel - f / float(D.SHIP_KINDS[kind].get("ve", D.SCOUT_VE)) * dt / D.FUEL_UNIT_MASS)
 		landed = false
 	flame.scale = Vector3(1, maxf(0.2, power), 1)
 
