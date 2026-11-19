@@ -251,17 +251,52 @@ func setup(seed_val: int, team: int, server: bool, dedicated: bool, creative_on 
 				"cell": _pl(D.TEAM_HOME[t]).core_center[t], "dir": 0, "pn": D.TEAM_HOME[t], "main": true})
 		# нейтральная база на каждой планете: ядро + готовая оборона
 		for pn in D.PLANETS.size():
-			var site: int = _pl(pn).core_center[D.T_NEUTRAL]
-			var rings_by := {}   # кольцо -> клетки
-			var r := _pl(pn).rings(site, 6)
-			for c in r:
-				var dist: int = r[c]
-				if not rings_by.has(dist):
-					rings_by[dist] = []
-				rings_by[dist].append(c)
-			_add_building({"id": _new_id(), "type": D.CORE, "team": D.T_NEUTRAL, "cell": site, "dir": 0, "pn": pn})
-			_place_defense(D.TURRET, rings_by[3], D.NEUTRAL_LASERS, pn)
-			_place_defense(D.TURRET2, rings_by[6], D.NEUTRAL_GUNS, pn)
+			var sites: Array = [_pl(pn).core_center[D.T_NEUTRAL]]
+			sites.append_array(_pl(pn).extra_sites)
+			for site in sites:
+				var rings_by := {}   # кольцо -> клетки
+				var r := _pl(pn).rings(int(site), 9)
+				for c in r:
+					var dist: int = r[c]
+					if not rings_by.has(dist):
+						rings_by[dist] = []
+					rings_by[dist].append(c)
+				_add_building({"id": _new_id(), "type": D.CORE, "team": D.T_NEUTRAL, "cell": int(site), "dir": 0, "pn": pn})
+				if _pl(pn).kind == 2:
+					_fortify(rings_by, pn)
+				else:
+					_place_defense(D.TURRET, rings_by[3], D.NEUTRAL_LASERS, pn)
+					_place_defense(D.TURRET2, rings_by[6], D.NEUTRAL_GUNS, pn)
+
+
+## Крепость большой планеты: 2 артиллерии, 2 ремонтные башни (регенераторы) и забор по кругу с проходами.
+func _fortify(rings_by: Dictionary, pn: int) -> void:
+	_place_defense(D.TURRET3, rings_by[5], 2, pn)
+	_place_defense(D.REPAIR, rings_by[3], 2, pn)
+	var ring: Array = rings_by.get(9, [])
+	# обходим кольцо по кругу (сортировка по углу), оставляем 3 прохода
+	var P: Planet = _pl(pn)
+	if ring.is_empty():
+		return
+	var c0: Vector3 = Vector3.ZERO
+	for c in ring:
+		c0 += P.dirs[c]
+	c0 = c0.normalized()
+	var t1 := c0.cross(Vector3.UP if absf(c0.y) < 0.9 else Vector3.RIGHT).normalized()
+	var t2 := c0.cross(t1)
+	ring.sort_custom(func(a, b): return atan2(P.dirs[a].dot(t2), P.dirs[a].dot(t1)) < atan2(P.dirs[b].dot(t2), P.dirs[b].dot(t1)))
+	var n := ring.size()
+	for i in n:
+		var gate := false
+		for g in 3:
+			if absi(i - int(n * g / 3.0)) <= 1:
+				gate = true
+		if gate:
+			continue
+		var c: int = ring[i]
+		if grid.has(_k(pn, c)) or P.level[c] >= D.MAX_LEVEL:
+			continue
+		_add_building({"id": _new_id(), "type": D.WALL, "team": D.T_NEUTRAL, "cell": c, "dir": 0, "pn": pn})
 
 
 ## Расставить count турелей типа type равномерно по клеткам кольца (пропуская занятые места).
@@ -573,8 +608,9 @@ func _can_place(team: int, type: int, cell: int, dir: int, pn: int) -> bool:
 	var foot := _footprint(type, cell, dir, pn)
 	if foot.size() != _size_of(type):
 		return false
+	var P0: Planet = _pl(pn)
 	for c in foot:
-		if grid.has(_k(pn, c)) or _pl(pn).level[c] >= D.MAX_LEVEL:
+		if grid.has(_k(pn, c)) or P0.level[c] >= D.MAX_LEVEL or (P0.deco.size() > c and P0.deco[c] != 0):
 			return false
 	for b in buildings.values():
 		if b.type == D.CORE and b.pn == pn and b.team != team and _arc(cell, b.cell, pn) < D.ENEMY_ZONE:
@@ -1222,7 +1258,7 @@ func _status(b: Dictionary) -> Array:
 	var t: int = b.type
 	if _busy(b):
 		return [ST_IDLE, ("снос %d%%" if b.decon else "стройка %d%%") % int(100.0 * float(b.bt))]
-	if D.POWER_USE.has(t) and not power_has_gen.has(power_root.get(b.id, b.id)):
+	if D.POWER_USE.has(t) and b.team != D.T_NEUTRAL and not power_has_gen.has(power_root.get(b.id, b.id)):
 		return [ST_STOP, "нет энергии: рядом нет генератора"]
 	if t == D.CORE and b.team == D.T_NEUTRAL:
 		if b.cap_team >= 0:
@@ -1478,7 +1514,7 @@ func _apply_proj(pp: PackedVector3Array, pv: PackedVector3Array, pk: PackedByteA
 func fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	if pn != my_pn:
 		return
-	_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0), Color(0.4, 0.6, 1.0)][clampi(kind, 0, 3)])
+	_shot_fx(from, to, kind)
 
 
 @rpc("authority", "call_remote", "unreliable")
@@ -1664,6 +1700,8 @@ func _sim_tick() -> void:
 		if D.POWER_USE.has(t):
 			var root: int = power_root.get(b.id, b.id)
 			r = float(gratio.get(root, 1.0 if power_has_gen.has(root) else 0.0))
+			if b.team == D.T_NEUTRAL:
+				r = 1.0   # у нейтральных баз своё питание
 			b.pr = r
 		if t == D.CORE:
 			if int(b.get("burn_t", 0)) > 0:
@@ -1968,6 +2006,22 @@ func _find_drop(team: int, item: int, from: Vector3, pn: int) -> int:
 	return best
 
 
+## Припаркованный свой корабль на этой планете, которому нужно это топливо. -1 — нет.
+func _tanker_ship(r: Dictionary, item: int) -> int:
+	var best := -1
+	var bd := INF
+	for sh in ships.values():
+		if int(sh.team) != int(r.team) or int(sh.pn) != int(r.pn) or int(sh.state) != 0:
+			continue
+		if int(D.SHIP_KINDS[int(sh.kind)].get("fuel", D.I_FUEL)) != item or float(sh.fuel) >= _ship_tank(sh) - 0.5:
+			continue
+		var d := _rpos(r).distance_squared_to(Vector3(sh.pos))
+		if d < bd:
+			bd = d
+			best = int(sh.id)
+	return best
+
+
 func _drop_ok(b: Dictionary, item: int) -> bool:
 	return _drop_room(b, item) > 0
 
@@ -2029,9 +2083,13 @@ func _rovers_tick() -> void:
 			var tanker: bool = int(r.kind) == 1
 			for it in buf:
 				var n := int(buf[it])
-				if tanker != (int(it) == D.I_FUEL) or (not tanker and D.FLUIDS.has(int(it))):
+				var fuel_it: bool = int(it) == D.I_FUEL or int(it) == D.I_UFUEL
+				if tanker != fuel_it or (not tanker and D.FLUIDS.has(int(it))):
 					continue
-				if n > best_n and _find_drop(r.team, it, _rpos(r), r.pn) != -1:
+				var can_drop: bool = _find_drop(r.team, it, _rpos(r), r.pn) != -1
+				if tanker and not can_drop:
+					can_drop = _tanker_ship(r, int(it)) != -1   # заправить припаркованный корабль
+				if n > best_n and can_drop:
 					best_n = n
 					best_item = it
 			if best_item != D.I_NONE:
@@ -2040,8 +2098,30 @@ func _rovers_tick() -> void:
 				r.cargo_item = best_item
 				r.cargo_n = take
 				r.target = _find_drop(r.team, best_item, _rpos(r), r.pn)
+				r["tship"] = _tanker_ship(r, best_item) if r.target == -1 else -1
 				r.state = 1
 		elif r.state == 1:
+			# заправщик едет к припаркованному кораблю
+			if int(r.get("tship", -1)) >= 0:
+				var sid: int = int(r.tship)
+				var sh = ships.get(sid)
+				if sh == null or int(sh.state) != 0 or int(sh.pn) != int(r.pn) or float(sh.fuel) >= _ship_tank(sh) - 0.01:
+					r.tship = _tanker_ship(r, int(r.cargo_item))
+					if int(r.tship) == -1:
+						r.state = 2   # заправлять некого — домой
+					continue
+				if _rover_move(r, Vector3(sh.pos)):
+					var room := int(floor(_ship_tank(sh) - float(sh.fuel)))
+					var give := mini(room, int(r.cargo_n))
+					sh.fuel = float(sh.fuel) + give
+					r.cargo_n = int(r.cargo_n) - give
+					if int(r.cargo_n) <= 0:
+						r.cargo_item = D.I_NONE
+						r.state = 2
+						r.tship = -1
+					else:
+						r.tship = _tanker_ship(r, int(r.cargo_item))
+				continue
 			# везём
 			if not buildings.has(r.target) or not _drop_ok(buildings[r.target], r.cargo_item):
 				r.target = _find_drop(r.team, r.cargo_item, _rpos(r), r.pn)
@@ -2517,7 +2597,7 @@ func _accepts(o: Dictionary, item: int) -> bool:
 			return false
 		return int(buf.get(D.I_LEAD, 0)) + int(buf.get(D.I_URANIUM, 0)) < D.T3_AMMO_CAP
 	if t == D.FUEL_DEPOT:
-		return item == D.I_FUEL and int(buf.get(item, 0)) < D.DEPOT_CAP
+		return (item == D.I_FUEL or item == D.I_UFUEL) and int(buf.get(item, 0)) < D.DEPOT_CAP
 	if t == D.SPACE_DOCK:
 		if item == D.I_FUEL:
 			return int(buf.get(item, 0)) < D.COURIER_FUEL * 2
@@ -3280,7 +3360,7 @@ func _fx_beam(from: Vector3, to: Vector3, kind: int, pn: int) -> void:
 	for p in Net.ready_peers:
 		fx_beam.rpc_id(p, from, to, kind, pn)
 	if not headless and pn == my_pn:
-		_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0), Color(0.4, 0.6, 1.0)][clampi(kind, 0, 3)])
+		_shot_fx(from, to, kind)
 
 
 func _unit_count(team: int, kind: int) -> int:
@@ -3505,7 +3585,8 @@ func _units_tick() -> void:
 				target_unit.hp -= dmg
 			else:
 				_damage_building(target_b, dmg)
-			_fx_beam(upos, tpos, 2, u.pn)
+			_fx_beam(upos + upos.normalized() * (1.9 if int(u.kind) >= D.U_MECH else 0.6), tpos,
+				4 if int(u.kind) == D.U_TANK else 5, u.pn)   # танки и мехи стреляют снарядами
 			if finished:
 				return
 	units = units.filter(func(x): return x.hp > 0)
@@ -4138,6 +4219,7 @@ func _build_terrain() -> void:
 	terrain_node.add_child(terrain_body)
 	if planet.kind == 2:
 		terrain_node.add_child(_atmo_shell(planet.radius))
+		_build_deco()
 	if planet.kind == 1:
 		var pts := PackedVector3Array()
 		var nrm := PackedVector3Array()
@@ -4175,6 +4257,63 @@ func _build_terrain() -> void:
 			ps.mesh = qm
 			ps.visibility_aabb = AABB(Vector3.ONE * -planet.radius * 1.5, Vector3.ONE * planet.radius * 3.0)
 			terrain_node.add_child(ps)
+
+
+## Окружение большой планеты: валуны, кристаллические шпили (светятся), инопланетные растения.
+func _build_deco() -> void:
+	var lists := [[], [], [], []]
+	for c in planet.count():
+		var kd: int = planet.deco[c]
+		if kd > 0:
+			lists[kd].append(c)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77
+	var specs := [
+		null,
+		[_pb(Vector3(1.3, 0.9, 1.1)), _pmat(Color(0.62, 0.52, 0.34), 1), 0.45],   # валун
+		[_pc(0.02, 0.35, 2.6, 6), _mat(Color(1.0, 0.75, 0.3), true), 1.3],        # шпиль
+		[_pc(0.08, 0.14, 1.4, 6), _pmat(Color(0.25, 0.5, 0.4), 1), 0.7],          # стебель растения
+	]
+	for kd in [1, 2, 3]:
+		var cells: Array = lists[kd]
+		if cells.is_empty():
+			continue
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.instance_count = cells.size() * (2 if kd == 3 else 1)
+		mm.mesh = specs[kd][0]
+		var i := 0
+		for c in cells:
+			var up: Vector3 = planet.dirs[c]
+			var bas := _up_basis(up).rotated(up, rng.randf() * TAU)
+			var sc := rng.randf_range(0.7, 1.5)
+			if kd == 1:
+				bas = bas * Basis.from_euler(Vector3(rng.randf_range(-0.3, 0.3), 0, rng.randf_range(-0.3, 0.3)))
+			var pos := planet.top_pos(c) + up * float(specs[kd][2]) * sc
+			mm.set_instance_transform(i, Transform3D(bas.scaled(Vector3.ONE * sc), pos))
+			i += 1
+			if kd == 3:
+				# шляпка растения — светящийся бирюзовый шар
+				var cap := Transform3D(Basis().scaled(Vector3.ONE * 0.35 * sc), planet.top_pos(c) + up * 1.45 * sc)
+				mm.set_instance_transform(i, cap)
+				i += 1
+		var mi := MultiMeshInstance3D.new()
+		mi.multimesh = mm
+		mi.material_override = specs[kd][1]
+		terrain_node.add_child(mi)
+		if kd == 3:
+			# шляпки отдельно, светящиеся: копия с другим мешем
+			var mm2 := MultiMesh.new()
+			mm2.transform_format = MultiMesh.TRANSFORM_3D
+			mm2.instance_count = cells.size()
+			mm2.mesh = _ps(1.0)
+			for j in cells.size():
+				mm2.set_instance_transform(j, mm.get_instance_transform(j * 2 + 1))
+				mm.set_instance_transform(j * 2 + 1, Transform3D(Basis().scaled(Vector3.ZERO), Vector3.ZERO))
+			var mi2 := MultiMeshInstance3D.new()
+			mi2.multimesh = mm2
+			mi2.material_override = _mat(Color(0.4, 1.0, 0.85), true)
+			terrain_node.add_child(mi2)
 
 
 func _atmo_shell(r: float) -> MeshInstance3D:
@@ -7144,6 +7283,11 @@ func _update_ships(delta: float) -> void:
 		node.global_transform = node.global_transform.interpolate_with(target, k)
 		var flame: Node3D = node.get_meta("flame")
 		flame.visible = bool(e[4])
+		if node.has_meta("gear"):
+			var gr: Node3D = node.get_meta("gear")
+			var want := 1.0 if int(e[6]) == 0 else 0.05
+			gr.scale.y = lerpf(gr.scale.y, want, minf(1.0, delta * 3.0))
+			gr.visible = gr.scale.y > 0.08
 	for id in ship_nodes.keys():
 		if not seen.has(id):
 			ship_nodes[id].queue_free()
@@ -7290,10 +7434,14 @@ func _make_ufo(team: int) -> Node3D:
 	dome.material_override = gm
 	n.add_child(dome)
 	_box(n, Vector3(0.5, 0.1, 0.5), Vector3(0, 2.35, 0), col, true)   # метка команды на макушке
+	var gear := Node3D.new()   # опоры убираются в полёте (шарнир — у днища)
+	gear.position = Vector3(0, 0.9, 0)
+	n.add_child(gear)
 	for i in 3:
 		var a := TAU * i / 3.0
-		_part(n, "box", Vector3(0.1, 0.9, 0.1), Vector3(cos(a) * 1.4, 0.45, sin(a) * 1.4), hull)   # опоры
-		_box(n, Vector3(0.35, 0.06, 0.35), Vector3(cos(a) * 1.4, 0.03, sin(a) * 1.4), Color(0.3, 0.3, 0.35))
+		_part(gear, "box", Vector3(0.1, 0.9, 0.1), Vector3(cos(a) * 1.4, -0.45, sin(a) * 1.4), hull)   # опоры
+		_box(gear, Vector3(0.35, 0.06, 0.35), Vector3(cos(a) * 1.4, -0.87, sin(a) * 1.4), Color(0.3, 0.3, 0.35))
+	n.set_meta("gear", gear)
 	# кольцо свечения снизу — двигатель (в коде корабля это «пламя»)
 	var flame := MeshInstance3D.new()
 	var fm := CylinderMesh.new()
@@ -7489,8 +7637,11 @@ func server_ship_fire(peer: int, id: int, from: Vector3, dir: Vector3) -> void:
 			hit = c[0]
 	if not hit.is_empty():
 		_damage_tgt(hit, D.FIGHTER_DMG)
+	var end := from + dir * best_t
 	if pn >= 0:
-		_fx_beam(from, from + dir * best_t, 3, pn)
+		_fx_beam(from, end, 3, pn)
+		if not hit.is_empty() or best_t < D.FIGHTER_RANGE - 1.0 or end.length() < _pl(pn).radius + 2.0:
+			_blast(end, int(sh.team), pn, D.FIGHTER_SPLASH_R, D.FIGHTER_SPLASH_DMG)   # зона поражения на месте попадания
 
 
 ## Мощный взрыв: юниты, игроки, корабли, курьеры, постройки в радиусе r (урон к краю — 30%).
@@ -7950,6 +8101,109 @@ func _boom(at: Vector3, r: float, uranium: bool) -> void:
 	tw.tween_property(mi, "scale", Vector3.ONE * r * 0.6, 0.35)
 	tw.tween_property(m, "albedo_color:a", 0.0, 0.5)
 	tw.chain().tween_callback(mi.queue_free)
+
+
+## Эффект выстрела по виду: 0–2 — лучи (как было), 3 — плазменный заряд НЛО с кольцом ударной волны,
+## 4 — снаряд танка, 5 — снаряд меха.
+func _shot_fx(from: Vector3, to: Vector3, kind: int) -> void:
+	if headless:
+		return
+	if kind == 3:
+		_plasma_fx(from, to)
+	elif kind == 4 or kind == 5:
+		_shell_fx(from, to, kind == 5)
+	else:
+		_tracer(from, to, [Color(1.0, 0.85, 0.3), Color(1.0, 0.25, 0.2), Color(0.6, 0.9, 1.0)][clampi(kind, 0, 2)])
+
+
+func _glow_ball(r: float, col: Color) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = r
+	sm.height = r * 2.0
+	sm.radial_segments = 8
+	sm.rings = 4
+	mi.mesh = sm
+	mi.material_override = _mat(col, true)
+	return mi
+
+
+## Кольцо ударной волны («бублик»): растёт и тает.
+func _shock_ring(at: Vector3, normal: Vector3, r0: float, r1: float, col: Color, dur: float) -> void:
+	var mi := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = 0.8
+	tm.outer_radius = 1.0
+	tm.rings = 32
+	tm.ring_segments = 6
+	mi.mesh = tm
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.albedo_color = Color(col.r, col.g, col.b, 0.9)
+	mi.material_override = m
+	var n := normal.normalized()
+	var side := n.cross(Vector3.UP)
+	if side.length() < 0.01:
+		side = n.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var bas := Basis(side, n, side.cross(n))   # плоскость кольца — поперёк направления
+	mi.transform = Transform3D(bas.scaled(Vector3.ONE * r0), at)
+	local_root.add_child(mi)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(mi, "scale", Vector3.ONE * r1, dur)
+	tw.tween_property(m, "albedo_color:a", 0.0, dur)
+	tw.chain().tween_callback(mi.queue_free)
+
+
+## Плазменный залп НЛО: вспышка и кольцо у дула, светящийся заряд летит к цели, на месте — взрыв и кольцо.
+func _plasma_fx(from: Vector3, to: Vector3) -> void:
+	var dir := (to - from).normalized()
+	var cyan := Color(0.45, 0.85, 1.0)
+	_shock_ring(from, dir, 0.4, 3.0, cyan, 0.35)
+	var flash := _glow_ball(0.9, Color(0.8, 0.95, 1.0))
+	flash.position = from
+	local_root.add_child(flash)
+	get_tree().create_timer(0.06).timeout.connect(flash.queue_free)
+	var ball := _glow_ball(0.45, cyan)
+	var halo := _glow_ball(0.8, Color(0.3, 0.6, 1.0))
+	halo.transparency = 0.6
+	ball.add_child(halo)
+	ball.position = from
+	local_root.add_child(ball)
+	var dur := clampf(from.distance_to(to) / 160.0, 0.05, 2.0)
+	var tw := create_tween()
+	tw.tween_property(ball, "position", to, dur)
+	tw.tween_callback(_plasma_hit.bind(ball, to))
+
+
+func _plasma_hit(ball: Node3D, to: Vector3) -> void:
+	ball.queue_free()
+	_boom(to, 3.0, false)
+	_shock_ring(to, to.normalized(), 0.5, float(D.FIGHTER_SPLASH_R) * 1.4, Color(0.45, 0.85, 1.0), 0.5)
+
+
+## Снаряд танка/меха: вспышка у ствола, светящийся снаряд летит к цели, у цели — хлопок.
+func _shell_fx(from: Vector3, to: Vector3, heavy: bool) -> void:
+	var col := Color(1.0, 0.75, 0.3) if not heavy else Color(1.0, 0.5, 0.2)
+	var flash := _glow_ball(0.25 if not heavy else 0.45, Color(1.0, 0.9, 0.6))
+	flash.position = from
+	local_root.add_child(flash)
+	get_tree().create_timer(0.05).timeout.connect(flash.queue_free)
+	var shell := _glow_ball(0.09 if not heavy else 0.15, col)
+	shell.position = from
+	local_root.add_child(shell)
+	var dur := clampf(from.distance_to(to) / 70.0, 0.04, 0.6)
+	var tw := create_tween()
+	tw.tween_property(shell, "position", to, dur)
+	tw.tween_callback(_shell_hit.bind(shell, to, heavy))
+
+
+func _shell_hit(shell: Node3D, to: Vector3, heavy: bool) -> void:
+	shell.queue_free()
+	_boom(to, 0.6 if not heavy else 1.2, false)
 
 
 func _tracer(a: Vector3, b: Vector3, col := Color(1.0, 0.85, 0.3)) -> void:
@@ -8634,6 +8888,10 @@ func _update_hud() -> void:
 				ui.ore.visible = true
 				ui.ore_icon.visible = false
 				ui.ore_text.text = "Скалы — строить нельзя"
+			elif planet.deco.size() > hover_cell and planet.deco[hover_cell] != 0:
+				ui.ore.visible = true
+				ui.ore_icon.visible = false
+				ui.ore_text.text = ["", "Валун", "Кристаллический шпиль", "Инопланетное растение"][planet.deco[hover_cell]] + " — строить нельзя"
 			elif _arc(hover_cell, planet.core_center[1 - my_team]) < D.ENEMY_ZONE:
 				ui.ore.visible = true
 				ui.ore_icon.visible = false
@@ -8810,6 +9068,8 @@ func _update_ship_panel() -> void:
 		lines.append("Бластер (F): " + ("ГОТОВ" if cdl <= 0.0 else "перезарядка %d с" % int(ceil(cdl))))
 	elif kind == 3:
 		lines.append("F — подрыв (взрыв %d м). Врезался — тоже взрыв" % int(D.KAMIKAZE_R))
+	if kind == 2 or kind == 4:
+		lines.append("V — прицел (вид из носа)" + ("  [ВКЛ]" if sh.aim_mode else ""))
 	elif kind == 4:
 		var jcd := jet_cd - world_time
 		lines.append("Ракета (F): " + ("ГОТОВА" if jcd <= 0.0 else "перезарядка %d с" % int(ceil(jcd))) + ("" if sh.pn >= 0 else " (только у планеты)"))
@@ -8929,6 +9189,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if kp and kp.pressed and not kp.echo:
 			if kp.keycode == KEY_G:
 				_exit_ship()
+			elif kp.keycode == KEY_V:
+				piloting.aim_mode = not piloting.aim_mode
+				crosshair.visible = piloting.aim_mode
 			elif kp.keycode == KEY_F and piloting.kind == 2:
 				_fighter_fire()
 			elif kp.keycode == KEY_F and piloting.kind == 3:

@@ -29,6 +29,8 @@ var power := 0.0             # тяга сейчас, 0..1
 var kind := 0                # тип корабля (D.SHIP_KINDS): 0 разведчик, 1 транспорт
 var beam: Node3D             # видимый луч посадочного фонаря
 var auto_retro_done := false # автопилот «против движения» уже включён на этом снижении
+var aim_mode := false        # прицельный режим: камера из носа корабля, по нему стреляет оружие
+var gear: Node3D = null      # убирающиеся опоры (у НЛО)
 
 
 func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int, ship_kind := 0) -> void:
@@ -40,6 +42,8 @@ func setup(w, id: int, model: Node3D, fuel_units: float, planet_n: int, ship_kin
 	add_child(model)
 	flame = model.get_meta("flame")
 	beam = model.get_meta("beam")
+	if model.has_meta("gear"):
+		gear = model.get_meta("gear")
 	cam = Camera3D.new()
 	cam.fov = 75
 	cam.near = 0.1
@@ -265,6 +269,19 @@ func _space_step() -> void:
 
 
 func _process(_dt: float) -> void:
+	if gear != null:
+		# опоры выпущены на земле и у самой поверхности, в полёте — убраны
+		var want := 1.0 if landed or altitude() < 12.0 else 0.05
+		gear.scale.y = lerpf(gear.scale.y, want, minf(1.0, _dt * 3.0))
+		gear.visible = gear.scale.y > 0.08
+	if aim_mode:
+		# вид из прицела: камера в носу, смотрит по оси выстрела, приближение
+		var nose := global_transform.basis.y.normalized()
+		var spine := -global_transform.basis.z.normalized()
+		cam.global_transform = Transform3D(Basis(nose.cross(spine), spine, -nose), global_position + nose * 6.8)
+		cam.fov = 40.0
+		return
+	cam.fov = 75.0
 	# камера летает вокруг корабля в осях «над поверхностью»
 	var up := global_position.normalized()
 	var helper := Vector3.UP if absf(up.y) < 0.9 else Vector3.RIGHT

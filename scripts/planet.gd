@@ -14,6 +14,8 @@ var radius: float = D.PLANET_R
 var subdiv: int = D.SUBDIV
 var kind := 0                       # 0 обычная, 1 малая токсичная, 2 большая с атмосферой
 var hazard := PackedByteArray()     # жгучие клетки (светятся красным, жгут игрока)
+var deco := PackedByteArray()       # окружение: 0 нет, 1 валун, 2 кристаллический шпиль, 3 растение (строить нельзя)
+var extra_sites: Array = []         # дополнительные нейтральные базы (на большой планете)
 var core_center := [0, 0, 0]   # центр площадки под базу (по D.CORE_DIRS)
 var spawn_cell := [0, 0, 0]
 
@@ -203,6 +205,26 @@ func _build_relief(seed_val: int) -> void:
 			lv = 0
 		level[i] = lv
 
+	# большая планета: кратеры (низина с валом) и плато
+	var frng := RandomNumberGenerator.new()
+	frng.seed = seed_val + 4242
+	if kind == 2:
+		for k in 26:
+			var c0 := frng.randi_range(0, cnt - 1)
+			var rad := frng.randi_range(3, 8)
+			var rr := rings(c0, rad + 1)
+			for x in rr:
+				var dd: int = rr[x]
+				if dd <= rad - 1:
+					level[x] = 0
+				elif dd <= rad + 1:
+					level[x] = maxi(level[x], 3 if frng.randf() < 0.75 else 2)
+		for k in 14:
+			var c1 := frng.randi_range(0, cnt - 1)
+			var rp := rings(c1, frng.randi_range(3, 6))
+			for x in rp:
+				level[x] = 3 if int(rp[x]) < 5 else maxi(level[x], 2)
+
 	# площадки под ядра: ровные, без руды
 	for team in D.CORE_DIRS.size():
 		var cc := nearest_cell(D.CORE_DIRS[team])
@@ -218,6 +240,16 @@ func _build_relief(seed_val: int) -> void:
 					spawn_set = true
 			else:
 				level[c] = mini(level[c], 2)
+	# большая планета: вторая нейтральная база — на другой стороне, тоже на ровной площадке
+	if kind == 2:
+		var xs := nearest_cell(Vector3(0.0, 0.55, -1.0).normalized())
+		extra_sites.append(xs)
+		var rx := rings(xs, 11)
+		for c in rx:
+			level[c] = 1 if int(rx[c]) <= 10 else mini(level[c], 2)
+		var rn := rings(core_center[2], 11)   # и первую — пошире, под стены
+		for c in rn:
+			level[c] = 1 if int(rn[c]) <= 10 else mini(level[c], 2)
 
 	# руды — жилами: каждая жила одного типа, извилистая полоса 1–2 клетки шириной
 	var rng := RandomNumberGenerator.new()
@@ -252,10 +284,13 @@ func _build_relief(seed_val: int) -> void:
 		plan.append([D.I_UNIQUE_ORE, 7, 3, 5, 0.25, true])   # малые: уникальная материя
 	elif kind == 2:
 		# большая: есть все типы, но встречаются редко
-		plan = []
-		for t in [D.I_COPPER_ORE, D.I_IRON_ORE, D.I_COAL_ORE, D.I_QUARTZ, D.I_ICE, D.I_LEAD_ORE,
-				D.I_URANIUM_ORE, D.I_HELIUM_ORE, D.I_UNIQUE_ORE]:
-			plan.append([t, 5, 3, 6, 0.15, true])
+		plan = [
+			[D.I_COPPER_ORE, 18, 5, 10, 0.3, false], [D.I_IRON_ORE, 18, 5, 10, 0.3, false],
+			[D.I_COAL_ORE, 15, 5, 9, 0.3, false], [D.I_QUARTZ, 13, 4, 8, 0.25, false],
+			[D.I_ICE, 10, 4, 8, 0.3, false], [D.I_LEAD_ORE, 8, 3, 6, 0.15, true],
+			[D.I_URANIUM_ORE, 6, 3, 5, 0.12, true], [D.I_HELIUM_ORE, 6, 3, 5, 0.12, true],
+			[D.I_UNIQUE_ORE, 3, 2, 4, 0.1, true],
+		]
 		area = 1.0
 	for row in plan:
 		var placed := 0
@@ -281,6 +316,44 @@ func _build_relief(seed_val: int) -> void:
 			var heading := dirs[nb[rng.randi_range(0, nb.size() - 1)]] - dirs[c]
 			_vein(c, heading, row[0], rng.randi_range(row[2], row[3]), row[4], rng)
 			placed += 1
+
+	# окружение большой планеты: валуны, кристаллические шпили, инопланетные растения
+	deco.resize(cnt)
+	deco.fill(0)
+	if kind == 2:
+		var placed := 0
+		var guard := 0
+		while placed < cnt / 28 and guard < cnt:
+			guard += 1
+			var c := rng.randi_range(0, cnt - 1)
+			if ore[c] != D.I_NONE or deco[c] != 0:
+				continue
+			var near_base := false
+			for d in D.CORE_DIRS:
+				if dirs[c].angle_to(d) * radius < 26.0:
+					near_base = true
+			for xs in extra_sites:
+				if dirs[c].angle_to(dirs[int(xs)]) * radius < 26.0:
+					near_base = true
+			if near_base:
+				continue
+			var kd := 1
+			var roll := rng.randf()
+			if level[c] >= D.MAX_LEVEL or roll < 0.45:
+				kd = 1
+			elif roll < 0.7:
+				kd = 2
+			else:
+				kd = 3
+			deco[c] = kd
+			placed += 1
+			# растения и валуны — группками
+			if kd != 2 and rng.randf() < 0.6:
+				var nb: PackedInt32Array = nbrs[c]
+				var x: int = nb[rng.randi_range(0, nb.size() - 1)]
+				if ore[x] == D.I_NONE and deco[x] == 0:
+					deco[x] = kd
+					placed += 1
 
 	# малые планеты: жгучие пятна (не у баз)
 	hazard.resize(cnt)
