@@ -1,4 +1,5 @@
 extends Node
+const T = preload("res://scripts/i18n.gd")
 ## Сеть. Автозагрузка "Net".
 ## Три режима: хост (сервер + игрок), клиент, выделенный сервер без графики.
 ## Сервер — единственный, кто считает игру. Клиенты шлют команды и рисуют снапшоты.
@@ -41,7 +42,7 @@ func host(port: int, creative_on := false) -> void:
 	creative = creative_on
 	var p := ENetMultiplayerPeer.new()
 	if p.create_server(port, MAX_CLIENTS) != OK:
-		status.emit("Не удалось открыть порт %d" % port)
+		status.emit(T.t("Не удалось открыть порт %d") % port)
 		return
 	multiplayer.multiplayer_peer = p
 	seed_val = randi()
@@ -63,13 +64,13 @@ func start_offline(creative_on := true) -> void:
 func start_dedicated(port: int) -> void:
 	var p := ENetMultiplayerPeer.new()
 	if p.create_server(port, MAX_CLIENTS) != OK:
-		print("[server] Не удалось открыть порт %d" % port)
+		print(T.t("[server] Не удалось открыть порт %d") % port)
 		get_tree().quit(1)
 		return
 	multiplayer.multiplayer_peer = p
 	seed_val = randi()
 	_create_world(seed_val, -1)
-	print("[server] Выделенный сервер запущен на порту %d%s" % [port, " (КРЕАТИВ)" if creative else ""])
+	print(T.t("[server] Выделенный сервер запущен на порту %d%s") % [port, T.t(" (КРЕАТИВ)") if creative else ""])
 
 
 func join(ip: String, port: int) -> void:
@@ -77,10 +78,10 @@ func join(ip: String, port: int) -> void:
 		ip = "127.0.0.1"
 	var p := ENetMultiplayerPeer.new()
 	if p.create_client(ip, port) != OK:
-		status.emit("Не удалось создать подключение")
+		status.emit(T.t("Не удалось создать подключение"))
 		return
 	multiplayer.multiplayer_peer = p
-	status.emit("Подключение к %s:%d..." % [ip, port])
+	status.emit(T.t("Подключение к %s:%d...") % [ip, port])
 
 
 func team_of(peer_id: int) -> int:
@@ -120,7 +121,7 @@ func _on_peer_connected(id: int) -> void:
 	var team := _pick_team()
 	peer_team[id] = team
 	if dedicated:
-		print("[server] Игрок %d подключился, команда %d" % [id, team])
+		print(T.t("[server] Игрок %d подключился, команда %d") % [id, team])
 	start_game.rpc_id(id, seed_val, team, creative)
 
 
@@ -128,16 +129,16 @@ func _on_peer_disconnected(id: int) -> void:
 	peer_team.erase(id)
 	ready_peers.erase(id)
 	if dedicated:
-		print("[server] Игрок %d отключился" % id)
+		print(T.t("[server] Игрок %d отключился") % id)
 
 
 func _on_connected() -> void:
-	status.emit("Подключено, ждём данные...")
+	status.emit(T.t("Подключено, ждём данные..."))
 
 
 func _on_failed() -> void:
 	multiplayer.multiplayer_peer = null
-	status.emit("Не удалось подключиться")
+	status.emit(T.t("Не удалось подключиться"))
 
 
 ## Выйти из игры в главное меню: закрыть сеть, убрать мир, перезапустить сцену меню.
@@ -155,7 +156,7 @@ func leave() -> void:
 
 
 func _on_server_gone() -> void:
-	print("Сервер отключился")
+	print(T.t("Сервер отключился"))
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	if world:
 		world.queue_free()

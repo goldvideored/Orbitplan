@@ -1,4 +1,5 @@
 extends Control
+const T = preload("res://scripts/i18n.gd")
 ## Компас корабля: лента курса со сторонами света, тангаж и направление полёта.
 ## Курс считается от «севера» — оси вращения луны (в космосе — от оси орбит гиганта).
 
@@ -70,8 +71,8 @@ func _draw() -> void:
 	# метка носа
 	draw_colored_polygon(PackedVector2Array([Vector2(cx - 8, 44), Vector2(cx + 8, 44), Vector2(cx, 34)]),
 			Color(1, 0.85, 0.3))
-	var info := "Курс %03d°    Тангаж %+d°" % [int(round(heading)) % 360, int(round(pitch))]
+	var info := T.t("Курс %03d°    Тангаж %+d°") % [int(round(heading)) % 360, int(round(pitch))]
 	if has_pro:
-		info += "    Полёт %03d° / %+d°" % [int(round(pro_heading)) % 360, int(round(pro_pitch))]
+		info += T.t("    Полёт %03d° / %+d°") % [int(round(pro_heading)) % 360, int(round(pro_pitch))]
 	draw_rect(Rect2(cx - 220, 50, 440, 26), Color(0, 0, 0, 0.55))
 	draw_string(font, Vector2(cx - 220, 69), info, HORIZONTAL_ALIGNMENT_CENTER, 440, 16, Color.WHITE)

@@ -17,7 +17,7 @@ var hovered := -1
 var sel_vec := Vector2.ZERO
 var info_func: Callable     # тип -> Array строк (описание, цена, энергия...)
 var name_func: Callable     # тип -> подпись в секторе (если не задано — название постройки)
-var center_hint := "колесо — подтип"
+var center_hint := T.t("колесо — подтип")
 
 
 func _ready() -> void:
@@ -27,7 +27,7 @@ func _ready() -> void:
 	if sectors.is_empty():
 		for cat in D.CATEGORIES:
 			sectors.append(cat)
-		sectors.append(["Бластер", [D.WEAPON]])
+		sectors.append([T.t("Бластер"), [D.WEAPON]])
 	for i in sectors.size():
 		sub.append(0)
 	visible = false
@@ -129,7 +129,7 @@ func _draw() -> void:
 
 	# центр: подсказка
 	draw_circle(c, R_IN - 6, Color(0, 0, 0, 0.6))
-	var hint := "двигай мышь" if hovered < 0 else center_hint
+	var hint := T.t("двигай мышь") if hovered < 0 else center_hint
 	draw_string(font, c + Vector2(-80, 6), hint, HORIZONTAL_ALIGNMENT_CENTER, 160, 14, Color(1, 1, 1, 0.8))
 
 	# подробности выбранного под колесом

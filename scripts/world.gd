@@ -789,7 +789,7 @@ func _build_tick(b: Dictionary) -> void:
 func _destroy(id: int, by_damage := false) -> void:
 	if by_damage and buildings.has(id):
 		var b: Dictionary = buildings[id]
-		_alert_team(int(b.team), "Постройка разрушена: %s — %s" % [T.t(D.NAMES[b.type]), D.PLANETS[int(b.pn)].name],
+		_alert_team(int(b.team), T.t("Постройка разрушена: %s — %s") % [T.t(D.NAMES[b.type]), T.t(T.t(String(D.PLANETS[int(b.pn)].name)))],
 			int(b.pn), 1)
 	_remove_building(id)
 	for peer in Net.ready_peers:
@@ -1258,19 +1258,19 @@ func _inspect_info(cell: int, pn: int) -> Array:
 func _status(b: Dictionary) -> Array:
 	var t: int = b.type
 	if _busy(b):
-		return [ST_IDLE, ("снос %d%%" if b.decon else "стройка %d%%") % int(100.0 * float(b.bt))]
+		return [ST_IDLE, (T.t("снос %d%%") if b.decon else T.t("стройка %d%%")) % int(100.0 * float(b.bt))]
 	if D.POWER_USE.has(t) and b.team != D.T_NEUTRAL and not power_has_gen.has(power_root.get(b.id, b.id)):
-		return [ST_STOP, "нет энергии: рядом нет генератора"]
+		return [ST_STOP, T.t("нет энергии: рядом нет генератора")]
 	if t == D.CORE and b.team == D.T_NEUTRAL:
 		if b.cap_team >= 0:
-			return [ST_SLOW, "нейтральная база, захватывают %s: %d%%" % [T.t(D.TEAM_NAMES[b.cap_team]),
+			return [ST_SLOW, T.t("нейтральная база, захватывают %s: %d%%") % [T.t(D.TEAM_NAMES[b.cap_team]),
 				int(100.0 * b.cap / D.CAPTURE_TICKS)]]
 		var def_n := 0
 		for o in buildings.values():
 			if o.team == D.T_NEUTRAL and o.pn == b.pn and D.DEFENSE_TYPES.has(o.type) \
 					and _bpos(o).distance_to(_bpos(b)) < D.BASE_RADIUS:
 				def_n += 1
-		return [ST_IDLE, "нейтральная база, оборона: %d турелей — встань у ядра, чтобы захватить" % def_n]
+		return [ST_IDLE, T.t("нейтральная база, оборона: %d турелей — встань у ядра, чтобы захватить") % def_n]
 	if t == D.CORE:
 		var full := PackedStringArray()
 		var st: Dictionary = storage[b.team]
@@ -1278,133 +1278,133 @@ func _status(b: Dictionary) -> Array:
 			if int(st.get(it, 0)) >= D.CORE_CAP:
 				full.append(T.t(D.ITEM_NAMES[it]))
 		if full.is_empty():
-			return [ST_OK, "склад принимает всё переработанное"]
+			return [ST_OK, T.t("склад принимает всё переработанное")]
 		if int(b.get("burn_t", 0)) > 0:
-			return [ST_SLOW, "склад полон, лишнее сжигается: " + ", ".join(full)]
-		return [ST_OK, "склад полон: " + ", ".join(full)]
+			return [ST_SLOW, T.t("склад полон, лишнее сжигается: ") + ", ".join(full)]
+		return [ST_OK, T.t("склад полон: ") + ", ".join(full)]
 	if t == D.TURRET:
-		return [ST_OK, "в строю, лазер %d клеток" % int(round(D.TURRET_RANGE / D.CELL_M))]
+		return [ST_OK, T.t("в строю, лазер %d клеток") % int(round(D.TURRET_RANGE / D.CELL_M))]
 	if t == D.LAUNCH_PAD:
 		var fuel_in := int(b.buf.get(D.I_FUEL, 0))
 		var bk: int = b.get("ship_kind", 0)
 		if b.timer > 0:
-			return [ST_OK, "сборка: %s %d%%" % [T.t(String(D.SHIP_KINDS[bk].name)),
+			return [ST_OK, T.t("сборка: %s %d%%") % [T.t(String(D.SHIP_KINDS[bk].name)),
 				int(100.0 * (1.0 - float(b.timer) / float(D.SHIP_KINDS[bk].build)))]]
 		var sh = _pad_ship(b)
 		if sh == null:
-			return [ST_IDLE, "корабля нет — держи E: собрать разведчика, транспорт или истребитель"]
+			return [ST_IDLE, T.t("корабля нет — держи E: собрать разведчика, транспорт или истребитель")]
 		var dv := _ship_dv(float(sh.fuel), int(sh.kind))
-		var st_txt: String = "в полёте" if sh.state == 1 else "на площадке"
+		var st_txt: String = T.t("в полёте") if sh.state == 1 else T.t("на площадке")
 		var fit: int = int(D.SHIP_KINDS[int(sh.kind)].get("fuel", D.I_FUEL))
-		return [ST_OK, "%s %s, топливо %d/%d (Δv %d м/с), на площадке %s: %d" % [
+		return [ST_OK, T.t("%s %s, топливо %d/%d (Δv %d м/с), на площадке %s: %d") % [
 			T.t(String(D.SHIP_KINDS[int(sh.kind)].name)), st_txt, int(sh.fuel), int(_ship_tank(sh)), int(dv),
 			T.t(D.ITEM_NAMES[fit]), int(b.buf.get(fit, 0)) if fit != D.I_FUEL else fuel_in]]
 	if t == D.SPLITTER or t == D.JUNCTION or t == D.BRIDGE:
-		var what: String = T.t(D.ITEM_NAMES[b.item]) if b.item != D.I_NONE else "пусто"
+		var what: String = T.t(D.ITEM_NAMES[b.item]) if b.item != D.I_NONE else T.t("пусто")
 		if t == D.BRIDGE:
-			return [ST_OK, "%s, дальний мост: %s" % [what, "есть" if _bridge_target(b) != null else "нет — выдаёт вперёд"]]
+			return [ST_OK, T.t("%s, дальний мост: %s") % [what, T.t("есть") if _bridge_target(b) != null else T.t("нет — выдаёт вперёд")]]
 		return [ST_OK, what]
 	if t == D.POWER_POLE:
 		var root: int = power_root.get(b.id, b.id)
 		if power_has_gen.has(root):
-			return [ST_OK, "в сети с генератором"]
-		return [ST_IDLE, "нет генератора в сети — поставь столбы цепочкой до генератора"]
+			return [ST_OK, T.t("в сети с генератором")]
+		return [ST_IDLE, T.t("нет генератора в сети — поставь столбы цепочкой до генератора")]
 	if t == D.WALL:
-		return [ST_OK, "забор"]
+		return [ST_OK, T.t("забор")]
 	if t == D.LAMP:
-		return [ST_OK, "горит"] if b.lit else [ST_IDLE, "выключена (маскировка)"]
+		return [ST_OK, T.t("горит")] if b.lit else [ST_IDLE, T.t("выключена (маскировка)")]
 	if t == D.BATTERY:
 		var ch := float(b.charge)
-		var ctxt := "заряд %d / %d" % [int(ch), int(D.BATTERY_CAP)]
+		var ctxt := T.t("заряд %d / %d") % [int(ch), int(D.BATTERY_CAP)]
 		if float(b.bflow) < -0.001:
-			return [ST_SLOW, ctxt + ", отдаёт в сеть"]
+			return [ST_SLOW, ctxt + T.t(", отдаёт в сеть")]
 		if ch < 1.0:
-			return [ST_IDLE, ctxt + " — нет излишка энергии"]
-		return [ST_OK, ctxt + (", заряжается" if float(b.bflow) > 0.001 else "")]
+			return [ST_IDLE, ctxt + T.t(" — нет излишка энергии")]
+		return [ST_OK, ctxt + (T.t(", заряжается") if float(b.bflow) > 0.001 else "")]
 	if t == D.REPAIR or t == D.UNIT_REPAIR:
-		return _power_state(b, "чинит %s в %d м" % ["постройки" if t == D.REPAIR else "юнитов", int(D.REPAIR_RADIUS)])
+		return _power_state(b, T.t("чинит %s в %d м") % [T.t("постройки") if t == D.REPAIR else T.t("юнитов"), int(D.REPAIR_RADIUS)])
 	if t == D.AA_GUN:
 		var items := 0
 		for it in b.buf:
 			items += int(b.buf[it])
 		var ammo := int(b.get("ammo", 0)) + items / D.AA_ITEMS_PER_SHOT
-		var boost: String = ("  вода %d — стрельба ×2" % b.water) if b.water > 0 else "  (подай воду — стрельба ×2)"
+		var boost: String = (T.t("  вода %d — стрельба ×2") % b.water) if b.water > 0 else T.t("  (подай воду — стрельба ×2)")
 		if creative or b.team == D.T_NEUTRAL:
-			return [ST_OK, "ПВО, боеприпасы бесконечны"]
+			return [ST_OK, T.t("ПВО, боеприпасы бесконечны")]
 		if ammo <= 0:
-			return [ST_STOP, "нет снарядов: подай ресурсы (3 на выстрел)"]
-		return [ST_OK, "ПВО: снарядов %d%s" % [ammo, boost]]
+			return [ST_STOP, T.t("нет снарядов: подай ресурсы (3 на выстрел)")]
+		return [ST_OK, T.t("ПВО: снарядов %d%s") % [ammo, boost]]
 	if t == D.TURRET2:
 		var cu := int(b.buf.get(D.I_COPPER, 0))
 		if not creative and b.team != D.T_NEUTRAL and cu <= 0 and int(b.get("ammo", 0)) <= 0:
-			return [ST_STOP, "нет меди"]
-		return [ST_OK, "медь %d" % cu if not creative else "боеприпасы бесконечны"]
+			return [ST_STOP, T.t("нет меди")]
+		return [ST_OK, T.t("медь %d") % cu if not creative else T.t("боеприпасы бесконечны")]
 	if t == D.TURRET4:
 		var ua := int(b.buf.get(D.I_UALLOY, 0))
 		if creative or b.team == D.T_NEUTRAL:
-			return [ST_OK, "боеприпасы бесконечны"]
+			return [ST_OK, T.t("боеприпасы бесконечны")]
 		if ua <= 0 and int(b.get("ammo", 0)) <= 0:
-			return [ST_STOP, "нет уникального сплава"]
-		return [ST_OK, "уникальный сплав %d (×%d снаряда)" % [ua, D.T4_SHOTS_PER_ITEM]]
+			return [ST_STOP, T.t("нет уникального сплава")]
+		return [ST_OK, T.t("уникальный сплав %d (×%d снаряда)") % [ua, D.T4_SHOTS_PER_ITEM]]
 	if t == D.TURRET3:
 		var lead := int(b.buf.get(D.I_LEAD, 0))
 		var ur := int(b.buf.get(D.I_URANIUM, 0))
 		if not creative and lead + ur <= 0:
-			return [ST_STOP, "нет снарядов (свинец или уран)"]
-		return [ST_OK, "снаряды: свинец %d, уран %d" % [lead, ur] if not creative else "боеприпасы бесконечны"]
+			return [ST_STOP, T.t("нет снарядов (свинец или уран)")]
+		return [ST_OK, T.t("снаряды: свинец %d, уран %d") % [lead, ur] if not creative else T.t("боеприпасы бесконечны")]
 	if t == D.SORTER and int(b.filter) == D.I_NONE:
-		return [ST_IDLE, "груз не выбран — держи E"]
+		return [ST_IDLE, T.t("груз не выбран — держи E")]
 	if t == D.CONVEYOR or t == D.PIPE or t == D.SORTER:
-		return [ST_OK, "везёт: " + T.t(D.ITEM_NAMES[b.item]) if b.item != D.I_NONE else "пусто"]
+		return [ST_OK, T.t("везёт: ") + T.t(D.ITEM_NAMES[b.item]) if b.item != D.I_NONE else T.t("пусто")]
 	if _is_drill(t):
 		if b.blocked:
-			return [ST_STOP, "некуда отдавать руду"]
+			return [ST_STOP, T.t("некуда отдавать руду")]
 		if t == D.DRILL3 and b.water <= 0:
-			return [ST_STOP, "нет воды"]
-		return _power_state(b, "добывает: " + T.t(D.ITEM_NAMES[b.ore]))
+			return [ST_STOP, T.t("нет воды")]
+		return _power_state(b, T.t("добывает: ") + T.t(D.ITEM_NAMES[b.ore]))
 	if D.RECIPES.has(t):
 		if b.out_blocked:
-			return [ST_STOP, "некуда отдать продукт"]
+			return [ST_STOP, T.t("некуда отдать продукт")]
 		if b.cur == -1:
-			return [ST_IDLE, "ждёт сырьё"]
+			return [ST_IDLE, T.t("ждёт сырьё")]
 		var rec: Dictionary = D.RECIPES[t][b.cur]
 		return _power_state(b, "%s %d%%" % [T.t(D.ITEM_NAMES[rec["out"]]), int(100.0 * b.prog / float(rec["t"]))])
 	if t == D.SOLAR:
 		if b.pout <= 0.0:
-			return [ST_IDLE, "темно, выработки нет"]
+			return [ST_IDLE, T.t("темно, выработки нет")]
 		if b.pout < D.SOLAR_POWER - 0.1:
-			return [ST_SLOW, "%d энергии (мало света)" % int(b.pout)]
-		return [ST_OK, "%d энергии" % int(b.pout)]
+			return [ST_SLOW, T.t("%d энергии (мало света)") % int(b.pout)]
+		return [ST_OK, T.t("%d энергии") % int(b.pout)]
 	if t == D.COAL_PLANT:
 		if b.pout > 0.0:
-			return [ST_OK, "%d энергии, угля %d" % [int(b.pout), int(b.buf.get(D.I_COAL, 0))]]
-		return [ST_IDLE, "нет угля"]
+			return [ST_OK, T.t("%d энергии, угля %d") % [int(b.pout), int(b.buf.get(D.I_COAL, 0))]]
+		return [ST_IDLE, T.t("нет угля")]
 	if t == D.NUCLEAR:
 		if not b.cool:
-			return [ST_STOP, "нет воды для охлаждения"]
+			return [ST_STOP, T.t("нет воды для охлаждения")]
 		if b.pout > 0.0:
-			return [ST_OK, "%d энергии, урана %d" % [int(b.pout), int(b.buf.get(D.I_URANIUM, 0))]]
-		return [ST_IDLE, "нет урана"]
+			return [ST_OK, T.t("%d энергии, урана %d") % [int(b.pout), int(b.buf.get(D.I_URANIUM, 0))]]
+		return [ST_IDLE, T.t("нет урана")]
 	if t == D.ASSEMBLER and int(b.ukind) < 0:
-		return [ST_IDLE, "тип юнита не выбран — держи E"]
+		return [ST_IDLE, T.t("тип юнита не выбран — держи E")]
 	if t == D.ASSEMBLER:
 		var k: int = b.ukind
 		var nm: String = T.t(D.UNIT_NAMES[k])
 		if b.timer > 0:
-			return [ST_OK, "собирает: %s %d%%" % [nm, int(100.0 * (1.0 - float(b.timer) / D.UNIT_STATS[k].build))]]
+			return [ST_OK, T.t("собирает: %s %d%%") % [nm, int(100.0 * (1.0 - float(b.timer) / D.UNIT_STATS[k].build))]]
 		if _unit_count(b.team, k) >= _unit_limit(b.team, k):
-			return [ST_SLOW, "лимит: %s %d/%d (захвати базы — лимит вырастет)" % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
-		return [ST_IDLE, "%s: подай конвейером %s  (E — сменить)" % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
+			return [ST_SLOW, T.t("лимит: %s %d/%d (захвати базы — лимит вырастет)") % [nm, _unit_count(b.team, k), _unit_limit(b.team, k)]]
+		return [ST_IDLE, T.t("%s: подай конвейером %s  (E — сменить)") % [nm, _cost_dict_text(D.UNIT_RECIPES[k])]]
 	if (t == D.LOADER or t == D.FUEL_DEPOT) and int(b.get("rover_t", 0)) > 0:
-		return [ST_STOP, "%s уничтожен — новый через %d с" % ["Заправщик" if t == D.FUEL_DEPOT else "Курьер",
+		return [ST_STOP, T.t("%s уничтожен — новый через %d с") % [T.t("Заправщик") if t == D.FUEL_DEPOT else T.t("Курьер"),
 			int(ceil(float(b.rover_t) * D.TICK))]]
 	if t == D.SPACE_DOCK:
 		return _dock_status(b)
 	if t == D.FUEL_DEPOT:
 		var fu := int(b.buf.get(D.I_FUEL, 0))
 		if fu == 0:
-			return [ST_IDLE, "ждёт топливо по трубе"]
-		return [ST_OK, "топливо %d/%d" % [fu, D.DEPOT_CAP]]
+			return [ST_IDLE, T.t("ждёт топливо по трубе")]
+		return [ST_OK, T.t("топливо %d/%d") % [fu, D.DEPOT_CAP]]
 	if t == D.LOADER:
 		var total := 0
 		for it in b.buf:
@@ -1412,26 +1412,26 @@ func _status(b: Dictionary) -> Array:
 		var rv := ""
 		for r in rovers:
 			if r.home == b.id:
-				rv = ["ровер дома", "ровер везёт %d × %s" % [r.cargo_n, D.ITEM_NAMES.get(r.cargo_item, "?")],
-					"ровер едет назад"][int(r.state)]
+				rv = [T.t("ровер дома"), T.t("ровер везёт %d × %s") % [r.cargo_n, D.ITEM_NAMES.get(r.cargo_item, "?")],
+					T.t("ровер едет назад")][int(r.state)]
 		if total == 0:
-			return [ST_IDLE, "ждёт груз с конвейеров, " + rv]
-		return [ST_OK, "на складе %d/%d, %s" % [total, D.LOADER_CAP, rv]]
+			return [ST_IDLE, T.t("ждёт груз с конвейеров, ") + rv]
+		return [ST_OK, T.t("на складе %d/%d, %s") % [total, D.LOADER_CAP, rv]]
 	if t == D.UNLOADER:
 		if b.filter == D.I_NONE:
-			return [ST_IDLE, "груз не выбран — держи E"]
+			return [ST_IDLE, T.t("груз не выбран — держи E")]
 		var have := int(b.buf.get(b.filter, 0))
 		if b.out_blocked:
-			return [ST_STOP, "некуда отдавать %s (%d)" % [T.t(D.ITEM_NAMES[b.filter]), have]]
-		return [ST_OK, "принимает: %s, внутри %d/%d" % [T.t(D.ITEM_NAMES[b.filter]), have, D.UNLOADER_CAP]]
+			return [ST_STOP, T.t("некуда отдавать %s (%d)") % [T.t(D.ITEM_NAMES[b.filter]), have]]
+		return [ST_OK, T.t("принимает: %s, внутри %d/%d") % [T.t(D.ITEM_NAMES[b.filter]), have, D.UNLOADER_CAP]]
 	return [ST_OK, ""]
 
 
 func _power_state(b: Dictionary, txt: String) -> Array:
 	if b.pr <= 0.001:
-		return [ST_STOP, "нет энергии"]
+		return [ST_STOP, T.t("нет энергии")]
 	if b.pr < 0.99:
-		return [ST_SLOW, "%s (энергия %d%%)" % [txt, int(b.pr * 100.0)]]
+		return [ST_SLOW, T.t("%s (энергия %d%%)") % [txt, int(b.pr * 100.0)]]
 	return [ST_OK, txt]
 
 
@@ -1475,7 +1475,7 @@ func _buf_text(buf: Dictionary) -> String:
 	for it in buf:
 		if int(buf[it]) > 0:
 			parts.append("%s %d" % [T.t(D.ITEM_NAMES[it]), buf[it]])
-	return "пусто" if parts.is_empty() else ", ".join(parts)
+	return T.t("пусто") if parts.is_empty() else ", ".join(parts)
 
 
 @rpc("authority", "call_remote", "unreliable")
@@ -1909,8 +1909,8 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 	var now := Time.get_ticks_msec() / 1000.0
 	if pn >= 0 and int(sh.pn) != pn:
 		# корабль вошёл в атмосферу планеты — тревога другой команде
-		_alert_team(1 - int(sh.team), "⚠ Вражеский %s вошёл в атмосферу: %s" % [
-			String(T.t(String(D.SHIP_KINDS[int(sh.kind)].name))).to_lower(), D.PLANETS[pn].name], pn, 2)
+		_alert_team(1 - int(sh.team), T.t("⚠ Вражеский %s вошёл в атмосферу: %s") % [
+			String(T.t(String(D.SHIP_KINDS[int(sh.kind)].name))).to_lower(), T.t(T.t(String(D.PLANETS[pn].name)))], pn, 2)
 	var dt_rep := now - float(sh.get("rep_t", now))
 	if dt_rep > 0.01 and int(sh.pn) == pn:
 		sh["vel"] = (pos - Vector3(sh.pos)) / dt_rep
@@ -2200,7 +2200,7 @@ func _courier_target(c: Dictionary, d: Dictionary):
 func _courier_lost(team: int, why: String) -> void:
 	couriers.erase(team)
 	courier_respawn[team] = D.COURIER_RESPAWN_TICKS
-	_alert_team(team, "Космический курьер потерян (%s) — новый через 1 мин" % why, -1, 1)
+	_alert_team(team, T.t("Космический курьер потерян (%s) — новый через 1 мин") % why, -1, 1)
 
 
 func _couriers_tick() -> void:
@@ -2218,11 +2218,11 @@ func _couriers_tick() -> void:
 		var c: Dictionary = couriers[team]
 		if int(c.state) == 0:
 			if not buildings.has(int(c.at)):
-				_courier_lost(team, "космопорт разрушен")
+				_courier_lost(team, T.t("космопорт разрушен"))
 				continue
 			var d: Dictionary = buildings[int(c.at)]
 			if int(d.team) != team:
-				_courier_lost(team, "космопорт захвачен")
+				_courier_lost(team, T.t("космопорт захвачен"))
 				continue
 			var recv: Dictionary = d.get("recv", {})
 			d["recv"] = recv
@@ -2280,7 +2280,7 @@ func _couriers_tick() -> void:
 				continue
 			var dst = buildings.get(int(c.to))
 			if dst == null or int(dst.team) != team or dst.type != D.SPACE_DOCK:
-				_courier_lost(team, "порт назначения разрушен")
+				_courier_lost(team, T.t("порт назначения разрушен"))
 				continue
 			c.state = 0
 			c.at = int(c.to)
@@ -2302,29 +2302,29 @@ func _dock_tick(b: Dictionary) -> void:
 
 func _dock_status(b: Dictionary) -> Array:
 	var dest: int = int(b.get("dest_pn", -1))
-	var dtxt: String = "цель: " + (String(D.PLANETS[dest].name) if dest >= 0 and dest != int(b.pn) else "обратно, откуда прилетел") + " (держи E)"
+	var dtxt: String = T.t("цель: ") + (T.t(String(D.PLANETS[dest].name)) if dest >= 0 and dest != int(b.pn) else T.t("обратно, откуда прилетел")) + T.t(" (держи E)")
 	var recv: Dictionary = b.get("recv", {})
 	var rtot := 0
 	for it in recv:
 		rtot += int(recv[it])
-	var rtxt := ("  · принято %d, выдаёт на конвейеры" % rtot) if rtot > 0 else ""
+	var rtxt := (T.t("  · принято %d, выдаёт на конвейеры") % rtot) if rtot > 0 else ""
 	if not couriers.has(int(b.team)):
-		return [ST_IDLE, "курьер появится через %d с, %s" % [int(ceil(courier_respawn[int(b.team)] * D.TICK)), dtxt]]
+		return [ST_IDLE, T.t("курьер появится через %d с, %s") % [int(ceil(courier_respawn[int(b.team)] * D.TICK)), dtxt]]
 	var c: Dictionary = couriers[int(b.team)]
 	if int(c.state) == 1:
 		var left := float(c.t0) + float(c.dur) - world_time
-		return [ST_OK, "курьер летит на %s, прилёт через %d с, %s%s" % [D.PLANETS[int(c.to_pn)].name, int(left), dtxt, rtxt]]
+		return [ST_OK, T.t("курьер летит на %s, прилёт через %d с, %s%s") % [T.t(T.t(String(D.PLANETS[int(c.to_pn)].name))), int(left), dtxt, rtxt]]
 	if int(c.at) != int(b.id):
 		var opn: int = int(buildings[int(c.at)].pn) if buildings.has(int(c.at)) else 0
-		return [ST_IDLE, "курьер в другом порту (%s), %s%s" % [D.PLANETS[opn].name, dtxt, rtxt]]
+		return [ST_IDLE, T.t("курьер в другом порту (%s), %s%s") % [T.t(T.t(String(D.PLANETS[opn].name))), dtxt, rtxt]]
 	if bool(c.unload):
-		return [ST_OK, "курьер выгружается: осталось %d%s" % [_cargo_total(c), rtxt]]
+		return [ST_OK, T.t("курьер выгружается: осталось %d%s") % [_cargo_total(c), rtxt]]
 	if int(c.fuel) < D.COURIER_FUEL:
-		return [ST_IDLE, "курьер здесь: топливо %d/%d (подай по трубе), груз %d/%d, %s%s" % [int(c.fuel), D.COURIER_FUEL,
+		return [ST_IDLE, T.t("курьер здесь: топливо %d/%d (подай по трубе), груз %d/%d, %s%s") % [int(c.fuel), D.COURIER_FUEL,
 			_cargo_total(c), D.COURIER_CARGO, dtxt, rtxt]]
 	if _courier_target(c, b) == null:
-		return [ST_SLOW, "курьер заправлен, но лететь некуда — нужен свой космопорт на другой планете, %s" % dtxt]
-	return [ST_OK, "курьер заправлен, груз %d/%d, вылет через %d с, %s%s" % [_cargo_total(c), D.COURIER_CARGO,
+		return [ST_SLOW, T.t("курьер заправлен, но лететь некуда — нужен свой космопорт на другой планете, %s") % dtxt]
+	return [ST_OK, T.t("курьер заправлен, груз %d/%d, вылет через %d с, %s%s") % [_cargo_total(c), D.COURIER_CARGO,
 		int(ceil(maxf(float(c.wait), 0.0) * D.TICK)), dtxt, rtxt]]
 
 
@@ -2345,11 +2345,11 @@ func server_set_dest(team: int, cell: int, dest: int, pn: int) -> void:
 
 
 func _planet_name(j) -> String:
-	return String(D.PLANETS[int(j)].name)
+	return T.t(String(D.PLANETS[int(j)].name))
 
 
 func _dock_info(j) -> Array:
-	return [String(D.PLANETS[int(j)].name), "Космический курьер полетит сюда (нужен свой космопорт на этой планете)"]
+	return [T.t(String(D.PLANETS[int(j)].name)), T.t("Космический курьер полетит сюда (нужен свой космопорт на этой планете)")]
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
@@ -2366,7 +2366,7 @@ func _update_couriers() -> void:
 		if not courier_nodes.has(team):
 			var nm := _make_ship(team, 1)
 			local_root.add_child(nm)
-			var nl := _marker_label("◆ курьер", D.TEAM_COLORS[team])
+			var nl := _marker_label(T.t("◆ курьер"), D.TEAM_COLORS[team])
 			space_root.add_child(nl)
 			courier_nodes[team] = [nm, nl]
 		var model: Node3D = courier_nodes[team][0]
@@ -2432,7 +2432,7 @@ func _damage_rover(r: Dictionary, dmg: int) -> void:
 	rovers.erase(r)
 	if buildings.has(r.home):
 		buildings[r.home]["rover_t"] = D.ROVER_RESPAWN_TICKS
-		_alert_team(int(r.team), "%s уничтожен — новый через 1 мин" % ("Заправщик" if int(r.kind) == 1 else "Курьер"),
+		_alert_team(int(r.team), T.t("%s уничтожен — новый через 1 мин") % (T.t("Заправщик") if int(r.kind) == 1 else T.t("Курьер")),
 			int(r.pn), 1)
 	for p in Net.ready_peers:
 		fx_boom.rpc_id(p, at, 2.5, false, int(r.pn))
@@ -3675,7 +3675,7 @@ func _on_alert(text: String, pn: int, kind: int) -> void:
 	alerts.append([text, now + 6.0])
 	if kind == 2:
 		ui.banner_until = now + 8.0
-		ui.banner_msg = "⚠ ВНИМАНИЕ! " + text.trim_prefix("⚠ ")
+		ui.banner_msg = T.t("⚠ ВНИМАНИЕ! ") + text.trim_prefix("⚠ ")
 	if alerts.size() > 4:
 		alerts.pop_front()
 	if pn >= 0:
@@ -3734,7 +3734,7 @@ func _check_victory() -> void:
 			for p in Net.ready_peers:
 				ev_over.rpc_id(p, winner)
 			if headless:
-				print("[server] Игра окончена, победили: %s" % T.t(D.TEAM_NAMES[winner]))
+				print(T.t("[server] Игра окончена, победили: %s") % T.t(D.TEAM_NAMES[winner]))
 			else:
 				_show_over(winner)
 			return
@@ -4114,7 +4114,7 @@ func _build_scene() -> void:
 	layer.add_child(big_msg)
 
 	var hint := Label.new()
-	hint.text = "H — управление"
+	hint.text = T.t("H — управление")
 	hint.anchor_top = 1.0
 	hint.anchor_bottom = 1.0
 	hint.offset_left = 16
@@ -4135,25 +4135,25 @@ func _build_scene() -> void:
 	layer.add_child(radial)
 	item_radial = RadialMenu.new()
 	var item_name := func(it): return T.t(D.ITEM_NAMES[it])
-	item_radial.configure(D.FILTER_GROUPS, item_name, "колесо — сырьё / продукт")
-	item_radial.info_func = func(it): return [T.t(D.ITEM_NAMES[it]), "Точка выгрузки будет принимать этот груз"]
+	item_radial.configure(D.FILTER_GROUPS, item_name, T.t("колесо — сырьё / продукт"))
+	item_radial.info_func = func(it): return [T.t(D.ITEM_NAMES[it]), T.t("Точка выгрузки будет принимать этот груз")]
 	layer.add_child(item_radial)
 	unit_radial = RadialMenu.new()
 	var unit_name := func(k): return T.t(D.UNIT_NAMES[k])
-	unit_radial.configure([["Мини-танк", [0]], ["Дрон", [1]], ["Мех", [2]], ["Уник. мех", [3]]], unit_name, "отпусти E — выбрать")
+	unit_radial.configure([[T.t("Мини-танк"), [0]], [T.t("Дрон"), [1]], [T.t("Мех"), [2]], [T.t("Уник. мех"), [3]]], unit_name, T.t("отпусти E — выбрать"))
 	unit_radial.info_func = _unit_info
 	layer.add_child(unit_radial)
 	ship_radial = RadialMenu.new()
 	var ship_name := func(k): return T.t(String(D.SHIP_KINDS[k].name))
-	ship_radial.configure([["Разведчик", [0]], ["Транспорт", [1]], ["НЛО", [2]], ["Камикадзе", [3]], ["Истребитель F", [4]]],
-		ship_name, "отпусти E — собрать")
+	ship_radial.configure([[T.t("Разведчик"), [0]], [T.t("Транспорт"), [1]], [T.t("НЛО"), [2]], [T.t("Камикадзе"), [3]], [T.t("Истребитель F"), [4]]],
+		ship_name, T.t("отпусти E — собрать"))
 	ship_radial.info_func = _ship_info
 	layer.add_child(ship_radial)
 	dock_radial = RadialMenu.new()
 	var dsecs: Array = []
 	for j in D.PLANETS.size():
-		dsecs.append([String(D.PLANETS[j].name), [j]])
-	dock_radial.configure(dsecs, _planet_name, "отпусти E — назначить")
+		dsecs.append([T.t(String(D.PLANETS[j].name)), [j]])
+	dock_radial.configure(dsecs, _planet_name, T.t("отпусти E — назначить"))
 	dock_radial.info_func = _dock_info
 	layer.add_child(dock_radial)
 	sel_box = Control.new()
@@ -4359,7 +4359,7 @@ func _build_space() -> void:
 		ball.material_override = moon_mat
 		node.add_child(ball)
 		var lbl := Label3D.new()
-		lbl.text = D.PLANETS[j].name
+		lbl.text = T.t(T.t(String(D.PLANETS[j].name)))
 		lbl.modulate = PLANET_COLORS[j]
 		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lbl.fixed_size = true
@@ -4370,7 +4370,7 @@ func _build_space() -> void:
 		lbl.position = Vector3(0, rj * 1.6, 0)
 		node.add_child(lbl)
 		node.add_child(_circle_mesh(SkyCalc.soi(j), Color(0.5, 0.7, 1.0, 0.5)))
-		var warn := _marker_label("⚠ тревога", Color(1.0, 0.3, 0.2))
+		var warn := _marker_label(T.t("⚠ тревога"), Color(1.0, 0.3, 0.2))
 		warn.position = Vector3(0, -rj * 1.6, 0)
 		if D.planet_kind(j) == 2:
 			node.add_child(_atmo_shell(rj))
@@ -4407,13 +4407,13 @@ func _build_space() -> void:
 	space_root.add_child(sys_traj)
 	enc_label = _marker_label("◯", Color(0.45, 1.0, 0.5))
 	space_root.add_child(enc_label)
-	map_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
+	map_ship_label = _marker_label(T.t("▲ ты"), Color(1, 0.9, 0.3))
 	local_root.add_child(map_ship_label)
-	sys_ship_label = _marker_label("▲ ты", Color(1, 0.9, 0.3))
+	sys_ship_label = _marker_label(T.t("▲ ты"), Color(1, 0.9, 0.3))
 	space_root.add_child(sys_ship_label)
 	plan_traj = MeshInstance3D.new()
 	space_root.add_child(plan_traj)
-	plan_label = _marker_label("◎ цель", Color(1.0, 0.75, 0.3))
+	plan_label = _marker_label(T.t("◎ цель"), Color(1.0, 0.75, 0.3))
 	plan_label.visible = false
 	space_root.add_child(plan_label)
 	map_cam = Camera3D.new()
@@ -4423,7 +4423,7 @@ func _build_space() -> void:
 	compass = Compass.new()
 	navball = Navball.new()
 	for i in 4:
-		var l := _marker_label("Ап" if i % 2 == 0 else "Пе", Color(0.4, 0.9, 1.0) if i % 2 == 0 else Color(1.0, 0.6, 0.3))
+		var l := _marker_label(T.t("Ап") if i % 2 == 0 else T.t("Пе"), Color(0.4, 0.9, 1.0) if i % 2 == 0 else Color(1.0, 0.6, 0.3))
 		(local_root if i < 2 else space_root).add_child(l)
 		ap_labels.append(l)
 
@@ -6975,7 +6975,7 @@ func _draw_plan() -> void:
 	var w := maxf(orbit_width, 6.0) * 0.8
 	_strip(plan_traj, pts, -1, Color(1.0, 0.75, 0.3), Color(1.0, 0.75, 0.3), Vector3.UP, w)
 	plan_label.position = plan.arrive + Vector3.UP * D.planet_r(nav_target) * 1.6
-	plan_label.text = "◎ " + String(D.PLANETS[nav_target].name) + " при прилёте"
+	plan_label.text = "◎ " + T.t(String(D.PLANETS[nav_target].name)) + T.t(" при прилёте")
 	plan_label.visible = true
 
 
@@ -6987,36 +6987,36 @@ func _plan_lines() -> PackedStringArray:
 	if nav_target < 0:
 		out.append(T.t("T — выбрать планету для перелёта"))
 		return out
-	out.append("ЦЕЛЬ: %s   (T — сменить)" % D.PLANETS[nav_target].name)
+	out.append(T.t("ЦЕЛЬ: %s   (T — сменить)") % T.t(T.t(String(D.PLANETS[nav_target].name))))
 	var hit := int(pred.get("enc", -1)) == nav_target
 	if plan.has("space"):
 		if hit:
-			out.append("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель" % int(pred.enc_t))
+			out.append(T.t("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель") % int(pred.enc_t))
 		elif float(plan.need) > 0.3:
-			out.append("Жги по ◆ на навболе: ещё %.1f м/с" % float(plan.need))
-			out.append("Сейчас пролетишь в %d м от цели, после манёвра — ~%d м" % [int(plan.dist), int(plan.get("after", plan.dist))])
+			out.append(T.t("Жги по ◆ на навболе: ещё %.1f м/с") % float(plan.need))
+			out.append(T.t("Сейчас пролетишь в %d м от цели, после манёвра — ~%d м") % [int(plan.dist), int(plan.get("after", plan.dist))])
 		else:
-			out.append("Сближение %d м через %d с — дальше сфера притяжения цели" % [int(plan.dist), int(plan.dist_t)])
+			out.append(T.t("Сближение %d м через %d с — дальше сфера притяжения цели") % [int(plan.dist), int(plan.dist_t)])
 		return out
 	if plan.is_empty():
-		out.append("Перехват цели: ДА, через %d с" % int(pred.enc_t) if hit else "Перехвата нет — подправь скорость")
+		out.append(T.t("Перехват цели: ДА, через %d с") % int(pred.enc_t) if hit else T.t("Перехвата нет — подправь скорость"))
 		return out
 	var wait: float = plan.wait
 	if piloting.landed:
-		out.append("Сначала выйди на орбиту (~%d м/с)" % D.DV_LAUNCH)
+		out.append(T.t("Сначала выйди на орбиту (~%d м/с)") % D.DV_LAUNCH)
 	if hit:
-		out.append("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель" % int(pred.enc_t))
+		out.append(T.t("ПЕРЕХВАТ ЕСТЬ: у цели через %d с — гаси двигатель") % int(pred.enc_t))
 	elif wait < -5.0:
-		out.append("Окно только что прошло (%d с назад) — жги сейчас, чуть сильнее" % int(-wait))
+		out.append(T.t("Окно только что прошло (%d с назад) — жги сейчас, чуть сильнее") % int(-wait))
 	elif wait < 8.0:
-		out.append("ОКНО СЕЙЧАС — разгон ~%d м/с %s" % [int(plan.dv_ej), "по движению планеты" if plan.outward else "против движения планеты"])
+		out.append(T.t("ОКНО СЕЙЧАС — разгон ~%d м/с %s") % [int(plan.dv_ej), T.t("по движению планеты") if plan.outward else T.t("против движения планеты")])
 	else:
-		out.append("Окно перелёта через %d с" % int(wait))
+		out.append(T.t("Окно перелёта через %d с") % int(wait))
 	if float(plan.align_t) >= 0.0 and not hit:
-		out.append("Направление разгона (◆ на навболе): угол %d°, совпадёт через %d с" % [int(plan.get("align_ang", 0.0)), int(plan.align_t)])
-	out.append("Разгон ~%d м/с, в пути ~%d с, посадка у цели ~%d м/с" % [int(plan.dv_ej), int(plan.tt), int(plan.dv_land)])
+		out.append(T.t("Направление разгона (◆ на навболе): угол %d°, совпадёт через %d с") % [int(plan.get("align_ang", 0.0)), int(plan.align_t)])
+	out.append(T.t("Разгон ~%d м/с, в пути ~%d с, посадка у цели ~%d м/с") % [int(plan.dv_ej), int(plan.tt), int(plan.dv_land)])
 	var need: float = float(plan.dv_ej) + float(plan.dv_land) + (float(D.DV_LAUNCH) if piloting.landed else 0.0)
-	out.append("Нужно ~%d м/с, есть %d м/с%s" % [int(need), int(piloting.dv()), "" if piloting.dv() >= need else "  — НЕ ХВАТИТ"])
+	out.append(T.t("Нужно ~%d м/с, есть %d м/с%s") % [int(need), int(piloting.dv()), "" if piloting.dv() >= need else T.t("  — НЕ ХВАТИТ")])
 	return out
 
 
@@ -7035,7 +7035,7 @@ func _draw_trajectories() -> void:
 	enc_label.visible = pred.has("enc_pos")
 	if enc_label.visible:
 		enc_label.position = pred.enc_pos
-		enc_label.text = "◯ %s при встрече" % D.PLANETS[int(pred.enc)].name
+		enc_label.text = T.t("◯ %s при встрече") % T.t(T.t(String(D.PLANETS[int(pred.enc)].name)))
 
 
 ## Линия по точкам; после split — другим цветом (участок у планеты, к которой летим).
@@ -7222,7 +7222,7 @@ func on_ship_soi(pn: int) -> void:
 
 ## Корабль сам включил «против движения» перед посадкой.
 func on_auto_retro() -> void:
-	big_msg.text = "АВТОПИЛОТ: против движения (посадка)"
+	big_msg.text = T.t("АВТОПИЛОТ: против движения (посадка)")
 	get_tree().create_timer(2.0).timeout.connect(_clear_msg)
 
 
@@ -7245,7 +7245,7 @@ func on_ship_crash(_sh: Node3D, self_destruct := false, msg := "") -> void:
 	if kamikaze:
 		_switch_planet(launch_pn)
 		_stop_piloting(launch_pos)
-		big_msg.text = (msg if msg != "" else "РАКЕТА ВЗОРВАЛАСЬ") + "\nты вернулся на место запуска"
+		big_msg.text = (msg if msg != "" else T.t("РАКЕТА ВЗОРВАЛАСЬ")) + T.t("\nты вернулся на место запуска")
 		get_tree().create_timer(3.0).timeout.connect(_clear_msg)
 		return
 	if cpn >= 0:
@@ -7256,9 +7256,9 @@ func on_ship_crash(_sh: Node3D, self_destruct := false, msg := "") -> void:
 	if msg != "":
 		big_msg.text = msg
 	elif self_destruct:
-		big_msg.text = "КОРАБЛЬ САМОУНИЧТОЖЕН"
+		big_msg.text = T.t("КОРАБЛЬ САМОУНИЧТОЖЕН")
 	else:
-		big_msg.text = "КОРАБЛЬ РАЗБИТ — ПИЛОТ ПОГИБ\nсадиться надо медленнее %d м/с" % int(D.SHIP_CRASH_SPEED)
+		big_msg.text = T.t("КОРАБЛЬ РАЗБИТ — ПИЛОТ ПОГИБ\nсадиться надо медленнее %d м/с") % int(D.SHIP_CRASH_SPEED)
 	get_tree().create_timer(3.0).timeout.connect(_clear_msg)
 
 
@@ -8746,7 +8746,7 @@ func _fill_death_bases() -> void:
 	for i in mini(cores.size(), 9):
 		var c: Dictionary = cores[i]
 		var btn := Button.new()
-		btn.text = "%d   %s%s" % [i + 1, D.PLANETS[int(c.pn)].name, T.t("  · главная") if c.main else ""]
+		btn.text = "%d   %s%s" % [i + 1, T.t(T.t(String(D.PLANETS[int(c.pn)].name))), T.t("  · главная") if c.main else ""]
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		btn.focus_mode = Control.FOCUS_NONE
 		btn.add_theme_font_size_override("font_size", 16)
@@ -8824,14 +8824,14 @@ func _update_hud() -> void:
 		ui.cap.visible = false
 		_update_ship_panel()
 		if map_mode != 0:
-			hints.append("КАРТА: %s   M — дальше, колесо — масштаб" % ["", "орбита вокруг планеты", "звёздная система"][map_mode])
+			hints.append(T.t("КАРТА: %s   M — дальше, колесо — масштаб") % ["", T.t("орбита вокруг планеты"), T.t("звёздная система")][map_mode])
 		ui.hint.text = "\n".join(hints)
 		return
 
 	# состояние
 	var lvl := light_level_at(player.global_position) if player else 0
 	var eclipse := not sky_state.is_empty() and float(sky_state.sun_level) < 0.5
-	ui.planet.text = String(D.PLANETS[my_pn].name) + (T.t("  · затмение") if eclipse else "")
+	ui.planet.text = T.t(String(D.PLANETS[my_pn].name)) + (T.t("  · затмение") if eclipse else "")
 	_set_row(ui.hp, float(my_hp) / float(D.PLAYER_HP), str(my_hp))
 	for i in D.LIGHT_LEVELS:
 		var sq: ColorRect = ui.light[i]
@@ -8929,12 +8929,12 @@ func _update_hud() -> void:
 			if _hover_own(D.ASSEMBLER):
 				hints.append(T.t("E (держать) — выбрать юнита"))
 			if _hover_own(D.LAMP):
-				hints.append("E — вкл/выкл лампу,  Shift+E — все свои лампы на планете")
+				hints.append(T.t("E — вкл/выкл лампу,  Shift+E — все свои лампы на планете"))
 			if _hover_upgradable():
 				if int(b.lvl) >= D.UPG_MAX:
 					hints.append(T.t("Максимальный уровень модернизации"))
 				else:
-					hints.append("U — модернизировать до ур. %d (скорость ×%.1f): %s" % [int(b.lvl) + 1,
+					hints.append(T.t("U — модернизировать до ур. %d (скорость ×%.1f): %s") % [int(b.lvl) + 1,
 						float(D.UPG_SPEED[int(b.lvl)]), _cost_dict_text(_upgrade_cost(b))])
 		else:
 			var dep: int = planet.ore[hover_cell]
@@ -8945,7 +8945,7 @@ func _update_hud() -> void:
 			elif planet.deco.size() > hover_cell and planet.deco[hover_cell] != 0:
 				ui.ore.visible = true
 				ui.ore_icon.visible = false
-				ui.ore_text.text = ["", "Валун", "Кристаллический шпиль", "Инопланетное растение"][planet.deco[hover_cell]] + " — строить нельзя"
+				ui.ore_text.text = ["", T.t("Валун"), T.t("Кристаллический шпиль"), T.t("Инопланетное растение")][planet.deco[hover_cell]] + T.t(" — строить нельзя")
 			elif _arc(hover_cell, planet.core_center[1 - my_team]) < D.ENEMY_ZONE:
 				ui.ore.visible = true
 				ui.ore_icon.visible = false
@@ -8954,7 +8954,7 @@ func _update_hud() -> void:
 				ui.ore.visible = true
 				ui.ore_icon.visible = true
 				_set_icon(ui.ore_icon, dep)
-				ui.ore_text.text = String(T.t(D.ITEM_NAMES[dep])) + ("  · Бур II+" if D.RARE_ORES.has(dep) else "")
+				ui.ore_text.text = String(T.t(D.ITEM_NAMES[dep])) + (T.t("  · Бур II+") if D.RARE_ORES.has(dep) else "")
 	ui.insp.visible = show_insp
 	ui.ipanel.visible = show_insp or ui.ore.visible
 
@@ -8962,7 +8962,7 @@ func _update_hud() -> void:
 		if selected.is_empty():
 			hints.append(T.t("Ctrl + рамка — выделить юнитов   ·   строить с карты нельзя"))
 		else:
-			hints.append("Выбрано %d:  1 агрессия · 2 охрана · 3 стоять · ПКМ — точка охраны" % selected.size())
+			hints.append(T.t("Выбрано %d:  1 агрессия · 2 охрана · 3 стоять · ПКМ — точка охраны") % selected.size())
 	if _near_ship() != -1:
 		hints.append(T.t("E — сесть в корабль"))
 	ui.hint.text = "\n".join(hints)
@@ -8975,7 +8975,7 @@ func _update_banner() -> void:
 	var names := PackedStringArray()
 	for pn in threat_pns:
 		if pn >= 0 and pn < D.PLANETS.size():
-			names.append(String(D.PLANETS[pn].name))
+			names.append(T.t(String(D.PLANETS[pn].name)))
 	var txt := ""
 	if not names.is_empty():
 		txt = T.t("⚠ ВНИМАНИЕ! ПРОТИВНИК В ЗОНЕ ПРИТЯЖЕНИЯ: ") + ", ".join(names)
@@ -8991,7 +8991,7 @@ func _update_banner() -> void:
 ## Карточка постройки под прицелом. info от сервера может опаздывать — тогда только то, что знаем сами.
 func _fill_inspect(b: Dictionary, info: Array) -> void:
 	var t: int = b.type
-	ui.insp_name.text = String(T.t(D.NAMES[t])) + (("  · ур. %d" % int(b.lvl)) if D.UPGRADABLE.has(t) else "")
+	ui.insp_name.text = String(T.t(D.NAMES[t])) + ((T.t("  · ур. %d") % int(b.lvl)) if D.UPGRADABLE.has(t) else "")
 	var state := ST_IDLE
 	var txt := ""
 	var hp := 1.0
@@ -9038,7 +9038,7 @@ func _update_nav_assist() -> void:
 		return
 	var sh := piloting
 	var vv := sh.vel.dot(sh.global_position.normalized())
-	ui.nav_speed.text = "%d м/с   ↕ %+d" % [int(sh.vel.length()), int(vv)]
+	ui.nav_speed.text = T.t("%d м/с   ↕ %+d") % [int(sh.vel.length()), int(vv)]
 	var need := -1.0
 	if not plan.is_empty() and plan.has("burn_dir"):
 		need = float(plan.get("need", -1.0))
@@ -9047,18 +9047,18 @@ func _update_nav_assist() -> void:
 	if need <= 0.3:
 		nav_need0 = 0.0
 		bar.visible = false
-		lab.text = ("перехват есть" if int(pred.get("enc", -1)) == nav_target and nav_target >= 0 else "")
+		lab.text = (T.t("перехват есть") if int(pred.get("enc", -1)) == nav_target and nav_target >= 0 else "")
 		return
 	if plan.has("wait") and float(plan.wait) > 8.0 and not sh.landed:
 		bar.visible = false
-		lab.text = "Окно через %d с, затем %.1f м/с по ◆" % [int(plan.wait), need]
+		lab.text = T.t("Окно через %d с, затем %.1f м/с по ◆") % [int(plan.wait), need]
 		return
 	if nav_need0 <= 0.0 or need > nav_need0 * 1.2:
 		nav_need0 = need
 	bar.visible = true
 	bar.value = clampf(1.0 - need / nav_need0, 0.0, 1.0)
 	var aligned := sh.global_transform.basis.y.normalized().dot(Vector3(plan.burn_dir).normalized())
-	lab.text = "Манёвр: ещё %.1f м/с по ◆%s" % [need, "   (нос на ◆!)" if aligned < 0.97 else "   ЖГИ"]
+	lab.text = T.t("Манёвр: ещё %.1f м/с по ◆%s") % [need, T.t("   (нос на ◆!)") if aligned < 0.97 else T.t("   ЖГИ")]
 
 
 func _update_ship_panel() -> void:
@@ -9069,7 +9069,7 @@ func _update_ship_panel() -> void:
 	ui.ship_name.text = String(T.t(String(D.SHIP_KINDS[kind].name)))
 	_set_row(ui.s_fuel, sh.fuel / tank, "%.1f / %d" % [sh.fuel, int(tank)])
 	var dv_full := _ship_dv(tank, kind)
-	_set_row(ui.s_dv, sh.dv() / maxf(dv_full, 1.0), "%d м/с" % int(sh.dv()))
+	_set_row(ui.s_dv, sh.dv() / maxf(dv_full, 1.0), T.t("%d м/с") % int(sh.dv()))
 	var hull := 1.0
 	var used := 0
 	for e in cur_ships:
@@ -9084,49 +9084,49 @@ func _update_ship_panel() -> void:
 	(ui.s_cargo.row as Control).visible = cargo > 0
 	_set_row(ui.s_cargo, float(used) / float(cargo), "%d / %d" % [used, cargo])
 	var soi: float = SkyCalc.soi(sh.pn) if sh.pn >= 0 else 1.0
-	ui.s_alt.num.text = "высота %d м" % int(sh.altitude())
+	ui.s_alt.num.text = T.t("высота %d м") % int(sh.altitude())
 	var vv := sh.vel.dot(up)
-	ui.s_speed.num.text = "%d м/с   верт. %+d" % [int(sh.vel.length()), int(vv)]
+	ui.s_speed.num.text = T.t("%d м/с   верт. %+d") % [int(sh.vel.length()), int(vv)]
 	var orb := sh.orbit()
 	var oi := sh.orbit_info()
 	var has_orb: bool = not orb.is_empty() and not sh.landed
 	(ui.s_ap.row as Control).visible = has_orb
 	(ui.s_pe.row as Control).visible = has_orb
 	if has_orb:
-		var tap := ("   через %d с" % int(oi.t_ap)) if not oi.is_empty() else ""
-		var tpe := ("   через %d с" % int(oi.t_pe)) if not oi.is_empty() else ""
-		ui.s_ap.num.text = "Ап %d м%s" % [int(orb[0]), tap]
-		ui.s_pe.num.text = "Пе %d м%s" % [int(orb[1]), tpe]
+		var tap := (T.t("   через %d с") % int(oi.t_ap)) if not oi.is_empty() else ""
+		var tpe := (T.t("   через %d с") % int(oi.t_pe)) if not oi.is_empty() else ""
+		ui.s_ap.num.text = T.t("Ап %d м%s") % [int(orb[0]), tap]
+		ui.s_pe.num.text = T.t("Пе %d м%s") % [int(orb[1]), tpe]
 	var lines := PackedStringArray()
 	if sh.landed:
-		lines.append("На поверхности")
+		lines.append(T.t("На поверхности"))
 	elif orb.is_empty():
-		lines.append("Уход от " + ("планеты" if sh.pn >= 0 else "гиганта"))
+		lines.append(T.t("Уход от ") + (T.t("планеты") if sh.pn >= 0 else T.t("гиганта")))
 	elif float(orb[1]) > 5.0:
-		lines.append("Орбита")
+		lines.append(T.t("Орбита"))
 	else:
-		lines.append("Суборбита — подними перицентр выше 5 м")
+		lines.append(T.t("Суборбита — подними перицентр выше 5 м"))
 	if sh.pn >= 0:
-		var soi_txt := "%s, граница %d м" % [D.PLANETS[sh.pn].name, int(soi)]
+		var soi_txt := T.t("%s, граница %d м") % [T.t(T.t(String(D.PLANETS[sh.pn].name))), int(soi)]
 		if float(pred.get("exit_t", -1.0)) >= 0.0:
-			soi_txt += ", выход через %d с" % int(pred.exit_t)
+			soi_txt += T.t(", выход через %d с") % int(pred.exit_t)
 		lines.append(soi_txt)
 	else:
-		lines.append("Открытый космос")
+		lines.append(T.t("Открытый космос"))
 	if int(pred.get("enc", -1)) != -1:
-		lines.append("Сближение: %s через %d с" % [D.PLANETS[int(pred.enc)].name, int(pred.enc_t)])
+		lines.append(T.t("Сближение: %s через %d с") % [T.t(T.t(String(D.PLANETS[int(pred.enc)].name))), int(pred.enc_t)])
 	elif bool(pred.get("impact", false)):
-		lines.append("Траектория пересекает поверхность")
+		lines.append(T.t("Траектория пересекает поверхность"))
 	if kind == 2:
 		var cdl := fighter_cd - world_time
-		lines.append("Бластер (F): " + ("ГОТОВ" if cdl <= 0.0 else "перезарядка %d с" % int(ceil(cdl))))
+		lines.append(T.t("Бластер (F): ") + (T.t("ГОТОВ") if cdl <= 0.0 else T.t("перезарядка %d с") % int(ceil(cdl))))
 	elif kind == 3:
-		lines.append("F — подрыв (взрыв %d м). Врезался — тоже взрыв" % int(D.KAMIKAZE_R))
+		lines.append(T.t("F — подрыв (взрыв %d м). Врезался — тоже взрыв") % int(D.KAMIKAZE_R))
 	if kind == 2 or kind == 4:
-		lines.append("V — прицел (вид из носа)" + ("  [ВКЛ]" if sh.aim_mode else ""))
+		lines.append(T.t("V — прицел (вид из носа)") + (T.t("  [ВКЛ]") if sh.aim_mode else ""))
 	elif kind == 4:
 		var jcd := jet_cd - world_time
-		lines.append("Ракета (F): " + ("ГОТОВА" if jcd <= 0.0 else "перезарядка %d с" % int(ceil(jcd))) + ("" if sh.pn >= 0 else " (только у планеты)"))
+		lines.append(T.t("Ракета (F): ") + (T.t("ГОТОВА") if jcd <= 0.0 else T.t("перезарядка %d с") % int(ceil(jcd))) + ("" if sh.pn >= 0 else T.t(" (только у планеты)")))
 	lines.append("")
 	lines.append_array(_plan_lines())
 	ui.s_text.text = "\n".join(lines)
@@ -9166,11 +9166,11 @@ func _capture_hint() -> String:
 		if team == D.T_NEUTRAL:
 			if int(e[2]) >= 0:
 				cap_frac = float(e[3])
-				return "ЗАХВАТ БАЗЫ: %s %d%%%s" % [T.t(D.TEAM_NAMES[int(e[2])]), int(float(e[3]) * 100.0),
-					"" if d < D.CAPTURE_RADIUS else "  (подойди ближе к ядру)"]
-			return "Нейтральная база: встань у ядра (ближе %d м), чтобы захватить" % int(D.CAPTURE_RADIUS)
+				return T.t("ЗАХВАТ БАЗЫ: %s %d%%%s") % [T.t(D.TEAM_NAMES[int(e[2])]), int(float(e[3]) * 100.0),
+					"" if d < D.CAPTURE_RADIUS else T.t("  (подойди ближе к ядру)")]
+			return T.t("Нейтральная база: встань у ядра (ближе %d м), чтобы захватить") % int(D.CAPTURE_RADIUS)
 		cap_frac = float(e[4])
-		return "Вражеская база: разрушь ядро — оно станет нейтральным"
+		return T.t("Вражеская база: разрушь ядро — оно станет нейтральным")
 	return ""
 
 
@@ -9185,7 +9185,7 @@ func _build_help() -> Control:
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	lbl.add_theme_font_size_override("font_size", 18)
-	lbl.text = """УПРАВЛЕНИЕ
+	lbl.text = T.t("""УПРАВЛЕНИЕ
 
 Ходьба                      WASD
 Прыжок / бег                Space / Shift
@@ -9219,7 +9219,7 @@ Ctrl + рамка или щелчок — выделить, 1 агрессия, 
 зелёный — работает     жёлтый — мало энергии
 красный — стоит        серый — ждёт сырьё / темно
 
-H — закрыть"""
+H — закрыть""")
 	bg.add_child(lbl)
 	return bg
 
@@ -9249,7 +9249,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif kp.keycode == KEY_F and piloting.kind == 2:
 				_fighter_fire()
 			elif kp.keycode == KEY_F and piloting.kind == 3:
-				on_ship_crash(piloting, false, "РАКЕТА ПОДОРВАНА")
+				on_ship_crash(piloting, false, T.t("РАКЕТА ПОДОРВАНА"))
 			elif kp.keycode == KEY_F and piloting.kind == 4:
 				_jet_fire()
 			elif (kp.keycode == KEY_L or kp.keycode == KEY_U) and int(D.SHIP_KINDS[piloting.kind].cargo) > 0 and piloting.landed:
@@ -9271,7 +9271,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					on_ship_crash(piloting, true)
 				else:
 					destruct_armed = now + 2.0
-					big_msg.text = "САМОУНИЧТОЖЕНИЕ?\nнажми Backspace ещё раз"
+					big_msg.text = T.t("САМОУНИЧТОЖЕНИЕ?\nнажми Backspace ещё раз")
 					get_tree().create_timer(2.0).timeout.connect(_clear_msg)
 			elif kp.keycode == KEY_T:
 				_cycle_target()
@@ -9488,28 +9488,28 @@ func _unit_info(k: int) -> Array:
 	var lim := ""
 	if unit_stat.size() > my_team and my_team >= 0:
 		var nk := D.UNIT_NAMES.size()
-		lim = "   |   Сейчас: %d / %d" % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + nk])]
+		lim = T.t("   |   Сейчас: %d / %d") % [int(unit_stat[my_team][k]), int(unit_stat[my_team][k + nk])]
 	var desc := ""
 	if k == D.U_DRONE:
-		desc = "очень быстрый, таранит цель: −25% её прочности, сам погибает"
+		desc = T.t("очень быстрый, таранит цель: −25% её прочности, сам погибает")
 	else:
 		var dps := int(float(st.dmg) * 10.0 / maxf(float(st.cd), 1.0))
-		desc = "%d прочности, бьёт на %d клеток, %d урона/с" % [int(st.hp), int(float(st.range) / D.CELL_M), dps]
-	return [T.t(D.UNIT_NAMES[k]), desc, "Цена: " + _cost_dict_text(D.UNIT_RECIPES[k]),
-		"Лимит: %d на каждое ядро%s" % [int(D.UNIT_LIMIT[k]), lim]]
+		desc = T.t("%d прочности, бьёт на %d клеток, %d урона/с") % [int(st.hp), int(float(st.range) / D.CELL_M), dps]
+	return [T.t(D.UNIT_NAMES[k]), desc, T.t("Цена: ") + _cost_dict_text(D.UNIT_RECIPES[k]),
+		T.t("Лимит: %d на каждое ядро%s") % [int(D.UNIT_LIMIT[k]), lim]]
 
 
 func _ship_info(k: int) -> Array:
 	var sk: Dictionary = D.SHIP_KINDS[k]
 	var dv := _ship_dv(float(sk.tank), k)
-	var extra := "мест для юнитов: %d (танк и дрон — 1, мех — 4)" % int(sk.cargo) if int(sk.cargo) > 0 else "1 игрок"
+	var extra := T.t("мест для юнитов: %d (танк и дрон — 1, мех — 4)") % int(sk.cargo) if int(sk.cargo) > 0 else T.t("1 игрок")
 	if k == 2:
-		extra = "уникальное топливо, бластер (F) на %d м раз в %d с, берёт 2 уникальных меха" % [int(D.FIGHTER_RANGE), int(D.FIGHTER_CD)]
+		extra = T.t("уникальное топливо, бластер (F) на %d м раз в %d с, берёт 2 уникальных меха") % [int(D.FIGHTER_RANGE), int(D.FIGHTER_CD)]
 	elif k == 3:
-		extra = "пилотируемая ракета: врезалась или F — взрыв радиусом %d м, %d урона" % [int(D.KAMIKAZE_R), D.KAMIKAZE_DMG]
+		extra = T.t("пилотируемая ракета: врезалась или F — взрыв радиусом %d м, %d урона") % [int(D.KAMIKAZE_R), D.KAMIKAZE_DMG]
 	elif k == 4:
-		extra = "разрывная ракета (F) раз в минуту: взрыв %d м, %d урона" % [int(D.JET_MISSILE_R), D.JET_MISSILE_DMG]
-	return [T.t(String(sk.name)), "Δv полного бака %d м/с, %s" % [int(dv), extra], "Цена: " + _cost_dict_text(D.SHIP_COSTS[k])]
+		extra = T.t("разрывная ракета (F) раз в минуту: взрыв %d м, %d урона") % [int(D.JET_MISSILE_R), D.JET_MISSILE_DMG]
+	return [T.t(String(sk.name)), T.t("Δv полного бака %d м/с, %s") % [int(dv), extra], T.t("Цена: ") + _cost_dict_text(D.SHIP_COSTS[k])]
 
 
 func _draw_sel_box() -> void:
@@ -9522,17 +9522,17 @@ func _draw_sel_box() -> void:
 ## Строки для кругового меню: название, описание, цена, размер, энергия.
 func _type_info(t: int) -> Array:
 	if t == D.WEAPON:
-		return [T.t("Бластер"), "ЛКМ — огонь. Бьёт вражеских юнитов и игроков"]
-	var lines: Array = [T.t(D.NAMES[t]), D.DESC[t], "Цена: " + _cost_text(t)]
-	var extra := "Размер: %d %s" % [_size_of(t), "клетка" if _size_of(t) == 1 else "клетки" if _size_of(t) < 5 else "клеток"]
+		return [T.t("Бластер"), T.t("ЛКМ — огонь. Бьёт вражеских юнитов и игроков")]
+	var lines: Array = [T.t(D.NAMES[t]), T.t(D.DESC[t]), T.t("Цена: ") + _cost_text(t)]
+	var extra := T.t("Размер: %d %s") % [_size_of(t), T.t("клетка") if _size_of(t) == 1 else T.t("клетки") if _size_of(t) < 5 else T.t("клеток")]
 	if D.POWER_USE.has(t):
-		extra += "   |   Потребляет энергии: %d" % int(D.POWER_USE[t])
+		extra += T.t("   |   Потребляет энергии: %d") % int(D.POWER_USE[t])
 	elif t == D.SOLAR:
-		extra += "   |   Выработка: до %d (зависит от света)   |   Зона: %d колец" % [int(D.SOLAR_POWER), D.POWER_RING]
+		extra += T.t("   |   Выработка: до %d (зависит от света)   |   Зона: %d колец") % [int(D.SOLAR_POWER), D.POWER_RING]
 	elif t == D.COAL_PLANT:
-		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.COAL_POWER), D.POWER_RING]
+		extra += T.t("   |   Выработка: %d   |   Зона: %d колец") % [int(D.COAL_POWER), D.POWER_RING]
 	elif t == D.NUCLEAR:
-		extra += "   |   Выработка: %d   |   Зона: %d колец" % [int(D.NUCLEAR_POWER), D.POWER_RING]
+		extra += T.t("   |   Выработка: %d   |   Зона: %d колец") % [int(D.NUCLEAR_POWER), D.POWER_RING]
 	lines.append(extra)
 	return lines
 
@@ -9587,6 +9587,6 @@ func _show_over(winner: int) -> void:
 	if big_msg == null:
 		return
 	if winner == my_team:
-		big_msg.text = "ПОБЕДА\nядро противника уничтожено"
+		big_msg.text = T.t("ПОБЕДА\nядро противника уничтожено")
 	else:
-		big_msg.text = "ПОРАЖЕНИЕ\nтвоё ядро уничтожено"
+		big_msg.text = T.t("ПОРАЖЕНИЕ\nтвоё ядро уничтожено")

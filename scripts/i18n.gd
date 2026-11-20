@@ -6,7 +6,28 @@ const LANGS := [["ru", "Русский"], ["en", "English"], ["es", "Español"],
 
 static var lang := "ru"
 
+# остальные строки интерфейса (подсказки, состояния, описания, справка) — по файлу на язык
+static var _extra_cache := {}
+const EXTRA := {
+	"en": preload("res://scripts/lang/en.gd"),
+	"es": preload("res://scripts/lang/es.gd"),
+	"pt": preload("res://scripts/lang/pt.gd"),
+	"fr": preload("res://scripts/lang/fr.gd"),
+	"de": preload("res://scripts/lang/de.gd"),
+	"it": preload("res://scripts/lang/it.gd"),
+	"pl": preload("res://scripts/lang/pl.gd"),
+	"uk": preload("res://scripts/lang/uk.gd"),
+	"tr": preload("res://scripts/lang/tr.gd"),
+	"ar": preload("res://scripts/lang/ar.gd"),
+	"hi": preload("res://scripts/lang/hi.gd"),
+	"zh": preload("res://scripts/lang/zh.gd"),
+	"ja": preload("res://scripts/lang/ja.gd"),
+	"ko": preload("res://scripts/lang/ko.gd"),
+}
+
 const DATA := {
+	"Kepler-186f (синие)": ["Kepler-186f (Blue)", "Kepler-186f (Azules)", "Kepler-186f (Azuis)", "Kepler-186f (Bleus)", "Kepler-186f (Blau)", "Kepler-186f (Blu)", "Kepler-186f (Niebiescy)", "Kepler-186f (Сині)", "Kepler-186f (Mavi)", "Kepler-186f (الأزرق)", "Kepler-186f (नीले)", "Kepler-186f (蓝队)", "Kepler-186f (青)", "Kepler-186f (블루)"],
+	"Kepler-62f (красные)": ["Kepler-62f (Red)", "Kepler-62f (Rojos)", "Kepler-62f (Vermelhos)", "Kepler-62f (Rouges)", "Kepler-62f (Rot)", "Kepler-62f (Rossi)", "Kepler-62f (Czerwoni)", "Kepler-62f (Червоні)", "Kepler-62f (Kırmızı)", "Kepler-62f (الأحمر)", "Kepler-62f (लाल)", "Kepler-62f (红队)", "Kepler-62f (赤)", "Kepler-62f (레드)"],
 	"Локальная игра": ["Local game", "Partida local", "Jogo local", "Partie locale", "Lokales Spiel", "Partita locale", "Gra lokalna", "Локальна гра", "Yerel oyun", "لعبة محلية", "स्थानीय खेल", "本地游戏", "ローカルゲーム", "로컬 게임"],
 	"Локальный мультиплеер": ["Local multiplayer", "Multijugador local", "Multijogador local", "Multijoueur local", "Lokaler Mehrspieler", "Multigiocatore locale", "Lokalna gra wieloosobowa", "Локальна мультиплеєрна гра", "Yerel çok oyunculu", "لعب جماعي محلي", "स्थानीय मल्टीप्लेयर", "本地多人", "ローカル対戦", "로컬 멀티플레이"],
 	"Список серверов": ["Server list", "Lista de servidores", "Lista de servidores", "Liste des serveurs", "Serverliste", "Elenco server", "Lista serwerów", "Список серверів", "Sunucu listesi", "قائمة الخوادم", "सर्वर सूची", "服务器列表", "サーバー一覧", "서버 목록"],
@@ -132,8 +153,14 @@ const DATA := {
 
 
 static func t(s: String) -> String:
-	if lang == "ru" or not DATA.has(s):
+	if lang == "ru":
 		return s
+	if not DATA.has(s):
+		if not _extra_cache.has(lang):
+			var ex = EXTRA.get(lang)
+			_extra_cache[lang] = (ex as Script).get_script_constant_map().get("D", {}) if ex != null else {}
+		var dd: Dictionary = _extra_cache[lang]
+		return String(dd.get(s, s))
 	var i := -1
 	for j in LANGS.size():
 		if LANGS[j][0] == lang:

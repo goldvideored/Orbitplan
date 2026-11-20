@@ -1,4 +1,5 @@
 extends Control
+const T = preload("res://scripts/i18n.gd")
 ## Навбол внизу экрана: шар-авиагоризонт + маркеры (по движению, против движения,
 ## нормаль, антинормаль, радиально наружу/внутрь), автопилот ориентации и дроссель.
 
@@ -92,14 +93,14 @@ func draw_over(c: Control) -> void:
 	c.draw_rect(bar, Color(0, 0, 0, 0.6))
 	var hgt := bar.size.y * throttle
 	c.draw_rect(Rect2(bar.position.x, bar.end.y - hgt, bar.size.x, hgt), Color(1.0, 0.55, 0.2))
-	c.draw_string(font, Vector2(60, bar.end.y + 2), "Тяга %d%%" % int(throttle * 100.0),
+	c.draw_string(font, Vector2(60, bar.end.y + 2), T.t("Тяга %d%%") % int(throttle * 100.0),
 			HORIZONTAL_ALIGNMENT_CENTER, 90, 14, Color.WHITE)
 	# автопилот ориентации: клавиши 1–7
 	var x0 := 2.0 * R + 160.0
-	c.draw_string(font, Vector2(x0, 14), "Автопилот:", HORIZONTAL_ALIGNMENT_LEFT, 150, 14, Color(1, 1, 1, 0.7))
+	c.draw_string(font, Vector2(x0, 14), T.t("Автопилот:"), HORIZONTAL_ALIGNMENT_LEFT, 150, 14, Color(1, 1, 1, 0.7))
 	for i in SAS_NAMES.size():
 		var on := i == sas_mode
-		c.draw_string(font, Vector2(x0, 34 + i * 20), "%d  %s" % [i + 1, SAS_NAMES[i]],
+		c.draw_string(font, Vector2(x0, 34 + i * 20), "%d  %s" % [i + 1, T.t(SAS_NAMES[i])],
 				HORIZONTAL_ALIGNMENT_LEFT, 160, 14, Color(0.4, 1.0, 0.5) if on else Color(1, 1, 1, 0.6))
 
 
