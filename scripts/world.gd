@@ -1638,11 +1638,13 @@ func _sim_tick() -> void:
 		var root: int = power_root.get(b.id, b.id)
 		if D.GENERATORS.has(t):
 			b.pout = out
-			prod[team] += out
+			if team < 2:
+				prod[team] += out
 			gprod[root] = float(gprod.get(root, 0.0)) + out
 		if D.POWER_USE.has(t) and _wants_power(b):
 			var pu: float = float(D.POWER_USE[t]) * float(D.UPG_POWER[int(b.lvl) - 1])
-			demand[team] += pu
+			if team < 2:   # у нейтралов (ремонтные башни крепостей) — своё питание, в счёт команд не идёт
+				demand[team] += pu
 			gdem[root] = float(gdem.get(root, 0.0)) + pu
 
 	# аккумуляторы: излишек сети заряжает их, нехватку они покрывают
@@ -8599,6 +8601,41 @@ func _build_panel(layer: CanvasLayer) -> void:
 	ui.nav_label = mlab
 	ui.nav_bar = mbar
 
+	# --- пауза (Esc): продолжить или выйти в главное меню
+	var pp := PanelContainer.new()
+	var psb := StyleBoxFlat.new()
+	psb.bg_color = Color(0.04, 0.05, 0.09, 0.9)
+	psb.border_color = Color(0.35, 0.6, 1.0, 0.5)
+	psb.set_border_width_all(2)
+	psb.set_corner_radius_all(6)
+	psb.set_content_margin_all(18)
+	pp.add_theme_stylebox_override("panel", psb)
+	pp.anchor_left = 0.5
+	pp.anchor_right = 0.5
+	pp.anchor_top = 0.5
+	pp.anchor_bottom = 0.5
+	pp.offset_left = -170
+	pp.offset_right = 170
+	pp.offset_top = -90
+	pp.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	pp.visible = false
+	layer.add_child(pp)
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 10)
+	pp.add_child(pv)
+	var ptl := _ui_label(26, Color(1, 1, 1))
+	ptl.text = T.t("Пауза")
+	ptl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	pv.add_child(ptl)
+	for e in [[T.t("Продолжить"), _toggle_pause], [T.t("Выйти в главное меню"), _quit_to_menu]]:
+		var btn := Button.new()
+		btn.text = e[0]
+		btn.focus_mode = Control.FOCUS_NONE
+		btn.add_theme_font_size_override("font_size", 20)
+		btn.pressed.connect(e[1])
+		pv.add_child(btn)
+	ui.pause = pp
+
 	# --- гибель: выбор базы для возрождения
 	var dp := PanelContainer.new()
 	var dsb := StyleBoxFlat.new()
@@ -8650,6 +8687,22 @@ func _build_panel(layer: CanvasLayer) -> void:
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	layer.add_child(hint)
 	ui.hint = hint
+
+
+## Esc: меню паузы (игра идёт дальше — это мультиплеер), мышь освобождается.
+func _toggle_pause() -> void:
+	if ui.is_empty():
+		return
+	var pp: Control = ui.pause
+	pp.visible = not pp.visible
+	if pp.visible:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif fps_mode and (player == null or not player.dead):
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _quit_to_menu() -> void:
+	Net.leave()
 
 
 ## Мои базы для возрождения: главная первой, потом по планетам.
@@ -9230,7 +9283,7 @@ func _unhandled_input(event: InputEvent) -> void:
 					map_mode = 2 if map_mode == 0 else 0
 				map_zoom = 1.0
 			elif kp.keycode == KEY_ESCAPE:
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+				_toggle_pause()
 			elif kp.keycode == KEY_H:
 				help_panel.visible = not help_panel.visible
 		var mbp := event as InputEventMouseButton
@@ -9425,7 +9478,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_TAB:
 				_set_fps(not fps_mode)
 			KEY_ESCAPE:
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+				_toggle_pause()
 			KEY_H:
 				help_panel.visible = not help_panel.visible
 

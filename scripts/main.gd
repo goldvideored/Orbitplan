@@ -19,6 +19,7 @@ var ip_edit: LineEdit
 var port_edit: LineEdit
 var status_lbl: Label
 var settings_box: VBoxContainer
+var settings_scroll: ScrollContainer
 var cur_box := "main"   # какой экран открыт (после смены языка меню пересобирается)
 
 
@@ -178,11 +179,23 @@ func _build_menu() -> void:
 	_button(I18n.t("Назад"), stub_box, _on_back)
 
 	# настройки: язык (планета-глобус), полный экран, чувствительность мыши
+	# прокручиваемая панель: глобус большой, на маленьком экране всё не влезает
+	settings_scroll = ScrollContainer.new()
+	settings_scroll.anchor_left = 0.2
+	settings_scroll.anchor_right = 0.2
+	settings_scroll.anchor_top = 0.0
+	settings_scroll.anchor_bottom = 1.0
+	settings_scroll.offset_left = -10
+	settings_scroll.offset_right = 470
+	settings_scroll.offset_top = 175
+	settings_scroll.offset_bottom = -60
+	settings_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	settings_scroll.visible = false
+	menu.add_child(settings_scroll)
 	settings_box = VBoxContainer.new()
 	settings_box.custom_minimum_size = Vector2(440, 0)
 	settings_box.add_theme_constant_override("separation", 8)
-	settings_box.visible = false
-	holder.add_child(settings_box)
+	settings_scroll.add_child(settings_box)
 	settings_box.add_child(_label(I18n.t("Настройки"), 26))
 	settings_box.add_child(_label(I18n.t("Язык") + ": " + I18n.lang_name(I18n.lang), 18, Color(1.0, 0.85, 0.4)))
 	var hint := _label(I18n.t("Нажми на страну, чтобы выбрать язык. Тяни — крутить планету."), 13, Color(0.8, 0.85, 0.9))
@@ -276,8 +289,9 @@ func _on_quit() -> void:
 
 
 func _show(box: Control) -> void:
-	for b in [main_box, mp_box, stub_box, settings_box]:
+	for b in [main_box, mp_box, stub_box]:
 		(b as Control).visible = b == box
+	settings_scroll.visible = box == settings_box
 	status_lbl.text = ""
 
 

@@ -140,6 +140,20 @@ func _on_failed() -> void:
 	status.emit("Не удалось подключиться")
 
 
+## Выйти из игры в главное меню: закрыть сеть, убрать мир, перезапустить сцену меню.
+func leave() -> void:
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if world:
+		world.queue_free()
+		world = null
+	if multiplayer.multiplayer_peer:
+		multiplayer.multiplayer_peer.close()
+	multiplayer.multiplayer_peer = null
+	peer_team.clear()
+	ready_peers.clear()
+	get_tree().reload_current_scene()
+
+
 func _on_server_gone() -> void:
 	print("Сервер отключился")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE

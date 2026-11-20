@@ -77,8 +77,11 @@ func _ready() -> void:
 	cam.position = Vector3(0, 0, 30)
 	cam.fov = 45
 	vp.add_child(cam)
+	var tilt := Node3D.new()   # постоянный наклон оси; сам глобус только крутится вокруг своей оси
+	tilt.rotation.x = 0.3
+	vp.add_child(tilt)
 	globe = Node3D.new()
-	vp.add_child(globe)
+	tilt.add_child(globe)
 	planet = Planet.new()
 	planet.subdiv = 24
 	planet._build_geometry()
@@ -98,7 +101,7 @@ func _ready() -> void:
 	overlay.material_override = om
 	globe.add_child(overlay)
 	# повернуть к текущему языку
-	globe.rotation = Vector3(0.35, -0.3, 0)
+	globe.rotation.y = -0.3
 	label = Label.new()
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
@@ -218,11 +221,10 @@ func _gui_input(event: InputEvent) -> void:
 	if mm:
 		if drag:
 			moved += mm.relative.length()
-			globe.rotate_y(mm.relative.x * 0.01)
-			globe.rotation.x = clampf(globe.rotation.x + mm.relative.y * 0.01, -1.3, 1.3)
+			globe.rotation.y += mm.relative.x * 0.01   # только вращение вокруг оси, наклон постоянный
 		_set_hover(_pick(mm.position))
 
 
 func _process(delta: float) -> void:
 	if not drag:
-		globe.rotate_y(delta * 0.08)
+		globe.rotation.y += delta * 0.08
