@@ -789,7 +789,7 @@ func _build_tick(b: Dictionary) -> void:
 func _destroy(id: int, by_damage := false) -> void:
 	if by_damage and buildings.has(id):
 		var b: Dictionary = buildings[id]
-		_alert_team(int(b.team), T.t("Постройка разрушена: %s — %s") % [T.t(D.NAMES[b.type]), T.t(T.t(String(D.PLANETS[int(b.pn)].name)))],
+		_alert_team(int(b.team), T.t("Постройка разрушена: %s — %s") % [T.t(D.NAMES[b.type]), T.t(String(D.PLANETS[int(b.pn)].name))],
 			int(b.pn), 1)
 	_remove_building(id)
 	for peer in Net.ready_peers:
@@ -1910,7 +1910,7 @@ func server_ship_state(peer: int, id: int, pos: Vector3, quat: Quaternion, fuel:
 	if pn >= 0 and int(sh.pn) != pn:
 		# корабль вошёл в атмосферу планеты — тревога другой команде
 		_alert_team(1 - int(sh.team), T.t("⚠ Вражеский %s вошёл в атмосферу: %s") % [
-			String(T.t(String(D.SHIP_KINDS[int(sh.kind)].name))).to_lower(), T.t(T.t(String(D.PLANETS[pn].name)))], pn, 2)
+			String(T.t(String(D.SHIP_KINDS[int(sh.kind)].name))).to_lower(), T.t(String(D.PLANETS[pn].name))], pn, 2)
 	var dt_rep := now - float(sh.get("rep_t", now))
 	if dt_rep > 0.01 and int(sh.pn) == pn:
 		sh["vel"] = (pos - Vector3(sh.pos)) / dt_rep
@@ -2313,10 +2313,10 @@ func _dock_status(b: Dictionary) -> Array:
 	var c: Dictionary = couriers[int(b.team)]
 	if int(c.state) == 1:
 		var left := float(c.t0) + float(c.dur) - world_time
-		return [ST_OK, T.t("курьер летит на %s, прилёт через %d с, %s%s") % [T.t(T.t(String(D.PLANETS[int(c.to_pn)].name))), int(left), dtxt, rtxt]]
+		return [ST_OK, T.t("курьер летит на %s, прилёт через %d с, %s%s") % [T.t(String(D.PLANETS[int(c.to_pn)].name)), int(left), dtxt, rtxt]]
 	if int(c.at) != int(b.id):
 		var opn: int = int(buildings[int(c.at)].pn) if buildings.has(int(c.at)) else 0
-		return [ST_IDLE, T.t("курьер в другом порту (%s), %s%s") % [T.t(T.t(String(D.PLANETS[opn].name))), dtxt, rtxt]]
+		return [ST_IDLE, T.t("курьер в другом порту (%s), %s%s") % [T.t(String(D.PLANETS[opn].name)), dtxt, rtxt]]
 	if bool(c.unload):
 		return [ST_OK, T.t("курьер выгружается: осталось %d%s") % [_cargo_total(c), rtxt]]
 	if int(c.fuel) < D.COURIER_FUEL:
@@ -4359,7 +4359,7 @@ func _build_space() -> void:
 		ball.material_override = moon_mat
 		node.add_child(ball)
 		var lbl := Label3D.new()
-		lbl.text = T.t(T.t(String(D.PLANETS[j].name)))
+		lbl.text = T.t(String(D.PLANETS[j].name))
 		lbl.modulate = PLANET_COLORS[j]
 		lbl.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		lbl.fixed_size = true
@@ -6987,7 +6987,7 @@ func _plan_lines() -> PackedStringArray:
 	if nav_target < 0:
 		out.append(T.t("T — выбрать планету для перелёта"))
 		return out
-	out.append(T.t("ЦЕЛЬ: %s   (T — сменить)") % T.t(T.t(String(D.PLANETS[nav_target].name))))
+	out.append(T.t("ЦЕЛЬ: %s   (T — сменить)") % T.t(String(D.PLANETS[nav_target].name)))
 	var hit := int(pred.get("enc", -1)) == nav_target
 	if plan.has("space"):
 		if hit:
@@ -7035,7 +7035,7 @@ func _draw_trajectories() -> void:
 	enc_label.visible = pred.has("enc_pos")
 	if enc_label.visible:
 		enc_label.position = pred.enc_pos
-		enc_label.text = T.t("◯ %s при встрече") % T.t(T.t(String(D.PLANETS[int(pred.enc)].name)))
+		enc_label.text = T.t("◯ %s при встрече") % T.t(String(D.PLANETS[int(pred.enc)].name))
 
 
 ## Линия по точкам; после split — другим цветом (участок у планеты, к которой летим).
@@ -8746,7 +8746,7 @@ func _fill_death_bases() -> void:
 	for i in mini(cores.size(), 9):
 		var c: Dictionary = cores[i]
 		var btn := Button.new()
-		btn.text = "%d   %s%s" % [i + 1, T.t(T.t(String(D.PLANETS[int(c.pn)].name))), T.t("  · главная") if c.main else ""]
+		btn.text = "%d   %s%s" % [i + 1, T.t(String(D.PLANETS[int(c.pn)].name)), T.t("  · главная") if c.main else ""]
 		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		btn.focus_mode = Control.FOCUS_NONE
 		btn.add_theme_font_size_override("font_size", 16)
@@ -9107,14 +9107,14 @@ func _update_ship_panel() -> void:
 	else:
 		lines.append(T.t("Суборбита — подними перицентр выше 5 м"))
 	if sh.pn >= 0:
-		var soi_txt := T.t("%s, граница %d м") % [T.t(T.t(String(D.PLANETS[sh.pn].name))), int(soi)]
+		var soi_txt := T.t("%s, граница %d м") % [T.t(String(D.PLANETS[sh.pn].name)), int(soi)]
 		if float(pred.get("exit_t", -1.0)) >= 0.0:
 			soi_txt += T.t(", выход через %d с") % int(pred.exit_t)
 		lines.append(soi_txt)
 	else:
 		lines.append(T.t("Открытый космос"))
 	if int(pred.get("enc", -1)) != -1:
-		lines.append(T.t("Сближение: %s через %d с") % [T.t(T.t(String(D.PLANETS[int(pred.enc)].name))), int(pred.enc_t)])
+		lines.append(T.t("Сближение: %s через %d с") % [T.t(String(D.PLANETS[int(pred.enc)].name)), int(pred.enc_t)])
 	elif bool(pred.get("impact", false)):
 		lines.append(T.t("Траектория пересекает поверхность"))
 	if kind == 2:
